@@ -11,12 +11,12 @@ import com.stash.core.data.repository.MusicRepository
 import com.stash.core.data.sync.toDisplayStatus
 import com.stash.core.media.PlayerRepository
 import com.stash.core.model.MusicSource
-import com.stash.data.download.files.LibrarySizeBreakdown
-import com.stash.data.download.files.LibrarySizeHolder
 import com.stash.core.model.Playlist
 import com.stash.core.model.PlaylistType
 import com.stash.core.model.SyncDisplayStatus
 import com.stash.core.model.Track
+import com.stash.data.download.files.LibrarySizeBreakdown
+import com.stash.data.download.files.LibrarySizeHolder
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -72,10 +72,10 @@ class HomeViewModel @Inject constructor(
      * Combines the Room-backed data flows + the disk-walked library size
      * into a single intermediate holder. The DB column `file_size_bytes`
      * is bypassed for the Storage display because legacy libraries have it
-     * stuck at 0 for thousands of rows. [libraryDiskSizeFlow] always
-     * reflects disk truth via [FileOrganizer.computeMusicLibrarySize],
-     * which is storage-mode-aware (internal File walk OR SAF DocumentFile
-     * traversal).
+     * stuck at 0 for thousands of rows. [librarySizeHolder] reflects disk
+     * truth via the shared [LibrarySizeHolder] singleton (storage-mode-aware:
+     * internal File walk OR SAF DocumentFile traversal). See that class for
+     * lifecycle and walk-failure semantics.
      */
     private val musicDataFlow = combine(
         musicRepository.getAllPlaylists(),
