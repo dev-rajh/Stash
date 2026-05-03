@@ -17,14 +17,14 @@ Stash is an offline-first Android music player that syncs your liked songs, play
 - **Offline everything** — tracks download as high-quality FLAC audio, playable without internet
 - **Bulletproof matching** — finds the right version of tracks 99% of the time, not some random live recording or cover
 - **Custom playlists** — create your own playlists and save tracks to them from anywhere.
-- **Spotify sync preferences** — choose exactly which playlists, liked songs, daily mixes, and discovery mixes to sync. Individual toggles for each. Don't want Daily Mix 3? Turn it off.
+- **Spotify & YT sync preferences** — choose exactly which playlists, liked songs, daily mixes, and discovery mixes to sync. Individual toggles for each. Don't want Daily Mix 3? Turn it off.
 - **Expanded Spotify mix detection** — Release Radar, Discover Weekly, On Repeat, Daylist, Repeat Rewind, Time Capsule, and Daily Mixes 1-6 are all automatically detected when available. Each gets its own toggle.
 - **Refresh vs Accumulate sync modes** — mixes can either replace their contents each sync (Refresh) or stack new tracks on top of what's already there (Accumulate). Your call.
 - **Parallel downloads** — 8 simultaneous tracks. Background sync runs as a foreground service so it actually finishes with the phone locked.
-- **High-res album art** —
+- **High-res album art**
 - **Automatic update notifications** — checks GitHub for new releases daily and notifies you when one is available.
 - **Full equalizer** — 5-band EQ with presets, bass boost, and virtualizer
-- **Spotify sign-in built in** — just log into Spotify inside the app, no cookie hunting required
+- **Spotify sign-in built in** — just log into Spotify inside the app
 - **Private by design** — credentials encrypted with AES-256-GCM, no servers, no telemetry, nothing leaves your phone
 - **Free and open source** — no subscriptions, no ads, GPL-3.0
 
