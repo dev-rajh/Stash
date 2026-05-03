@@ -360,6 +360,37 @@ interface TrackDao {
     )
     suspend fun getRowsNeedingFormatBackfill(): List<TrackBackfillRow>
 
+    /**
+     * Returns id + filePath for every downloaded track whose file_size_bytes
+     * is still 0 — typically rows from legacy download paths that never
+     * populated the column. Used by the Library Health backfill: read the
+     * actual size from disk and write it back so the Home Storage stat is
+     * accurate. Mirror of [getRowsNeedingFormatBackfill].
+     */
+    @Query(
+        """
+        SELECT id, file_path AS filePath
+        FROM tracks
+        WHERE is_downloaded = 1
+          AND file_path IS NOT NULL
+          AND file_size_bytes = 0
+        """
+    )
+    suspend fun getRowsNeedingSizeBackfill(): List<TrackBackfillRow>
+
+    /**
+     * Updates a single row's file_size_bytes. Companion to [markAsDownloaded]
+     * for the backfill path that reads sizes from disk after the fact.
+     */
+    @Query(
+        """
+        UPDATE tracks
+        SET file_size_bytes = :sizeBytes
+        WHERE id = :trackId
+        """
+    )
+    suspend fun setFileSize(trackId: Long, sizeBytes: Long)
+
     // ── Play tracking ───────────────────────────────────────────────────
 
     /** Atomically increment [play_count] for the given track. */

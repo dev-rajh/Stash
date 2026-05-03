@@ -62,20 +62,29 @@ class LibraryHealthViewModel @Inject constructor(
         if (_state.value.backfill is BackfillStatus.Running) return
         viewModelScope.launch {
             withContext(Dispatchers.IO) {
-                val rows = runCatching { trackDao.getRowsNeedingFormatBackfill() }
+                // Two passes back-to-back. Pass 1 (format/bitrate) reads from
+                // MMR; pass 2 (file size) reads from disk via File.length().
+                // Both deduplicated at the DAO level — re-running is idempotent.
+                val formatRows = runCatching { trackDao.getRowsNeedingFormatBackfill() }
                     .onFailure { Log.w(TAG, "getRowsNeedingFormatBackfill failed", it) }
                     .getOrDefault(emptyList())
+                val sizeRows = runCatching { trackDao.getRowsNeedingSizeBackfill() }
+                    .onFailure { Log.w(TAG, "getRowsNeedingSizeBackfill failed", it) }
+                    .getOrDefault(emptyList())
 
-                if (rows.isEmpty()) {
+                val total = formatRows.size + sizeRows.size
+                if (total == 0) {
                     _state.update { it.copy(backfill = BackfillStatus.Done(processed = 0, total = 0)) }
                     return@withContext
                 }
 
-                _state.update { it.copy(backfill = BackfillStatus.Running(processed = 0, total = rows.size)) }
+                _state.update { it.copy(backfill = BackfillStatus.Running(processed = 0, total = total)) }
 
                 var processed = 0
                 var written = 0
-                for (row in rows) {
+
+                // ── Pass 1: format + bitrate via MMR ────────────────────
+                for (row in formatRows) {
                     val meta = metadataExtractor.extract(row.filePath)
                     // Mirror the v0.9.1 download-path fix: write the format
                     // whenever it's known, even when MMR couldn't compute a
@@ -99,13 +108,38 @@ class LibraryHealthViewModel @Inject constructor(
                     processed++
                     if (processed % 25 == 0) {
                         _state.update {
-                            it.copy(backfill = BackfillStatus.Running(processed = processed, total = rows.size))
+                            it.copy(backfill = BackfillStatus.Running(processed = processed, total = total))
                         }
                     }
                 }
 
-                Log.i(TAG, "backfill complete: processed=$processed written=$written")
-                _state.update { it.copy(backfill = BackfillStatus.Done(processed = written, total = rows.size)) }
+                // ── Pass 2: file_size_bytes via File.length() ───────────
+                // Many older download paths didn't populate this column.
+                // Without a real size SUM(file_size_bytes) understates the
+                // Home "Storage" stat — typically by ~70-80% when most of
+                // the library is legacy rows. Reading directly from disk
+                // is cheap (~ microseconds per file) and exact.
+                for (row in sizeRows) {
+                    val sizeBytes = runCatching { java.io.File(row.filePath).length() }
+                        .getOrDefault(0L)
+                    if (sizeBytes > 0) {
+                        runCatching {
+                            trackDao.setFileSize(trackId = row.id, sizeBytes = sizeBytes)
+                            written++
+                        }.onFailure { e ->
+                            Log.w(TAG, "setFileSize failed for trackId=${row.id}", e)
+                        }
+                    }
+                    processed++
+                    if (processed % 25 == 0) {
+                        _state.update {
+                            it.copy(backfill = BackfillStatus.Running(processed = processed, total = total))
+                        }
+                    }
+                }
+
+                Log.i(TAG, "backfill complete: processed=$processed written=$written (format=${formatRows.size}, size=${sizeRows.size})")
+                _state.update { it.copy(backfill = BackfillStatus.Done(processed = written, total = total)) }
             }
             refresh()
         }
