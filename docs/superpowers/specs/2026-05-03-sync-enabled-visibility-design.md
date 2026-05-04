@@ -106,18 +106,25 @@ If other ViewModels (NowPlaying, Search, etc.) consume `getAllPlaylists` for non
 
 ### 5. CUSTOM-playlist fix
 
-`MusicRepositoryImpl.kt:263, 289` — both `insertPlaylist` paths default `syncEnabled = false`. For locally-created playlists (`source = MusicSource.LOCAL`), this would make a brand-new empty playlist invisible until the user adds a downloaded track.
+`MusicRepositoryImpl.createPlaylist` (the user-facing "+ Playlist" path, around line 263) constructs a `PlaylistEntity` with `source = MusicSource.BOTH`, `type = CUSTOM`, and **`syncEnabled = false`** hardcoded. With the new Section 2 filter, a brand-new empty user-created playlist would be invisible on Home + Library until the user added a downloaded track — bad UX.
 
-**Fix:** in `insertPlaylist` (and `createPlaylist`, which calls into it), set `syncEnabled = true` when `playlist.source == MusicSource.LOCAL`. Concrete change in the data layer — no API change to callers.
+**Fix:** change `createPlaylist`'s entity constructor to `syncEnabled = true`. User-created playlists have no upstream sync toggle to make `false` meaningful; treating them as enabled-by-default matches the user's mental model.
 
 ```kotlin
-// In MusicRepositoryImpl.insertPlaylist (and createPlaylist):
-val entity = playlist.toEntity().copy(
-    syncEnabled = playlist.syncEnabled || playlist.source == MusicSource.LOCAL,
+// MusicRepositoryImpl.createPlaylist (line 256–266 today)
+val entity = PlaylistEntity(
+    name = name,
+    source = MusicSource.BOTH,
+    sourceId = "custom_${UUID.randomUUID()}",
+    type = PlaylistType.CUSTOM,
+    isActive = true,
+    syncEnabled = true,    // ← was false
 )
 ```
 
-The `||` keeps the existing `syncEnabled = true` callers (e.g. `StashMixRefreshWorker:198`) working as-is, only flipping the LOCAL fallback. STASH_MIX / DOWNLOADS_MIX system-owned playlists are not LOCAL-sourced and already explicitly set `syncEnabled = true`; no change for them.
+`insertPlaylist` (line 243–244) is a pass-through and does **not** need modification — callers control `syncEnabled` themselves and existing imports from `DiffWorker` correctly pass `false` for upstream-discovered playlists.
+
+`ensureDownloadsMixSeeded` (line 281–292) also has `syncEnabled = false`, but the DOWNLOADS_MIX is only seeded lazily on the first user download — so it always has at least one downloaded track when it's seeded, and the Section 2 EXISTS clause covers visibility. No change needed there.
 
 ### 6. Version bump
 

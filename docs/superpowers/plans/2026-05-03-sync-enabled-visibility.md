@@ -48,7 +48,7 @@ This plan touches **two files**.
 | File | Module | Why |
 |---|---|---|
 | `core/data/src/main/kotlin/com/stash/core/data/db/dao/PlaylistDao.kt` | `:core:data` | Tighter `WHERE` clause on `getAllVisible` query + KDoc rewrite. The query change is the entire user-facing fix. |
-| `core/data/src/main/kotlin/com/stash/core/data/repository/MusicRepositoryImpl.kt` | `:core:data` | Default `syncEnabled = true` for `MusicSource.LOCAL` playlists in `insertPlaylist` (and the public `createPlaylist` path that wraps it). Otherwise locally-created empty playlists would be invisible per the new filter. |
+| `core/data/src/main/kotlin/com/stash/core/data/repository/MusicRepositoryImpl.kt` | `:core:data` | Flip `createPlaylist` (the user-facing "+ Playlist" path) from `syncEnabled = false` to `syncEnabled = true`. User-created playlists have no upstream sync toggle, so they need to be visible on Home + Library immediately under the new filter. |
 | `app/build.gradle.kts` | `:app` | `versionCode 45 → 46`, `versionName "0.9.8" → "0.9.9"`. |
 
 Net change: ~25 lines of code (one SQL @Query body, one KDoc rewrite, one 2-line copy/edit in `insertPlaylist`, two version-bump constants).
@@ -57,7 +57,7 @@ Net change: ~25 lines of code (one SQL @Query body, one KDoc rewrite, one 2-line
 
 ---
 
-## Task 1: Update `getAllVisible` query + LOCAL playlist syncEnabled fix
+## Task 1: Update `getAllVisible` query + flip `createPlaylist` syncEnabled default
 
 **Files:**
 - Modify: `core/data/src/main/kotlin/com/stash/core/data/db/dao/PlaylistDao.kt` (lines ~106–121)
@@ -74,9 +74,13 @@ fun getAllVisible(): Flow<List<PlaylistEntity>>
 
 with a KDoc explicitly stating "Visibility is decoupled from the per-playlist `sync_enabled` toggle." That sentence is the design philosophy we are inverting.
 
-Open `MusicRepositoryImpl.kt` and read lines 240–295. Locate the `insertPlaylist`, `removePlaylist`, and `createPlaylist` methods. Verify `insertPlaylist` writes `syncEnabled = false` directly (around line 263) without checking the source.
+Open `MusicRepositoryImpl.kt` and read lines 240–295. Locate `insertPlaylist`, `removePlaylist`, `createPlaylist`, and `ensureDownloadsMixSeeded`. Expected shapes:
 
-If anything doesn't match, stop and report — the plan was written against this exact state.
+- **`insertPlaylist` (line 243–244):** simple pass-through — `playlistDao.insert(playlist.toEntity())`. No `syncEnabled` override. **Do not modify.** Callers (e.g. `DiffWorker`) correctly set `syncEnabled = false` for upstream-discovered playlists themselves.
+- **`createPlaylist` (line 256–266):** the user-facing "+ Playlist" path. Constructs a `PlaylistEntity` directly with `source = MusicSource.BOTH`, `type = PlaylistType.CUSTOM`, `syncEnabled = false`. **This is the line we change in Step 4.**
+- **`ensureDownloadsMixSeeded` (line 281–292):** seeds the DOWNLOADS_MIX system playlist with `syncEnabled = false`. **Do not modify** — DOWNLOADS_MIX is only created lazily on the first user download, so it always has ≥1 downloaded track and the Section 2 EXISTS clause covers visibility.
+
+If `createPlaylist` is at a different line or its body looks materially different (extra parameters, different source/type defaults), stop and report — the plan was written against this exact shape.
 
 - [ ] **Step 2: Update `getAllVisible` @Query**
 
@@ -138,27 +142,31 @@ Edit the KDoc immediately preceding the query (around lines 106–119). The curr
      */
 ```
 
-- [ ] **Step 4: LOCAL playlist syncEnabled fix in `insertPlaylist`**
+- [ ] **Step 4: Flip `createPlaylist` syncEnabled default to true**
 
-Edit `MusicRepositoryImpl.kt` `insertPlaylist`. The current code (around lines 243–245) likely looks like:
-
-```kotlin
-    override suspend fun insertPlaylist(playlist: Playlist): Long =
-        playlistDao.insert(playlist.toEntity().copy(syncEnabled = false))
-```
-
-(Or similar — read the exact current shape first.) **Update** the `.copy(...)` call so LOCAL-source playlists get `syncEnabled = true`, while preserving any explicit `true` from the caller:
+Edit `MusicRepositoryImpl.kt` `createPlaylist` (around lines 256–266). The current body is:
 
 ```kotlin
-    override suspend fun insertPlaylist(playlist: Playlist): Long {
-        val effectiveSyncEnabled = playlist.syncEnabled || playlist.source == MusicSource.LOCAL
-        return playlistDao.insert(playlist.toEntity().copy(syncEnabled = effectiveSyncEnabled))
+    override suspend fun createPlaylist(name: String): Long {
+        val entity = com.stash.core.data.db.entity.PlaylistEntity(
+            name = name,
+            source = com.stash.core.model.MusicSource.BOTH,
+            sourceId = "custom_${java.util.UUID.randomUUID()}",
+            type = com.stash.core.model.PlaylistType.CUSTOM,
+            isActive = true,
+            syncEnabled = false,
+        )
+        return playlistDao.insert(entity)
     }
 ```
 
-If `insertPlaylist` body is more complex than a single delegating expression, integrate the `effectiveSyncEnabled` line ahead of the existing entity-construction. Read the actual file to see the exact shape before pasting.
+**Change exactly one line:** `syncEnabled = false` → `syncEnabled = true`.
 
-If a separate `createPlaylist` exists in `MusicRepositoryImpl` (around line 289 per earlier grep) that ALSO sets `syncEnabled = false` directly, apply the same `||` fallback there. If it delegates to `insertPlaylist`, no second edit is needed.
+Rationale: this method is the user-facing "+ Playlist" path. User-created playlists have no upstream sync toggle, so `syncEnabled = false` was meaningless before — it just made the new empty playlist invisible under the Section 2 filter. Flipping to `true` makes the playlist appear immediately on Home + Library, matching the user's mental model.
+
+`insertPlaylist` (line 243–244) is a pass-through and stays as-is. `ensureDownloadsMixSeeded` (line 281–292) also stays as-is — the DOWNLOADS_MIX is only seeded on the first user download, so its EXISTS-clause visibility is already correct.
+
+No new imports needed (the file already references `com.stash.core.data.db.entity.PlaylistEntity` and `com.stash.core.model.MusicSource`).
 
 - [ ] **Step 5: Build the `:core:data` module**
 
@@ -197,8 +205,14 @@ track — preserves visibility into playlists the user previously
 consumed even after they turn sync off. A 'Delete & Block'-of-every-
 track collapses back to invisible automatically.
 
-LOCAL-source playlists now default to sync_enabled=true on creation
-since they have no upstream toggle to make 'sync off' meaningful.
+User-created CUSTOM playlists (the in-app '+ Playlist' button)
+now default to sync_enabled=true on creation. They have no upstream
+toggle to make 'sync off' meaningful, and the new filter would
+hide a brand-new empty playlist until the user added a downloaded
+track. createPlaylist line 263 flipped false → true; insertPlaylist
+and ensureDownloadsMixSeeded are unchanged (the former is a
+pass-through; the latter is only seeded when a download lands so
+its EXISTS-clause visibility is already correct).
 
 Pre-v0.9.9 design philosophy was 'visibility decoupled from sync,'
 which created the long-standing complaint that upstream Spotify/YouTube
@@ -443,5 +457,5 @@ Skip this step if you want to keep the worktree around for fixup commits — but
 - **Existing-user surprise.** v0.9.8 → v0.9.9 silently hides playlists where the user has sync off and no downloaded tracks. Acceptable per the spec — this is the requested fix. If a confused user thinks "where did Spotify Daily Mix 1 go?" the answer is "Sync tab → flip toggle on." Same silent-migration philosophy as v0.9.8's lossless flip.
 - **`EXISTS` performance.** For libraries up to ~10k tracks the cost is negligible (FK indexes). The escape hatch (denormalized `downloaded_track_count` column) is deferred unless a real complaint surfaces.
 - **Room SQL syntax error in the @Query.** Build-time validation catches this — Step 5 of Task 1 would fail with a clear SQL error pointing at the @Query string. Fix is mechanical.
-- **`MusicSource.LOCAL` import missing.** If `insertPlaylist` doesn't already import `com.stash.core.model.MusicSource`, the `playlist.source == MusicSource.LOCAL` comparison will fail to compile. Fix: add the import at the top of `MusicRepositoryImpl.kt`. Build error is mechanical to fix.
+- **`createPlaylist` body shape drift.** Plan was written against the exact 11-line body at `MusicRepositoryImpl.kt:256–266`. If the body has been refactored by a parallel branch (extra params, builder pattern, etc.), the one-line edit may not apply cleanly. Fix is mechanical — locate the literal `syncEnabled = false` line in `createPlaylist` and flip it.
 - **Rollback** — revert the merge commit on master + delete the tag (`git push --delete origin v0.9.9`). User's data is unaffected (no schema change, no destructive DataStore writes). Hidden playlists become visible again on the v0.9.8 fallback.
