@@ -133,6 +133,7 @@ interface PlaylistDao {
                   SELECT 1 FROM playlist_tracks pt
                   JOIN tracks t ON pt.track_id = t.id
                   WHERE pt.playlist_id = p.id
+                    AND pt.removed_at IS NULL
                     AND t.is_downloaded = 1
                     AND t.is_blacklisted = 0
               )
