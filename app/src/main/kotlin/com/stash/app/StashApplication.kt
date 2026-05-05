@@ -20,6 +20,7 @@ import com.stash.core.data.repository.MusicRepositoryImpl
 import com.stash.core.data.sync.SyncNotificationManager
 import com.stash.data.download.ytdlp.YtDlpManager
 import com.stash.core.data.sync.workers.ArtBackfillWorker
+import com.stash.core.data.sync.workers.AutoSaveScrobbler
 import com.stash.core.data.sync.workers.QualityInfoBackfillWorker
 import com.stash.core.data.sync.workers.StashDiscoveryWorker
 import com.stash.core.data.sync.workers.StashMixRefreshWorker
@@ -77,6 +78,9 @@ class StashApplication : Application(), Configuration.Provider {
 
     @Inject
     lateinit var youTubeHistoryScrobbler: YouTubeHistoryScrobbler
+
+    @Inject
+    lateinit var autoSaveScrobbler: AutoSaveScrobbler
 
     @Inject
     lateinit var stashMixRecipeDao: StashMixRecipeDao
@@ -194,6 +198,7 @@ class StashApplication : Application(), Configuration.Provider {
         listeningRecorder.start()
         lastFmScrobbler.start()
         youTubeHistoryScrobbler.start()
+        autoSaveScrobbler.start()
     }
 
     /**

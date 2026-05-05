@@ -105,6 +105,19 @@ interface ListeningEventDao {
     @Query("SELECT MAX(completed_at) FROM listening_events WHERE completed_at IS NOT NULL")
     fun observeMostRecentCompletion(): Flow<Long?>
 
+    /**
+     * v0.9.13: Lookup helper for AutoSaveScrobbler. The
+     * observeMostRecentCompletion Flow emits a timestamp, not a row
+     * id; we resolve to the row to read `track_id`. Returns null on
+     * race (timestamp may have moved by the time we query).
+     */
+    @Query("""
+        SELECT * FROM listening_events
+        WHERE completed_at = :completedAtMs
+        ORDER BY id DESC LIMIT 1
+    """)
+    suspend fun findByCompletedAt(completedAtMs: Long): ListeningEventEntity?
+
     /** Count of unscrobbled-to-YT events. Drives the Settings health badge. */
     @Query("SELECT COUNT(*) FROM listening_events WHERE yt_scrobbled = 0")
     fun pendingYtScrobbleCount(): Flow<Int>
