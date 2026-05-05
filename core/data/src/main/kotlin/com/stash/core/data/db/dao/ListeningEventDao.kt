@@ -108,8 +108,9 @@ interface ListeningEventDao {
     /**
      * v0.9.13: Lookup helper for AutoSaveScrobbler. The
      * observeMostRecentCompletion Flow emits a timestamp, not a row
-     * id; we resolve to the row to read `track_id`. Returns null on
-     * race (timestamp may have moved by the time we query).
+     * id; we resolve to the row to read `track_id`. Returns null if
+     * the matching row was deleted between Flow emit and this query
+     * (rare — orphan-cleanup running concurrently).
      */
     @Query("""
         SELECT * FROM listening_events

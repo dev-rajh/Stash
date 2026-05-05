@@ -11,6 +11,7 @@ import com.stash.core.data.social.Destination
 import com.stash.core.data.social.LikeDestinationDispatcher
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -56,7 +57,10 @@ class AutoSaveScrobbler @Inject constructor(
                 .distinctUntilChanged()
                 .collect { latestCompletedAt ->
                     runCatching { onNewCompletion(latestCompletedAt) }
-                        .onFailure { e -> Log.w(TAG, "drain failed: ${e.message}", e) }
+                        .onFailure { e ->
+                            if (e is CancellationException) throw e
+                            Log.w(TAG, "drain failed: ${e.message}", e)
+                        }
                 }
         }
     }
@@ -74,7 +78,7 @@ class AutoSaveScrobbler @Inject constructor(
         if (track.spotifySavedAt != null) return
 
         val threshold = likePreferences.autoSaveThresholdNow()
-        val sinceMs = System.currentTimeMillis() - 30L * 24 * 3600 * 1000
+        val sinceMs = System.currentTimeMillis() - LOOKBACK_WINDOW_MS
         val distinctDays = listeningEventDao.distinctDaysCompletedFor(track.id, sinceMs)
         if (distinctDays < threshold) {
             Log.d(TAG, "track ${track.id}: $distinctDays/$threshold days, skipping")
@@ -92,5 +96,7 @@ class AutoSaveScrobbler @Inject constructor(
 
     companion object {
         private const val TAG = "AutoSaveScrobbler"
+        /** Distinct-days threshold operates on plays from the last 30 days (UTC). */
+        private const val LOOKBACK_WINDOW_MS = 30L * 24 * 60 * 60 * 1000
     }
 }
