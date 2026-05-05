@@ -137,7 +137,6 @@ private fun DestinationRow(
  * timestamps.
  */
 data class LikeDestinationSheetState(
-    val stashVisible: Boolean = true,
     val spotifyVisible: Boolean,
     val ytVisible: Boolean,
     val stashChecked: Boolean,
