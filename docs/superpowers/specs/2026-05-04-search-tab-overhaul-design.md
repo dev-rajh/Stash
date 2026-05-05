@@ -218,7 +218,13 @@ class SearchDownloadCoordinator @Inject constructor(
         previewCache.getCachedSpans(cacheKey).forEach { span ->
             previewCache.startReadWrite(cacheKey, span.position, span.length).use { it.copyTo(tempFile) }
         }
-        val result = trackFinalizer.finalize(tempFile, track, match.format, match.coverArtUrl)
+        val result = trackFinalizer.finalize(
+            sourceFile = tempFile,
+            track = track,
+            format = match.format,
+            coverArtUrl = match.coverArtUrl,
+            origin = TrackFinalizer.Origin.SEARCH,
+        )
         previewCache.removeResource(cacheKey)
         return result
     }
@@ -231,7 +237,13 @@ class SearchDownloadCoordinator @Inject constructor(
             outputFile = tempFile,
         )
         val format = AudioFormat(codec = "opus", bitrateKbps = 0, sampleRateHz = 0, bitsPerSample = 0)
-        return trackFinalizer.finalize(tempFile, track, format, coverArtUrl = null)
+        return trackFinalizer.finalize(
+            sourceFile = tempFile,
+            track = track,
+            format = format,
+            coverArtUrl = null,
+            origin = TrackFinalizer.Origin.SEARCH,
+        )
     }
 }
 ```
@@ -290,15 +302,40 @@ Handles both "Track row already exists by `videoId` or `(canonical_title, canoni
 
 #### 3.5 Orphan-cleanup mitigation (search-origin only)
 
-The existing orphan-cleanup pass deletes downloaded tracks that have no `playlist_tracks` membership. Search-tab downloads currently fall into this trap (tracked in user memory `project_search_download_orphan_bug.md`). v0.9.12 fixes it inline as part of the search-download path, not a separate spec.
+The existing orphan-cleanup pass (`MusicRepositoryImpl.cleanOrphanedMixTracks` at line 486) deletes downloaded tracks that have no `playlist_tracks` membership. The infrastructure to exempt search-tab downloads **already exists**:
 
-Approach: when `TrackFinalizer.finalize(origin = SEARCH)` runs, after the Track row is inserted, link the track to a hidden playlist named `__saved__` (or whatever singleton the existing orphan-fix design specifies — implementer reads `project_search_download_orphan_bug.md` for the exact name during planning). The hidden playlist is created on first use; subsequent finalizes append to it. UI never displays it.
+- `PlaylistType.DOWNLOADS_MIX` is defined in `core/model/.../Playlist.kt` lines 50-57 with the comment: *"Protected system-owned playlist holding one-off user downloads from the Search tab and Artist Profile. Exactly one row per install, seeded at startup. Prevents `cleanOrphanedMixTracks` from deleting manually-downloaded tracks that would otherwise have no playlist membership. The Stash Mix engine ignores this type."*
+- `MusicRepository.ensureDownloadsMixSeeded(): Long` (impl at `MusicRepositoryImpl.kt:281`) — idempotent. First call inserts a `PlaylistEntity(name = "Your Downloads", sourceId = "stash_downloads_mix", type = DOWNLOADS_MIX)`; subsequent calls return the existing id.
+- `MusicRepository.linkTrackToDownloadsMix(trackId: Long)` (impl at `MusicRepositoryImpl.kt:294`) — idempotent. Calls `ensureDownloadsMixSeeded()`, checks `playlistDao.getCrossRef`, inserts `playlist_tracks` row if absent.
+- `StashApplication.onCreate` already calls `musicRepository.ensureDownloadsMixSeeded()` on every cold start (line ~106 — verify during planning), so the playlist exists before any download fires.
+- The current `TrackActionsDelegate.downloadTrack` already calls `linkTrackToDownloadsMix` at line 314. **The orphan-fix is shipped.** The v0.9.12 rewire must preserve this call.
 
-`PlaylistDao` gets one new method: `linkToSavedPlaylist(trackId: Long): Unit`. Idempotent — no-op if already linked.
+What v0.9.12 does:
+
+`TrackFinalizer.finalize(origin = Origin.SEARCH, ...)` calls `musicRepository.linkTrackToDownloadsMix(trackId)` after the Track row is inserted. `Origin.SYNC` skips it (sync downloads always have a real playlist membership via the playlist they're being synced from).
+
+**No new DAO method, no schema migration, no new playlist type.** The existing `MusicRepository.linkTrackToDownloadsMix` is the single integration point.
 
 #### 3.6 Sync refactor
 
-`DownloadManager.tryLosslessDownload` (currently at `data/download/.../DownloadManager.kt:274-361`) refactors to call `TrackFinalizer.finalize(origin = Origin.SYNC, ...)` for the post-fetch steps. Logic moved verbatim except for the new `origin` arg — no behavior change for sync (origin = SYNC skips the `linkToSavedPlaylist` call). Acceptance test 8 (sync regression) confirms.
+`DownloadManager.tryLosslessDownload` (currently at `data/download/.../DownloadManager.kt:274-361`) refactors to call `TrackFinalizer.finalize(origin = Origin.SYNC, ...)` for the post-fetch steps. Logic moved verbatim except for the new `origin` arg — no behavior change for sync (origin = SYNC skips the `linkTrackToDownloadsMix` call; sync downloads already have a real playlist membership via the playlist they're being synced from). Acceptance test 8 (sync regression) confirms.
+
+#### 3.7 What `TrackActionsDelegate.downloadTrack` becomes
+
+The current method (lines 227-283 of `TrackActionsDelegate.kt`) inlines: build YouTube URL, run yt-dlp, organize file, insert Track entity, call `linkTrackToDownloadsMix`. v0.9.12 replaces the entire body with one call:
+
+```kotlin
+fun downloadTrack(track: TrackItem) {
+    coroutineScope.launch {
+        searchDownloadCoordinator.download(track).collect { status ->
+            // Map SearchDownloadStatus → existing _downloadingIds / _downloadedIds
+            // / snackbar emissions. No new state shapes.
+        }
+    }
+}
+```
+
+The `linkTrackToDownloadsMix` call moves from this delegate into `TrackFinalizer.finalize(origin = SEARCH)`, so the same orphan-protection runs regardless of whether the download went via Qobuz or yt-dlp.
 
 ### 4. Prefetching
 
@@ -422,7 +459,7 @@ Cache lives at `<filesDir>/preview_cache/`. App-private; cleared on uninstall. N
 | Rate-limit pressure from prefetching all visible rows on artist profile open. | `Semaphore(4)` cap + AggregatorRateLimiter's 1/3s budget naturally serialize. Burst of 4, then ~3s/track. 30-track artist profile drains in ~90s; user's typical session uses far less. |
 | Wrong-codec download when user previews via yt-dlp then taps Download with Qobuz now reachable. | Cache key namespaces are distinct (`lossless:` vs `ytdlp:`). Lossless lookup misses; fresh fetch via Qobuz. Yt-dlp partial bytes evict via LRU. |
 | Coordinator's in-flight map leaks if a coroutine is canceled before completion. | `mutex.withLock { inFlight.remove(key) }` in a `try/finally` after await — see §3.2 implementation. |
-| **(#11) Search-tab downloads vanish on next launch via orphan cleanup** (existing v0.9.10/v0.9.11 bug per user memory). | `TrackFinalizer.finalize(origin = SEARCH)` calls `playlistDao.linkToSavedPlaylist(trackId)` to give every search-origin download a hidden-playlist membership. Orphan-cleanup pass already preserves any track with at least one playlist-tracks row. See §3.5. |
+| **(#11) Search-tab downloads vanish on next launch via orphan cleanup** (legacy bug fixed by the existing `DOWNLOADS_MIX` infrastructure; must be preserved across the v0.9.12 rewire). | `TrackFinalizer.finalize(origin = SEARCH)` calls existing `MusicRepository.linkTrackToDownloadsMix(trackId)` after Track row insert. The existing seeding (`StashApplication.onCreate` → `ensureDownloadsMixSeeded`), playlist type (`PlaylistType.DOWNLOADS_MIX`), and orphan-cleanup exemption stay untouched. See §3.5. |
 
 ## Testing
 
@@ -442,7 +479,7 @@ None added. Pattern follows project precedent (`DownloadManager`, `LosslessSourc
 8. **Sync regression check.** With lossless on, queue a sync run. Confirm tracks still download via the lossless path (refactored `TrackFinalizer` shared with search). Bit-depth/sample-rate columns populate as v0.9.11. No degradation in sync speed (~8.7 tracks/min baseline).
 9. **Album-batch download (if existing UI loops).** Open an album, tap "Download all" if present. Each track flows through `SearchDownloadCoordinator` independently. Concurrency limited by registry's rate limiter.
 10. **Wrong-version edge case.** Search for a track that has both a live and studio version on YouTube. Tap preview on the live row; confirm Qobuz match (if found) is rejected at confidence 0.65 if the live version's title has "(Live at X)" decoration the matcher can't reconcile. Falls through to yt-dlp. (If matcher still passes, log the issue for threshold tuning.)
-11. **Orphan-cleanup survival.** Download a track via search (no preview). Confirm the Track row has a `playlist_tracks` row linking it to the hidden `__saved__` playlist. Force-quit and relaunch the app; on next sync run, confirm the track is NOT deleted by the orphan-cleanup pass (it has a playlist membership). Library still shows the track.
+11. **Orphan-cleanup survival.** Download a track via search (no preview). Confirm a `playlist_tracks` row exists linking it to the existing "Your Downloads" playlist (`sourceId = "stash_downloads_mix"`, `type = DOWNLOADS_MIX`). Force-quit and relaunch the app; on next sync run, confirm the track is NOT deleted by `cleanOrphanedMixTracks`. Library still shows the track. Bonus check: confirm the "Your Downloads" playlist remains visible in Library tab as it does today (the `DOWNLOADS_MIX` type is shown by existing UI; we don't change visibility behavior).
 
 ## Out of scope
 
