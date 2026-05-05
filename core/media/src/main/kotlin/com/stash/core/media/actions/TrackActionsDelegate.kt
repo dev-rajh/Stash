@@ -7,6 +7,7 @@ import com.stash.core.data.db.dao.TrackDao
 import com.stash.core.data.repository.MusicRepository
 import com.stash.core.media.preview.PreviewPlayer
 import com.stash.core.media.preview.PreviewState
+import com.stash.core.media.preview.SearchPreviewMediaSource
 import com.stash.core.model.MusicSource
 import com.stash.core.model.Track
 import com.stash.core.model.TrackItem
@@ -50,6 +51,7 @@ import javax.inject.Inject
 @ViewModelScoped
 class TrackActionsDelegate @Inject constructor(
     private val previewPlayer: PreviewPlayer,
+    private val searchPreviewMediaSource: SearchPreviewMediaSource,
     private val previewUrlExtractor: PreviewUrlExtractor,
     private val previewUrlCache: PreviewUrlCache,
     private val downloadExecutor: DownloadExecutor,
@@ -118,18 +120,33 @@ class TrackActionsDelegate @Inject constructor(
         checkNotNull(boundScope) { "TrackActionsDelegate used before bindToScope" }
 
     /**
-     * Starts an audio preview for [videoId].
+     * Starts an audio preview for [track] using the v0.9.12 MediaSource-based
+     * happy path first, then falls back to the yt-dlp URL extractor on failure.
      *
-     * Hits the shared [PreviewUrlCache] first — if prefetcher already warmed
-     * the URL, playback starts immediately. Otherwise falls through to the
-     * full [PreviewUrlExtractor] race (InnerTube vs yt-dlp).
+     * ### Happy path (new in v0.9.12)
+     * [SearchPreviewMediaSource.create] resolves a Qobuz CDN URL (or yt-dlp
+     * fallback) and wraps it in a [CacheDataSource]-backed [MediaSource] so that
+     * bytes streamed during preview are reused by a subsequent download finalise
+     * step — avoiding a second full-file fetch.  [PreviewPlayer.play] consumes
+     * the [MediaSource] directly; no URL string is exposed to this layer.
      *
-     * The `lastPreviewVideoId` / `lastPreviewStartedAt` bookkeeping MUST be
-     * set BEFORE `playUrl` so a synchronous `onPlayerError` (which can fire
-     * for a malformed URL) still observes the correct "most recent preview"
-     * state.
+     * ### Error fallback (unchanged from pre-v0.9.12)
+     * If the happy path throws, we fall back to [previewUrlExtractor] +
+     * [PreviewUrlCache] + [PreviewPlayer.playUrl] — the same URL-only flow
+     * used before this rewrite.  [onPreviewError] also retains this fallback
+     * for ExoPlayer-level IO failures that fire after [play] returns.
+     *
+     * ### Bookkeeping
+     * [lastPreviewVideoId] / [lastPreviewStartedAt] are recorded BEFORE calling
+     * [play] so a synchronous [onPlayerError] (possible for malformed URLs)
+     * still observes the correct "most recent preview" state.
+     *
+     * @param track Full [TrackItem] so that [SearchPreviewMediaSource] can
+     *              perform artist+title matching for lossless-source selection.
      */
-    fun previewTrack(videoId: String) {
+    fun previewTrack(track: TrackItem) {
+        val videoId = track.videoId
+
         // Idempotency guard: if we're already playing — or loading — this same
         // videoId, do nothing. Prevents redundant stop+restart cycles from
         // phantom clicks, double-taps, or any future caller that fires the
@@ -144,30 +161,64 @@ class TrackActionsDelegate @Inject constructor(
             val t0 = System.currentTimeMillis()
             _previewLoadingId.value = videoId
             try {
-                val cacheHit = previewUrlCache[videoId] != null
-                android.util.Log.d("LATDIAG", "preview-start videoId=$videoId cache=$cacheHit")
-                val url = previewUrlCache[videoId]
-                    ?: previewUrlExtractor.extractStreamUrl(videoId).also {
-                        previewUrlCache[videoId] = it
-                    }
+                android.util.Log.d("LATDIAG", "preview-start videoId=$videoId via MediaSource")
+
+                // v0.9.12 happy path: build a CacheDataSource-wrapped MediaSource.
+                // create() is suspend; it resolves the upstream URL (Qobuz or yt-dlp)
+                // and constructs the source, but does NOT begin network I/O yet —
+                // that happens inside ExoPlayer once prepare() is called by play().
+                val mediaSource = searchPreviewMediaSource.create(track)
+
+                // Set bookkeeping BEFORE play() so a synchronous onPlayerError
+                // (which can fire for a malformed upstream URL before prepare()
+                // completes) still sees the correct "most recent preview" state
+                // and triggers the onPreviewError retry path correctly.
                 lastPreviewVideoId = videoId
                 lastPreviewStartedAt = SystemClock.elapsedRealtime()
-                previewPlayer.playUrl(videoId, url)
+
+                previewPlayer.play(videoId, mediaSource)
                 _previewLoadingId.value = null
+
                 android.util.Log.d(
                     "LATDIAG",
-                    "preview-play videoId=$videoId totalDt=${System.currentTimeMillis() - t0}ms cache=$cacheHit",
+                    "preview-play videoId=$videoId totalDt=${System.currentTimeMillis() - t0}ms via MediaSource",
                 )
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
-                Log.e(TAG, "Preview failed for videoId=$videoId", e)
+
+                // Happy-path failure: fall back to the URL-only extractor so the
+                // user still gets a preview even when the Qobuz proxy is unavailable.
+                Log.w(TAG, "MediaSource path failed for videoId=$videoId (${e.message}), falling back to URL extractor", e)
                 android.util.Log.d(
                     "LATDIAG",
-                    "preview-fail videoId=$videoId totalDt=${System.currentTimeMillis() - t0}ms err=${e.javaClass.simpleName}",
+                    "preview-mediasource-fail videoId=$videoId totalDt=${System.currentTimeMillis() - t0}ms err=${e.javaClass.simpleName}",
                 )
-                _previewLoadingId.value = null
-                _userMessages.emit("Couldn't load preview.")
-                previewPlayer.stop()
+
+                runCatching {
+                    val cacheHit = previewUrlCache[videoId] != null
+                    val url = previewUrlCache[videoId]
+                        ?: previewUrlExtractor.extractStreamUrl(videoId).also {
+                            previewUrlCache[videoId] = it
+                        }
+                    lastPreviewVideoId = videoId
+                    lastPreviewStartedAt = SystemClock.elapsedRealtime()
+                    previewPlayer.playUrl(videoId, url)
+                    _previewLoadingId.value = null
+                    android.util.Log.d(
+                        "LATDIAG",
+                        "preview-url-fallback-play videoId=$videoId cache=$cacheHit totalDt=${System.currentTimeMillis() - t0}ms",
+                    )
+                }.onFailure { retryError ->
+                    if (retryError is CancellationException) throw retryError
+                    Log.e(TAG, "URL-fallback preview also failed for videoId=$videoId", retryError)
+                    android.util.Log.d(
+                        "LATDIAG",
+                        "preview-fail videoId=$videoId totalDt=${System.currentTimeMillis() - t0}ms err=${retryError.javaClass.simpleName}",
+                    )
+                    _previewLoadingId.value = null
+                    _userMessages.emit("Couldn't load preview.")
+                    previewPlayer.stop()
+                }
             }
         }
     }
