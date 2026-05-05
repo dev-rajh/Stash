@@ -156,4 +156,21 @@ data class TrackEntity(
      */
     @ColumnInfo(name = "yt_canonical_video_id")
     val ytCanonicalVideoId: String? = null,
+
+    /**
+     * Bit-depth of the on-disk audio (16, 24, 32). NULL when unknown
+     * (legacy rows pre-backfill, lossy codecs where bit-depth is
+     * meaningless, files whose container doesn't expose it). Surfaced
+     * by `AudioDurationExtractor.extract` from the file itself, not
+     * from the source's catalog metadata — the file is truth.
+     */
+    @ColumnInfo(name = "bits_per_sample")
+    val bitsPerSample: Int? = null,
+
+    /**
+     * Audio sample rate in Hz (44100, 48000, 96000, 192000). NULL when
+     * unknown. See [bitsPerSample] for source-of-truth notes.
+     */
+    @ColumnInfo(name = "sample_rate_hz")
+    val sampleRateHz: Int? = null,
 )

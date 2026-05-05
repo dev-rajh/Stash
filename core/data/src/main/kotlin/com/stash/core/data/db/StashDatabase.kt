@@ -64,7 +64,7 @@ import com.stash.core.data.db.entity.TrackTagEntity
         StashMixRecipeEntity::class,
         DiscoveryQueueEntity::class,
     ],
-    version = 16,
+    version = 17,
     exportSchema = true,
 )
 @TypeConverters(Converters::class)
@@ -361,6 +361,28 @@ abstract class StashDatabase : RoomDatabase() {
                 db.execSQL(
                     "ALTER TABLE remote_playlist_snapshots ADD COLUMN expected_count INTEGER DEFAULT NULL"
                 )
+            }
+        }
+
+        /**
+         * v16 → v17: per-track audio quality metadata.
+         *
+         * Two new nullable columns surface the bit-depth + sample-rate
+         * read from each downloaded file — needed for the v0.9.11
+         * Library FLAC badge upgrade ("FLAC 24/96") and the Now Playing
+         * quality line ("FLAC · 24-bit/96.0 kHz · 4233 kbps").
+         *
+         * Both columns are nullable. NULL means "unknown": legacy rows
+         * pre-backfill, lossy codecs with no meaningful bit-depth, or
+         * files whose container won't expose the values via
+         * `MediaExtractor`/STREAMINFO. A v0.9.11 first-launch worker
+         * (`QualityInfoBackfillWorker`) sweeps lossless rows whose
+         * columns are still NULL.
+         */
+        val MIGRATION_16_17 = object : Migration(16, 17) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE tracks ADD COLUMN bits_per_sample INTEGER DEFAULT NULL")
+                db.execSQL("ALTER TABLE tracks ADD COLUMN sample_rate_hz INTEGER DEFAULT NULL")
             }
         }
     }
