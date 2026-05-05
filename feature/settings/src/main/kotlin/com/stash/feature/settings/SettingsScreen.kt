@@ -32,6 +32,7 @@ import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.PlayCircle
 import androidx.compose.material.icons.rounded.Star
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -39,6 +40,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.RadioButtonDefaults
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -175,6 +177,11 @@ fun SettingsScreen(
         onLosslessQualityTierChanged = viewModel::onLosslessQualityTierChanged,
         onSquidWtfCaptchaCookieChanged = viewModel::onSquidWtfCaptchaCookieChanged,
         onResetLosslessRateLimiter = viewModel::onResetLosslessRateLimiter,
+        onAutoSaveEnabledChanged = viewModel::onAutoSaveEnabledChanged,
+        onAutoSaveThresholdChanged = viewModel::onAutoSaveThresholdChanged,
+        onHeartDefaultStashChanged = viewModel::onHeartDefaultStashChanged,
+        onHeartDefaultSpotifyChanged = viewModel::onHeartDefaultSpotifyChanged,
+        onHeartDefaultYtMusicChanged = viewModel::onHeartDefaultYtMusicChanged,
         onNavigateToEqualizer = onNavigateToEqualizer,
         onNavigateToLibraryHealth = onNavigateToLibraryHealth,
         onNavigateToSquidWtfCaptcha = onNavigateToSquidWtfCaptcha,
@@ -213,6 +220,11 @@ private fun SettingsContent(
     onLosslessQualityTierChanged: (LosslessQualityTier) -> Unit,
     onSquidWtfCaptchaCookieChanged: (String) -> Unit,
     onResetLosslessRateLimiter: () -> Unit,
+    onAutoSaveEnabledChanged: (Boolean) -> Unit,
+    onAutoSaveThresholdChanged: (Int) -> Unit,
+    onHeartDefaultStashChanged: (Boolean) -> Unit,
+    onHeartDefaultSpotifyChanged: (Boolean) -> Unit,
+    onHeartDefaultYtMusicChanged: (Boolean) -> Unit,
     onNavigateToEqualizer: () -> Unit,
     onNavigateToLibraryHealth: () -> Unit,
     onNavigateToSquidWtfCaptcha: () -> Unit,
@@ -629,6 +641,108 @@ private fun SettingsContent(
                         }
                     }
                 }
+            }
+        }
+
+        // -- Library & Likes section -----------------------------------------
+        // v0.9.13: opt-in auto-save to Spotify Liked Songs after N
+        // distinct play-days, plus per-destination defaults that drive
+        // the heart button's single-tap behaviour. The auto-save block is
+        // gated on Spotify being connected; the heart-defaults block
+        // hides the per-service rows the user hasn't connected.
+        SectionHeader(title = "Library & Likes")
+
+        val spotifyConnected = uiState.spotifyAuthState is com.stash.core.auth.model.AuthState.Connected
+        val ytConnected = uiState.youTubeAuthState is com.stash.core.auth.model.AuthState.Connected
+
+        // Auto-save block
+        GlassCard {
+            Column(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Auto-save liked tracks",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = if (spotifyConnected) {
+                                "Save to Spotify Liked Songs after you've played a track on N distinct days. Helps your Daily Mix and Discover Weekly stay fresh."
+                            } else {
+                                "Connect Spotify to enable auto-save."
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(
+                        checked = uiState.autoSaveEnabled,
+                        onCheckedChange = onAutoSaveEnabledChanged,
+                        enabled = spotifyConnected,
+                    )
+                }
+                if (uiState.autoSaveEnabled) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        text = "Threshold: ${uiState.autoSaveThreshold} day${if (uiState.autoSaveThreshold == 1) "" else "s"} in 30",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Slider(
+                        value = uiState.autoSaveThreshold.toFloat(),
+                        onValueChange = { onAutoSaveThresholdChanged(it.toInt().coerceIn(1, 10)) },
+                        valueRange = 1f..10f,
+                        steps = 8, // 1..10 inclusive — 8 steps BETWEEN endpoints
+                    )
+                    Text(
+                        text = "Last 7 days: ${uiState.autoSavedCountLast7Days} tracks auto-saved",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // Heart-button defaults block
+        GlassCard {
+            Column(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
+                Text(
+                    text = "When you tap \u2665 on a track\u2026",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                CheckboxRow(
+                    label = "Save to Stash Liked Songs",
+                    checked = uiState.heartDefaultStash,
+                    onCheckedChange = onHeartDefaultStashChanged,
+                )
+                if (spotifyConnected) {
+                    CheckboxRow(
+                        label = "Save to Spotify Liked Songs",
+                        checked = uiState.heartDefaultSpotify,
+                        onCheckedChange = onHeartDefaultSpotifyChanged,
+                    )
+                }
+                if (ytConnected) {
+                    CheckboxRow(
+                        label = "Save to YouTube Music Liked Music",
+                        checked = uiState.heartDefaultYtMusic,
+                        onCheckedChange = onHeartDefaultYtMusicChanged,
+                    )
+                }
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "Long-press the heart for per-track choices.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         }
 
@@ -1332,6 +1446,35 @@ private fun StorageRow(label: String, value: String) {
         )
         Text(
             text = value,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+    }
+}
+
+/**
+ * v0.9.13: tap-anywhere row containing a Material3 [Checkbox] and a
+ * label. Used by the Library & Likes "When you tap ♥" block to render
+ * per-destination defaults compactly. Tapping anywhere on the row
+ * toggles the checkbox.
+ */
+@Composable
+private fun CheckboxRow(
+    label: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onCheckedChange(!checked) }
+            .padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Checkbox(checked = checked, onCheckedChange = onCheckedChange)
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(
+            text = label,
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurface,
         )
