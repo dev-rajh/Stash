@@ -48,10 +48,15 @@ class StashLikedPlaylistRepository @Inject constructor(
 
     /**
      * Lazily create the "Liked Songs" playlist if it doesn't exist.
-     * Same shape as [com.stash.core.data.repository.MusicRepositoryImpl.ensureDownloadsMixSeeded]
-     * at MusicRepositoryImpl.kt:281 — fixed `sourceId` so the unique
-     * `source_id` index keeps us at one row per install, `syncEnabled
-     * = false` so it never feeds into the sync pipeline.
+     * Fixed `sourceId` so the unique `source_id` index keeps us at one
+     * row per install. `syncEnabled = true` is intentional: unlike
+     * DOWNLOADS_MIX (which is always populated by downloaded tracks
+     * and so passes the "has-downloaded-track" branch of
+     * `getAllVisible`), STASH_LIKED can hold streamed/preview-only
+     * tracks. Without `sync_enabled = 1` the playlist is invisible in
+     * Library/Home until the user happens to download one of the
+     * liked tracks. Sync pipeline ignores `MusicSource.BOTH`, so this
+     * flag only affects visibility, not actual sync behavior.
      */
     private suspend fun ensureSeeded(): Long {
         playlistDao.findBySourceId(STASH_LIKED_SOURCE_ID)?.let { return it.id }
@@ -60,7 +65,7 @@ class StashLikedPlaylistRepository @Inject constructor(
             source = MusicSource.BOTH,
             sourceId = STASH_LIKED_SOURCE_ID,
             type = PlaylistType.STASH_LIKED,
-            syncEnabled = false,
+            syncEnabled = true,
         )
         return playlistDao.insert(entity)
     }

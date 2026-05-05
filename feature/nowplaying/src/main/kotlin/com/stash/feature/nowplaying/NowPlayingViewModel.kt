@@ -280,6 +280,7 @@ class NowPlayingViewModel @Inject constructor(
             }
             if (defaults.isEmpty()) return@launch
             val results = likeDispatcher.like(track, defaults)
+            applyOptimisticLikeState(track.id, results)
             results.forEach { (dest, result) ->
                 val cause = result.exceptionOrNull() ?: return@forEach
                 if (cause is com.stash.core.data.social.NoSpotifyUriException ||
@@ -333,8 +334,42 @@ class NowPlayingViewModel @Inject constructor(
                     com.stash.core.ui.components.DestinationCheckbox.YT_MUSIC -> com.stash.core.data.social.Destination.YT_MUSIC
                 }
             }.toSet()
-            likeDispatcher.like(track, mapped)
+            val results = likeDispatcher.like(track, mapped)
+            applyOptimisticLikeState(track.id, results)
             _likeSheetState.value = null
+        }
+    }
+
+    /**
+     * v0.9.13: Mirror successful saves into [_uiState.currentTrack] so the
+     * heart icon flips immediately. The Track flowing in from
+     * [playerRepository.playerState] is a snapshot taken at track-load
+     * time and is NOT live-bound to the `tracks` table, so without this
+     * write-back the icon stays outline-white even though the DB row
+     * has the timestamp set. Only updates the destinations that
+     * actually succeeded; failures and skipped destinations leave the
+     * timestamp at whatever it was before.
+     */
+    private fun applyOptimisticLikeState(
+        trackId: Long,
+        results: Map<com.stash.core.data.social.Destination, Result<Unit>>,
+    ) {
+        val now = System.currentTimeMillis()
+        _uiState.update { current ->
+            val track = current.currentTrack ?: return@update current
+            if (track.id != trackId) return@update current  // Track changed mid-flight; drop.
+            val updated = track.copy(
+                stashLikedAt = if (results[com.stash.core.data.social.Destination.STASH]?.isSuccess == true) {
+                    track.stashLikedAt ?: now
+                } else track.stashLikedAt,
+                spotifySavedAt = if (results[com.stash.core.data.social.Destination.SPOTIFY]?.isSuccess == true) {
+                    track.spotifySavedAt ?: now
+                } else track.spotifySavedAt,
+                ytMusicSavedAt = if (results[com.stash.core.data.social.Destination.YT_MUSIC]?.isSuccess == true) {
+                    track.ytMusicSavedAt ?: now
+                } else track.ytMusicSavedAt,
+            )
+            current.copy(currentTrack = updated)
         }
     }
 
