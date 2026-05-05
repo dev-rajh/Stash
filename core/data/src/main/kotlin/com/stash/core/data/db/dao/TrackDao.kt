@@ -405,6 +405,42 @@ interface TrackDao {
     )
     suspend fun setFileSize(trackId: Long, sizeBytes: Long)
 
+    /**
+     * Returns up to 500 downloaded lossless tracks whose `bits_per_sample`
+     * or `sample_rate_hz` is still NULL. Used by [QualityInfoBackfillWorker]
+     * to fill in quality metadata for tracks downloaded before v0.9.11.
+     *
+     * Codec set mirrors the Library lossless filter so we don't pointlessly
+     * probe Opus/MP3/AAC files where bit-depth has no meaning.
+     */
+    @Query(
+        """
+        SELECT * FROM tracks
+        WHERE is_downloaded = 1
+          AND file_path IS NOT NULL
+          AND LOWER(file_format) IN ('flac', 'alac', 'wav', 'ape', 'tta', 'wv', 'aiff')
+          AND (bits_per_sample IS NULL OR sample_rate_hz IS NULL)
+        LIMIT 500
+        """
+    )
+    suspend fun getMissingQualityInfo(): List<TrackEntity>
+
+    /**
+     * Writes a single track's quality metadata. Called per-row by the
+     * backfill worker after `AudioDurationExtractor.extract` reads the
+     * file. Pass nulls to leave columns untouched (no COALESCE here —
+     * the worker only calls this when at least one value is non-null).
+     */
+    @Query(
+        """
+        UPDATE tracks
+        SET sample_rate_hz = COALESCE(:sampleRateHz, sample_rate_hz),
+            bits_per_sample = COALESCE(:bitsPerSample, bits_per_sample)
+        WHERE id = :trackId
+        """
+    )
+    suspend fun updateQualityInfo(trackId: Long, sampleRateHz: Int?, bitsPerSample: Int?)
+
     // ── Play tracking ───────────────────────────────────────────────────
 
     /** Atomically increment [play_count] for the given track. */
