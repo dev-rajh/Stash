@@ -6,6 +6,7 @@ import com.stash.core.data.social.spotify.SpotifyLibraryApiClient
 import com.stash.core.data.social.stash.StashLikedPlaylistRepository
 import com.stash.core.data.social.ytmusic.YtMusicLibraryApiClient
 import com.stash.core.model.Track
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import javax.inject.Inject
@@ -51,7 +52,7 @@ class LikeDestinationDispatcher @Inject constructor(
             return Result.success(Unit)
         }
 
-        return runCatching {
+        return try {
             when (dest) {
                 Destination.STASH -> {
                     stashLikedRepository.add(track.id)
@@ -59,14 +60,21 @@ class LikeDestinationDispatcher @Inject constructor(
                 Destination.SPOTIFY -> {
                     val uri = track.spotifyUri ?: throw NoSpotifyUriException()
                     spotifyLibraryClient.saveTracks(listOf(uri))
-                    trackDao.markSpotifySaved(track.id, System.currentTimeMillis())
+                    runCatching { trackDao.markSpotifySaved(track.id, System.currentTimeMillis()) }
+                        .onFailure { Log.w(TAG, "markSpotifySaved failed for ${track.id}", it) }
                 }
                 Destination.YT_MUSIC -> {
                     val videoId = track.youtubeId ?: throw NoYouTubeIdException()
                     ytMusicLibraryClient.likeVideo(videoId)
-                    trackDao.markYtMusicSaved(track.id, System.currentTimeMillis())
+                    runCatching { trackDao.markYtMusicSaved(track.id, System.currentTimeMillis()) }
+                        .onFailure { Log.w(TAG, "markYtMusicSaved failed for ${track.id}", it) }
                 }
             }
+            Result.success(Unit)
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (t: Throwable) {
+            Result.failure(t)
         }
     }
 
