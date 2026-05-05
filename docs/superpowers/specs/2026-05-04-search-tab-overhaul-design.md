@@ -136,7 +136,25 @@ Distinct namespaces because the bytes are different files (different codecs, dif
 
 ### 3. Download path detail
 
-#### 3.1 `SearchDownloadCoordinator.download(track: TrackItem): Flow<DownloadStatus>`
+#### 3.1 New flow type: `SearchDownloadStatus`
+
+The existing `core/model/.../DownloadStatus.kt` is an enum with values `{ PENDING, IN_PROGRESS, COMPLETED, FAILED, SKIPPED }` used by `TrackDownloadWorker`, `DownloadQueueDao`, etc. — not extensible without breaking sync. We introduce a **separate sealed class** for the search-tab status flow:
+
+```kotlin
+// data/download/.../search/SearchDownloadStatus.kt
+sealed interface SearchDownloadStatus {
+    data object Resolving : SearchDownloadStatus
+    data class Downloading(val via: Source) : SearchDownloadStatus
+    data object Completed : SearchDownloadStatus
+    data class Failed(val message: String) : SearchDownloadStatus
+
+    enum class Source { LOSSLESS, YOUTUBE }
+}
+```
+
+The `Downloading(via = YOUTUBE)` state surfaces the "Downloading via YouTube (slower)" message — UI translates the typed value to the existing snackbar/spinner string.
+
+#### 3.2 `SearchDownloadCoordinator.download(track: TrackItem): Flow<SearchDownloadStatus>`
 
 Replaces the direct `DownloadExecutor.download()` call inside `TrackActionsDelegate.downloadTrack` (currently at `core/media/.../actions/TrackActionsDelegate.kt:227-283`).
 
@@ -153,22 +171,30 @@ class SearchDownloadCoordinator @Inject constructor(
     private val inFlight = mutableMapOf<String, Deferred<DownloadResult>>()
     private val mutex = Mutex()
 
-    fun download(track: TrackItem): Flow<DownloadStatus> = flow {
+    fun download(track: TrackItem): Flow<SearchDownloadStatus> = flow {
         val key = track.videoId
         val deferred = mutex.withLock {
             inFlight.getOrPut(key) {
                 coroutineScope.async { performDownload(track) }
             }
         }
-        emit(DownloadStatus.Resolving)
-        val result = deferred.await()
-        mutex.withLock { inFlight.remove(key) }
-        emit(if (result is DownloadResult.Success) DownloadStatus.Completed else DownloadStatus.Failed)
+        emit(SearchDownloadStatus.Resolving)
+        try {
+            val result = deferred.await()
+            emit(when (result) {
+                is DownloadResult.Success -> SearchDownloadStatus.Completed
+                is DownloadResult.Failure -> SearchDownloadStatus.Failed(result.message)
+            })
+        } finally {
+            // Always clean up inFlight, even on cancellation or rethrown exception.
+            mutex.withLock { inFlight.remove(key) }
+        }
     }
 
     private suspend fun performDownload(track: TrackItem): DownloadResult {
         val match = registry.resolve(track.toQuery())
         return if (match != null && match.confidence >= MIN_SEARCH_CONFIDENCE) {
+            // Status flow consumer sees Downloading(LOSSLESS) once we cross this branch.
             finalizeFromLossless(track, match)
         } else {
             finalizeFromYtDlp(track)
@@ -210,7 +236,7 @@ class SearchDownloadCoordinator @Inject constructor(
 }
 ```
 
-#### 3.2 `TrackFinalizer` (extracted from existing sync code)
+#### 3.3 `TrackFinalizer` (extracted from existing sync code)
 
 ```kotlin
 @Singleton
@@ -218,43 +244,61 @@ class TrackFinalizer @Inject constructor(
     private val metadataEmbedder: MetadataEmbedder,
     private val fileOrganizer: FileOrganizer,
     private val trackDao: TrackDao,
+    private val playlistDao: PlaylistDao,
     private val audioExtractor: AudioDurationExtractor,
 ) {
+    /**
+     * Finalize a freshly-downloaded audio file:
+     *   1. Embed metadata (title/artist/album) via ffmpeg
+     *   2. Move temp file into the library at the canonical artist/album/title path
+     *   3. Extract on-disk codec/bitrate/sample-rate/bit-depth via AudioDurationExtractor
+     *   4. Insert or update the Track row with the full delivered metadata
+     *   5. For search-tab origin: link the track to the hidden "Saved" playlist so
+     *      the orphan-cleanup pass doesn't delete it on next sync (see Risk #11).
+     *   6. Fill album art URL if absent.
+     */
     suspend fun finalize(
         sourceFile: File,
         track: TrackItem,
         format: AudioFormat,
         coverArtUrl: String?,
-    ): DownloadResult {
-        runCatching { metadataEmbedder.embedMetadata(sourceFile, track) }
-            .onFailure { e -> Log.w(TAG, "metadata embed failed: ${e.message}") }
-        val committed = fileOrganizer.commitDownload(
-            tempFile = sourceFile,
-            artist = track.artist,
-            album = track.album.ifBlank { null },
-            title = track.title,
-            format = format.codec,
-        )
-        val meta = audioExtractor.extract(committed.filePath)
-        val trackId = trackDao.insertOrUpdateFromDownload(
-            track = track,
-            format = format,
-            filePath = committed.filePath,
-            sizeBytes = committed.sizeBytes,
-            sampleRateHz = meta?.sampleRateHz,
-            bitsPerSample = meta?.bitsPerSample,
-        )
-        coverArtUrl?.let { runCatching { trackDao.fillMissingAlbumArtUrl(trackId, it) } }
-        return DownloadResult.Success(committed.filePath)
-    }
+        origin: Origin,
+    ): DownloadResult { /* ... */ }
+
+    enum class Origin { SYNC, SEARCH }
 }
 ```
 
-`insertOrUpdateFromDownload` is a new DAO method that handles both "Track already exists by videoId, update" and "no Track row, insert" cases. Sync and search both call it.
+#### 3.4 New DAO method: `TrackDao.insertOrUpdateFromDownload`
 
-#### 3.3 Sync refactor
+Handles both "Track row already exists by `videoId` or `(canonical_title, canonical_artist)` — UPDATE in place" and "no row exists — INSERT" cases. Sync (origin = SYNC) and search (origin = SEARCH) both call it. Field set written:
 
-`DownloadManager.tryLosslessDownload` (currently at `data/download/.../DownloadManager.kt:274-361`) refactors to call `TrackFinalizer.finalize(...)` for the post-fetch steps. Logic is moved verbatim — no behavior change. Acceptance test 8 (sync regression) confirms.
+| Column | Source | Notes |
+|---|---|---|
+| `title`, `artist`, `album` | `track: TrackItem` | Album falls back to `null` if blank |
+| `canonical_title`, `canonical_artist` | normalized from track | Same normalizer as sync's `Title.canonical()` |
+| `youtube_id` | `track.videoId` | Always set for search-origin |
+| `file_path`, `file_size_bytes` | `committed: CommitResult` | From `FileOrganizer.commitDownload` |
+| `file_format`, `quality_kbps` | `format: AudioFormat` | Codec normalized via `AudioDurationExtractor.normalizeFormat` |
+| `sample_rate_hz`, `bits_per_sample` | `meta: AudioMetadata?` | From file probe (v0.9.11 path) — null-safe |
+| `is_downloaded` | `true` | Forces Library visibility |
+| `date_added` | `System.currentTimeMillis()` | Only on INSERT path; UPDATE preserves existing |
+| `album_art_url` | `coverArtUrl` (Qobuz) or null (yt-dlp) | Filled via separate `fillMissingAlbumArtUrl` call (already exists) |
+| `duration_ms` | `meta?.durationMs` if > 0 | Reconciled against existing if present |
+| `match_confidence` | `format.matchConfidence` | 0 for yt-dlp; carries lossless registry's confidence on Qobuz path |
+| `source` | `MusicSource.YOUTUBE` for search-origin (track came from YT Music search), `SPOTIFY` for sync | Existing column |
+
+#### 3.5 Orphan-cleanup mitigation (search-origin only)
+
+The existing orphan-cleanup pass deletes downloaded tracks that have no `playlist_tracks` membership. Search-tab downloads currently fall into this trap (tracked in user memory `project_search_download_orphan_bug.md`). v0.9.12 fixes it inline as part of the search-download path, not a separate spec.
+
+Approach: when `TrackFinalizer.finalize(origin = SEARCH)` runs, after the Track row is inserted, link the track to a hidden playlist named `__saved__` (or whatever singleton the existing orphan-fix design specifies — implementer reads `project_search_download_orphan_bug.md` for the exact name during planning). The hidden playlist is created on first use; subsequent finalizes append to it. UI never displays it.
+
+`PlaylistDao` gets one new method: `linkToSavedPlaylist(trackId: Long): Unit`. Idempotent — no-op if already linked.
+
+#### 3.6 Sync refactor
+
+`DownloadManager.tryLosslessDownload` (currently at `data/download/.../DownloadManager.kt:274-361`) refactors to call `TrackFinalizer.finalize(origin = Origin.SYNC, ...)` for the post-fetch steps. Logic moved verbatim except for the new `origin` arg — no behavior change for sync (origin = SYNC skips the `linkToSavedPlaylist` call). Acceptance test 8 (sync regression) confirms.
 
 ### 4. Prefetching
 
@@ -350,14 +394,19 @@ object PreviewCacheModule {
         SimpleCache(cacheDir, evictor)
 
     @Provides @Singleton
-    fun provideHttpDataSourceFactory(okHttpClient: OkHttpClient): HttpDataSource.Factory =
-        OkHttpDataSource.Factory(okHttpClient)
+    fun provideHttpDataSourceFactory(): HttpDataSource.Factory =
+        DefaultHttpDataSource.Factory()
+            .setUserAgent("Stash/0.9.12")
+            .setConnectTimeoutMs(15_000)
+            .setReadTimeoutMs(15_000)
 
     private const val MAX_CACHE_BYTES = 200L * 1024 * 1024
 }
 ```
 
 Cache lives at `<filesDir>/preview_cache/`. App-private; cleared on uninstall. No SAF complications.
+
+**Dependencies:** No new artifacts. The cache primitives (`SimpleCache`, `CacheDataSource`, `CacheUtil`, `LeastRecentlyUsedCacheEvictor`) ship in `media3-datasource` which is already a transitive dependency of `media3-exoplayer` (declared in `gradle/libs.versions.toml` at version 1.9.2). For HTTP we use `DefaultHttpDataSource.Factory` (also in `media3-datasource`) rather than `OkHttpDataSource.Factory` — the latter would require adding the separate `media3-datasource-okhttp` artifact, and we don't need OkHttp's connection-pool / cookie features for Qobuz signed CDN URLs (they're stateless GETs of pre-signed URLs).
 
 ## Risks
 
@@ -372,7 +421,8 @@ Cache lives at `<filesDir>/preview_cache/`. App-private; cleared on uninstall. N
 | `TrackFinalizer` extraction breaks sync's `tryLosslessDownload`. | Refactor under sync regression test (acceptance #8). Logic moves verbatim, no behavior change. v0.9.11 sync downloads have just shipped and are working. |
 | Rate-limit pressure from prefetching all visible rows on artist profile open. | `Semaphore(4)` cap + AggregatorRateLimiter's 1/3s budget naturally serialize. Burst of 4, then ~3s/track. 30-track artist profile drains in ~90s; user's typical session uses far less. |
 | Wrong-codec download when user previews via yt-dlp then taps Download with Qobuz now reachable. | Cache key namespaces are distinct (`lossless:` vs `ytdlp:`). Lossless lookup misses; fresh fetch via Qobuz. Yt-dlp partial bytes evict via LRU. |
-| Coordinator's in-flight map leaks if a coroutine is canceled before completion. | `mutex.withLock { inFlight.remove(key) }` in a `try/finally` after await. |
+| Coordinator's in-flight map leaks if a coroutine is canceled before completion. | `mutex.withLock { inFlight.remove(key) }` in a `try/finally` after await — see §3.2 implementation. |
+| **(#11) Search-tab downloads vanish on next launch via orphan cleanup** (existing v0.9.10/v0.9.11 bug per user memory). | `TrackFinalizer.finalize(origin = SEARCH)` calls `playlistDao.linkToSavedPlaylist(trackId)` to give every search-origin download a hidden-playlist membership. Orphan-cleanup pass already preserves any track with at least one playlist-tracks row. See §3.5. |
 
 ## Testing
 
@@ -392,6 +442,7 @@ None added. Pattern follows project precedent (`DownloadManager`, `LosslessSourc
 8. **Sync regression check.** With lossless on, queue a sync run. Confirm tracks still download via the lossless path (refactored `TrackFinalizer` shared with search). Bit-depth/sample-rate columns populate as v0.9.11. No degradation in sync speed (~8.7 tracks/min baseline).
 9. **Album-batch download (if existing UI loops).** Open an album, tap "Download all" if present. Each track flows through `SearchDownloadCoordinator` independently. Concurrency limited by registry's rate limiter.
 10. **Wrong-version edge case.** Search for a track that has both a live and studio version on YouTube. Tap preview on the live row; confirm Qobuz match (if found) is rejected at confidence 0.65 if the live version's title has "(Live at X)" decoration the matcher can't reconcile. Falls through to yt-dlp. (If matcher still passes, log the issue for threshold tuning.)
+11. **Orphan-cleanup survival.** Download a track via search (no preview). Confirm the Track row has a `playlist_tracks` row linking it to the hidden `__saved__` playlist. Force-quit and relaunch the app; on next sync run, confirm the track is NOT deleted by the orphan-cleanup pass (it has a playlist membership). Library still shows the track.
 
 ## Out of scope
 
