@@ -3,6 +3,9 @@ package com.stash.app
 import android.app.Application
 import androidx.hilt.work.HiltWorkerFactory
 import androidx.work.Configuration
+import androidx.work.Constraints
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkManager
 import coil3.SingletonImageLoader
 import android.util.Log
 import com.stash.core.data.db.dao.ArtistProfileCacheDao
@@ -17,6 +20,7 @@ import com.stash.core.data.repository.MusicRepositoryImpl
 import com.stash.core.data.sync.SyncNotificationManager
 import com.stash.data.download.ytdlp.YtDlpManager
 import com.stash.core.data.sync.workers.ArtBackfillWorker
+import com.stash.core.data.sync.workers.QualityInfoBackfillWorker
 import com.stash.core.data.sync.workers.StashDiscoveryWorker
 import com.stash.core.data.sync.workers.StashMixRefreshWorker
 import com.stash.core.data.sync.workers.TagEnrichmentWorker
@@ -154,6 +158,14 @@ class StashApplication : Application(), Configuration.Provider {
         // no thumbnail (see ArtBackfillWorker KDoc). KEEP policy means the
         // worker is a no-op on every subsequent launch once it completes.
         ArtBackfillWorker.enqueueOneTime(this)
+        // v0.9.11: kick a background sweep that fills in bit-depth +
+        // sample-rate for tracks downloaded before the columns existed.
+        // The flag is set immediately on enqueue (not after success) so
+        // an interrupted worker doesn't re-trigger on every launch — the
+        // manual "Refresh quality info" button in Settings → Library
+        // Health covers any rows that slipped through, and the worker's
+        // own predicate is idempotent.
+        maybeEnqueueQualityBackfill()
         // Also fire a one-shot check on every cold start so a release pushed
         // between periodic-worker windows surfaces within seconds of the
         // next launch — the 24-hour periodic worker alone can leave users
@@ -292,6 +304,29 @@ class StashApplication : Application(), Configuration.Provider {
                 .putInt("youtube_hide_empty_version", YOUTUBE_HIDE_EMPTY_VERSION)
                 .apply()
         }
+    }
+
+    /**
+     * v0.9.11 first-launch sweep. Enqueues [QualityInfoBackfillWorker]
+     * once per install; subsequent launches see the SharedPreferences
+     * flag and skip. Constraints require not-low-battery so a Doze
+     * cycle doesn't kick this off mid-flight on a dying phone — the
+     * worker is purely background polish.
+     */
+    private fun maybeEnqueueQualityBackfill() {
+        val prefs = getSharedPreferences("stash_migrations", MODE_PRIVATE)
+        if (prefs.getBoolean("quality_backfill_done_v17", false)) return
+        WorkManager.getInstance(applicationContext).enqueue(
+            OneTimeWorkRequestBuilder<QualityInfoBackfillWorker>()
+                .setConstraints(
+                    Constraints.Builder()
+                        .setRequiresBatteryNotLow(true)
+                        .build()
+                )
+                .build()
+        )
+        prefs.edit().putBoolean("quality_backfill_done_v17", true).apply()
+        Log.i("StashMigration", "maybeEnqueueQualityBackfill: enqueued v17 quality-info backfill")
     }
 
     companion object {

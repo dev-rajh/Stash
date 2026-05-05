@@ -1,10 +1,14 @@
 package com.stash.core.data.audio
 
 import android.content.Context
+import android.media.MediaExtractor
+import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
 import android.net.Uri
+import android.os.Build
 import android.util.Log
 import dagger.hilt.android.qualifiers.ApplicationContext
+import java.io.RandomAccessFile
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -83,10 +87,20 @@ class AudioDurationExtractor @Inject constructor(
                 ?.toIntOrNull() ?: 0
             val mime = retriever
                 .extractMetadata(MediaMetadataRetriever.METADATA_KEY_MIMETYPE)
+            val (extractorSampleRate, extractorBitDepth) = probeExtractor(context, filePath)
+            // FLAC fallback: MediaExtractor on some devices returns -1 for FLAC
+            // bit-depth even on API 30+. Always try STREAMINFO when we have a
+            // FLAC file but no bit-depth from the extractor.
+            val resolvedBitDepth = extractorBitDepth ?: run {
+                val format = normalizeFormat(mime)
+                if (format == "flac") parseFlacStreamInfoBitDepth(filePath) else null
+            }
             AudioMetadata(
                 durationMs = durationMs,
                 bitrateKbps = if (bitrateBps > 0) bitrateBps / 1000 else 0,
                 format = normalizeFormat(mime),
+                bitsPerSample = resolvedBitDepth?.takeIf { it in 8..32 },
+                sampleRateHz = extractorSampleRate?.takeIf { it > 0 },
             )
         } catch (e: Exception) {
             Log.w(TAG, "extract failed for $filePath: ${e.javaClass.simpleName}: ${e.message}")
@@ -116,6 +130,101 @@ class AudioDurationExtractor @Inject constructor(
                 else -> lower.substringAfter("audio/", "").ifBlank { "unknown" }
             }
         }
+
+        /**
+         * Reads `KEY_SAMPLE_RATE` (all API levels) and `KEY_BITS_PER_SAMPLE`
+         * (API 30+) from the audio track. Best-effort — containers/codecs
+         * vary in what they expose, and `MediaExtractor` will throw on a
+         * corrupt file. Returns `(null, null)` on any failure so callers
+         * can continue.
+         *
+         * Mirrors the `content://` branch from [extract] so SAF/SD-card
+         * libraries get probed too — without it, MediaExtractor would
+         * NPE on the URI string when the underlying file isn't a plain
+         * filesystem path.
+         *
+         * Returns `(sampleRate, bitsPerSample)`.
+         */
+        internal fun probeExtractor(context: Context, filePath: String): Pair<Int?, Int?> {
+            val extractor = MediaExtractor()
+            return try {
+                if (filePath.startsWith("content://")) {
+                    extractor.setDataSource(context, Uri.parse(filePath), null)
+                } else {
+                    extractor.setDataSource(filePath)
+                }
+                if (extractor.trackCount == 0) return Pair(null, null)
+                val format = extractor.getTrackFormat(0)
+                val sampleRate = runCatching { format.getInteger(MediaFormat.KEY_SAMPLE_RATE) }
+                    .getOrNull()
+                    ?.takeIf { it > 0 }
+                // "bits-per-sample" is not a public MediaFormat constant — it is an
+                // implementation-level key populated by some OEM FLAC extractors.
+                // We access it via the raw string and wrap in runCatching so that
+                // MediaFormat.getInteger() throws cleanly when the key is absent.
+                val bitDepth = if (Build.VERSION.SDK_INT >= 30) {
+                    runCatching {
+                        format.getInteger("bits-per-sample")
+                    }.getOrNull()?.takeIf { it > 0 }
+                } else null
+                Pair(sampleRate, bitDepth)
+            } catch (e: Exception) {
+                Log.w(TAG, "probeExtractor failed for $filePath: ${e.javaClass.simpleName}: ${e.message}")
+                Pair(null, null)
+            } finally {
+                runCatching { extractor.release() }
+            }
+        }
+
+        /**
+         * Reads bit-depth from the FLAC STREAMINFO metadata block.
+         *
+         * FLAC layout (frozen in 2008, stable):
+         *   - Bytes 0..3:   "fLaC" magic
+         *   - Bytes 4..7:   metadata block header (block-type 0 = STREAMINFO)
+         *   - Bytes 8..25:  STREAMINFO body (18 bytes)
+         *
+         * Within STREAMINFO, the bit-depth field (`bps - 1`, 5 bits total) is
+         * split across the last bit of file byte 20 and the top 4 bits of
+         * file byte 21:
+         *
+         *   byte 20: |ssss ccch|   ssss = sample-rate low 4 bits,
+         *                          ccc  = channels - 1 (3 bits),
+         *                          h    = high bit of (bps-1)
+         *   byte 21: |hhhh tttt|   hhhh = low 4 bits of (bps-1),
+         *                          tttt = total-samples high 4 bits
+         *
+         * Concretely: `bps = (((byte20 and 0x01) shl 4) or ((byte21 shr 4) and 0x0F)) + 1`
+         *
+         * Returns null on any read failure or implausible value (sanity
+         * range 8..32 bits-per-sample).
+         *
+         * NOTE: Filesystem-only — `RandomAccessFile` doesn't accept
+         * `content://` URIs. SAF-backed FLACs land here only when the
+         * MediaExtractor probe already returned a value (so we never
+         * call this) or fall through with NULL bit-depth (acceptable;
+         * the badge falls back to plain "FLAC").
+         */
+        internal fun parseFlacStreamInfoBitDepth(filePath: String): Int? {
+            return try {
+                RandomAccessFile(filePath, "r").use { raf ->
+                    val header = ByteArray(22)
+                    if (raf.read(header) < 22) return null
+                    if (header[0] != 'f'.code.toByte() ||
+                        header[1] != 'L'.code.toByte() ||
+                        header[2] != 'a'.code.toByte() ||
+                        header[3] != 'C'.code.toByte()
+                    ) return null
+                    val byte20 = header[20].toInt() and 0xFF
+                    val byte21 = header[21].toInt() and 0xFF
+                    val bps = (((byte20 and 0x01) shl 4) or ((byte21 shr 4) and 0x0F)) + 1
+                    bps.takeIf { it in 8..32 }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "parseFlacStreamInfoBitDepth failed for $filePath: ${e.message}")
+                null
+            }
+        }
     }
 }
 
@@ -130,4 +239,8 @@ data class AudioMetadata(
     val durationMs: Long,
     val bitrateKbps: Int,
     val format: String,
+    /** Bit-depth read from the file (16/24/32). Null = unknown / unparseable. */
+    val bitsPerSample: Int? = null,
+    /** Sample rate in Hz (44100/48000/96000/192000). Null = unknown. */
+    val sampleRateHz: Int? = null,
 )
