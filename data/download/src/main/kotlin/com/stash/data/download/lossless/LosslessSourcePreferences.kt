@@ -43,6 +43,7 @@ class LosslessSourcePreferences @Inject constructor(
     private val enabledKey = booleanPreferencesKey("enabled")
     private val captchaCookieKey = stringPreferencesKey("squid_wtf_captcha_verified_at")
     private val bannerDismissedKey = booleanPreferencesKey("home_banner_dismissed")
+    private val qualityTierKey = stringPreferencesKey("lossless_quality_tier")
 
     /**
      * Master switch for the lossless-source pipeline. When false, the
@@ -119,6 +120,36 @@ class LosslessSourcePreferences @Inject constructor(
 
     suspend fun setBannerDismissed(dismissed: Boolean) {
         context.losslessDataStore.edit { prefs -> prefs[bannerDismissedKey] = dismissed }
+    }
+
+    /**
+     * User-selected lossless quality tier. Default behaviour:
+     *   - Fresh installs (no `enabled` key written) → [LosslessQualityTier.HI_RES]
+     *     (sensible-storage middle ground; ~70 MB / 4 min vs MAX's ~140 MB).
+     *   - v0.9.8+ users with `enabled` explicitly true → [LosslessQualityTier.MAX]
+     *     (matches v0.9.10 historical behaviour for users who opted in).
+     *   - v0.9.8+ users with `enabled` explicitly false → [LosslessQualityTier.HI_RES]
+     *     (they're not downloading lossless anyway; sensible default if they
+     *     later flip the switch).
+     *
+     * Once the user picks a tier in Settings, [setQualityTier] writes the key
+     * and this default logic is no longer consulted.
+     */
+    val qualityTier: Flow<LosslessQualityTier> = context.losslessDataStore.data.map { prefs ->
+        prefs[qualityTierKey]
+            ?.let { runCatching { LosslessQualityTier.valueOf(it) }.getOrNull() }
+            ?: defaultQualityTier(prefs)
+    }
+
+    suspend fun qualityTierNow(): LosslessQualityTier = qualityTier.first()
+
+    suspend fun setQualityTier(tier: LosslessQualityTier) {
+        context.losslessDataStore.edit { prefs -> prefs[qualityTierKey] = tier.name }
+    }
+
+    private fun defaultQualityTier(prefs: Preferences): LosslessQualityTier {
+        val enabledExplicitlyTrue = prefs[enabledKey] == true
+        return if (enabledExplicitlyTrue) LosslessQualityTier.MAX else LosslessQualityTier.HI_RES
     }
 
     /**
