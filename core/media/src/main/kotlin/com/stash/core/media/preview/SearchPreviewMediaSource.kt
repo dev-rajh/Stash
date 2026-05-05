@@ -1,11 +1,13 @@
 package com.stash.core.media.preview
 
+import android.util.Log
 import androidx.media3.common.MediaItem
 import androidx.media3.datasource.HttpDataSource
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.SimpleCache
 import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
+import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
 import com.stash.core.model.TrackItem
 import com.stash.data.download.preview.PreviewUrlExtractor
 import javax.inject.Inject
@@ -34,13 +36,21 @@ class SearchPreviewMediaSource @Inject constructor(
     suspend fun create(track: TrackItem): MediaSource {
         val match = prefetcher.lookup(track)
         return if (match != null && match.confidence >= MIN_SEARCH_CONFIDENCE) {
+            Log.d(
+                TAG,
+                "preview lossless ${track.videoId} via ${match.sourceId} " +
+                    "confidence=${"%.2f".format(match.confidence)}",
+            )
             buildCachedSource(
                 upstreamUrl = match.downloadUrl,
                 cacheKey = "lossless:${track.videoId}",
             )
         } else {
-            // Fallback to existing yt-dlp/InnerTube URL extractor.
-            // The result URL is also cacheable with a different namespace.
+            Log.d(
+                TAG,
+                "preview yt-dlp ${track.videoId} " +
+                    "(lossless ${if (match == null) "miss" else "confidence ${"%.2f".format(match.confidence)} < $MIN_SEARCH_CONFIDENCE"})",
+            )
             val ytUrl = previewUrlExtractor.extractStreamUrl(track.videoId)
             buildCachedSource(
                 upstreamUrl = ytUrl,
@@ -55,22 +65,27 @@ class SearchPreviewMediaSource @Inject constructor(
             .setUpstreamDataSourceFactory(httpDataSourceFactory)
             .setCacheKeyFactory(cacheKeyFactory)
             .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
-        // Embed cacheKey in URI as ?trackKey= so the CacheKeyFactory's
-        // fallback path also resolves correctly. The DataSpec.key
-        // takes precedence (when CacheDataSource builds the DataSpec
-        // from MediaItem, it doesn't auto-set key); this URI param is
-        // the actual mechanism for MediaItem-based playback. The
-        // factory's defence-in-depth covers any future caller that
-        // builds a DataSpec directly.
-        val separator = if (upstreamUrl.contains("?")) "&" else "?"
+        // Cache key goes on MediaItem.customCacheKey (propagates to
+        // DataSpec.key); URL is forwarded to upstream HTTP unchanged.
+        // Earlier code appended `?trackKey=...` to the URL, which broke
+        // Qobuz + YouTube signed-URL HMACs and 403'd every byte fetch —
+        // the v0.9.12 launch-day "preview takes forever" symptom.
         val mediaItem = MediaItem.Builder()
-            .setUri("$upstreamUrl${separator}trackKey=$cacheKey")
+            .setUri(upstreamUrl)
+            .setCustomCacheKey(cacheKey)
             .build()
+        // Fail-fast retry policy: ExoPlayer's default 3-retry exponential
+        // backoff means a broken URL or transient outage takes 30-90s to
+        // surface as an error. 1 retry routes failures to the yt-dlp
+        // retry path (TrackActionsDelegate.onPreviewError) within ~10s.
+        val errorPolicy = DefaultLoadErrorHandlingPolicy(/* minimumLoadableRetryCount = */ 1)
         return ProgressiveMediaSource.Factory(cacheDataSourceFactory)
+            .setLoadErrorHandlingPolicy(errorPolicy)
             .createMediaSource(mediaItem)
     }
 
     companion object {
+        private const val TAG = "SearchPreviewMediaSource"
         const val MIN_SEARCH_CONFIDENCE = 0.65f
     }
 }
