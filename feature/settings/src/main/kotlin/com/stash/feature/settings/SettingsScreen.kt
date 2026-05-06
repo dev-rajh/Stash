@@ -312,22 +312,19 @@ private fun SettingsContent(
             onConnect = onConnectSpotify,
             onDisconnect = onDisconnectSpotify,
             // v0.9.13: auto-save toggle lives INSIDE the Spotify card, mirroring
-            // the YT Music history pattern below. Hidden when disconnected so
-            // the card stays compact for users who haven't connected yet.
-            extraContent = if (uiState.spotifyAuthState is com.stash.core.auth.model.AuthState.Connected) {
-                {
-                    com.stash.feature.settings.components.SpotifyAutoSaveSection(
-                        enabled = uiState.autoSaveEnabled,
-                        threshold = uiState.autoSaveThreshold,
-                        autoSavedCountLast7Days = uiState.autoSavedCountLast7Days,
-                        spotifyConnected = true,
-                        onToggle = onAutoSaveEnabledChanged,
-                        onThresholdChanged = onAutoSaveThresholdChanged,
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                    )
-                }
-            } else {
-                null
+            // the YT Music history pattern below. Always rendered so the
+            // feature stays discoverable; SpotifyAutoSaveSection itself
+            // handles the disconnected-greyed state internally.
+            extraContent = {
+                com.stash.feature.settings.components.SpotifyAutoSaveSection(
+                    enabled = uiState.autoSaveEnabled,
+                    threshold = uiState.autoSaveThreshold,
+                    autoSavedCountLast7Days = uiState.autoSavedCountLast7Days,
+                    spotifyConnected = uiState.spotifyAuthState is com.stash.core.auth.model.AuthState.Connected,
+                    onToggle = onAutoSaveEnabledChanged,
+                    onThresholdChanged = onAutoSaveThresholdChanged,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                )
             },
         )
 
@@ -339,24 +336,20 @@ private fun SettingsContent(
             onConnect = onConnectYouTube,
             onDisconnect = onDisconnectYouTube,
             // Sync toggle lives INSIDE the YT Music card, below the connect
-            // row, only when the user is connected. Hiding it entirely when
-            // disconnected keeps the card compact — the user can reach
-            // "Connect" from the same row and the sub-setting appears the
-            // moment they're authenticated.
-            extraContent = if (uiState.youTubeAuthState is com.stash.core.auth.model.AuthState.Connected) {
-                {
-                    YouTubeHistorySyncSection(
-                        enabled = uiState.ytHistoryEnabled,
-                        health = uiState.ytHistoryHealth,
-                        pendingCount = uiState.ytPendingCount,
-                        ytConnected = true,
-                        onToggle = onYouTubeHistoryEnabledChanged,
-                        onRetry = onRetryYouTubeHistory,
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                    )
-                }
-            } else {
-                null
+            // row. Always rendered so the feature stays discoverable for
+            // users who haven't connected yet — YouTubeHistorySyncSection
+            // greys itself out and shows "Connect YouTube Music first" in
+            // the disconnected state.
+            extraContent = {
+                YouTubeHistorySyncSection(
+                    enabled = uiState.ytHistoryEnabled,
+                    health = uiState.ytHistoryHealth,
+                    pendingCount = uiState.ytPendingCount,
+                    ytConnected = uiState.youTubeAuthState is com.stash.core.auth.model.AuthState.Connected,
+                    onToggle = onYouTubeHistoryEnabledChanged,
+                    onRetry = onRetryYouTubeHistory,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                )
             },
         )
 
