@@ -88,7 +88,17 @@ class SettingsViewModel @Inject constructor(
     private val losslessRateLimiter: AggregatorRateLimiter,
     private val likePreferences: LikePreferences,
     private val trackDao: TrackDao,
+    private val settingsDeepLinkController: com.stash.core.data.navigation.SettingsDeepLinkController,
 ) : ViewModel() {
+
+    /**
+     * v0.9.13: One-shot deep-link focus from Home banners. Read once on
+     * Settings entry; the screen scrolls the targeted card into view and
+     * clears the value so re-entry doesn't re-scroll. Null means "no
+     * focus requested — render Settings at the top as usual".
+     */
+    fun consumeDeepLinkFocus(): com.stash.core.data.navigation.SettingsFocus? =
+        settingsDeepLinkController.consume()
 
     /** Internal mutable UI state that is combined with token-manager flows. */
     private val _localState = MutableStateFlow(LocalState())

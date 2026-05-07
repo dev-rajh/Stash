@@ -82,7 +82,7 @@ fun SpotifyAutoSaveSection(
                     text = if (!spotifyConnected) {
                         "Connect Spotify first"
                     } else {
-                        "Save to Spotify Liked Songs after N distinct play-days. Helps Daily Mix and Discover Weekly stay fresh."
+                        "Helps mixes refresh."
                     },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,

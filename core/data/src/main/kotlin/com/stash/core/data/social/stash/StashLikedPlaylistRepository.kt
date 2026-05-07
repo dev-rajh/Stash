@@ -47,6 +47,27 @@ class StashLikedPlaylistRepository @Inject constructor(
     }
 
     /**
+     * Remove a track from the Stash Liked Songs playlist. Companion to
+     * [add] — used by the heart-toggle on Now Playing. Idempotent: a
+     * second call when the track is already gone is a no-op. Clears
+     * `tracks.stash_liked_at` so the heart icon flips back to outline.
+     *
+     * Note: this does NOT propagate to Spotify/YT Music. Per v0.9.13
+     * design, the auto-save flow to Spotify is one-way — un-liking
+     * locally does not unsave externally.
+     */
+    suspend fun remove(trackId: Long) {
+        val playlistId = playlistDao.findBySourceId(STASH_LIKED_SOURCE_ID)?.id ?: run {
+            // No Stash Liked playlist exists yet → nothing to remove.
+            // Still clear the timestamp in case it's somehow set.
+            trackDao.clearStashLiked(trackId)
+            return
+        }
+        musicRepository.removeTrackFromPlaylist(trackId = trackId, playlistId = playlistId)
+        trackDao.clearStashLiked(trackId)
+    }
+
+    /**
      * Lazily create the "Liked Songs" playlist if it doesn't exist.
      * Fixed `sourceId` so the unique `source_id` index keeps us at one
      * row per install. `syncEnabled = true` is intentional: unlike

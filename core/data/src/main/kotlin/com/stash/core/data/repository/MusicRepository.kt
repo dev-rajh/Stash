@@ -104,6 +104,15 @@ interface MusicRepository {
      */
     fun observeLikeState(trackId: Long): Flow<com.stash.core.data.db.dao.TrackLikeState?>
 
+    /**
+     * v0.9.13: Live-observe the full Track domain object by id. Now
+     * Playing uses this as the canonical source — the player only
+     * carries 5 fields via MediaItem extras (id, title, artist, album,
+     * art), so any other Track-derived display (codec, like state,
+     * bit-depth, etc.) MUST come from Room or it's stale.
+     */
+    fun observeTrackById(trackId: Long): Flow<Track?>
+
     // ── Mutations ───────────────────────────────────────────────────────
 
     /** Record a play event: increments play count and updates last-played. */

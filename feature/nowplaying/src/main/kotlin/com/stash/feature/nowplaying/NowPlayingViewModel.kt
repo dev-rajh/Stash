@@ -41,9 +41,7 @@ import javax.inject.Inject
 class NowPlayingViewModel @Inject constructor(
     private val playerRepository: PlayerRepository,
     private val musicRepository: MusicRepository,
-    private val likeDispatcher: com.stash.core.data.social.LikeDestinationDispatcher,
-    private val likePreferences: com.stash.core.data.prefs.LikePreferences,
-    private val tokenManager: com.stash.core.auth.TokenManager,
+    private val stashLikedRepository: com.stash.core.data.social.stash.StashLikedPlaylistRepository,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(NowPlayingUiState())
@@ -56,14 +54,9 @@ class NowPlayingViewModel @Inject constructor(
     /** One-shot snackbar messages (e.g. "Track flagged as wrong match"). */
     val userMessages: SharedFlow<String> = _userMessages.asSharedFlow()
 
-    // v0.9.13: Per-track Like override sheet state. `null` = sheet hidden.
-    private val _likeSheetState = MutableStateFlow<com.stash.core.ui.components.LikeDestinationSheetState?>(null)
-    val likeSheetState: StateFlow<com.stash.core.ui.components.LikeDestinationSheetState?> = _likeSheetState.asStateFlow()
-
     init {
-        observePlayerState()
+        observePlayerStateLive()
         observeUserPlaylists()
-        observeLikeStateForCurrentTrack()
     }
 
     // ------------------------------------------------------------------
@@ -71,34 +64,43 @@ class NowPlayingViewModel @Inject constructor(
     // ------------------------------------------------------------------
 
     /**
-     * Combines the player state snapshot with the high-frequency position
-     * ticker into a single [NowPlayingUiState] emission.
+     * v0.9.13: Combines player-only fields (position, isPlaying, queue) with
+     * the canonical Track row from Room.
+     *
+     * The previous version of this used `state.currentTrack` directly, but
+     * `PlayerRepositoryImpl.toTrack()` reconstructs Track from MediaItem
+     * extras and only populates 5 fields out of ~25 — every other field
+     * (filePath, fileFormat, bitsPerSample, like timestamps, etc.) defaults
+     * to the data class default and is silently wrong. That's why every
+     * track displayed "OPUS" for the codec and why the heart icon failed
+     * to persist across Now Playing close+reopen — Now Playing was reading
+     * from MediaItem-derived junk, not the database.
+     *
+     * Now: take the id from the player (canonical "what's playing"),
+     * `flatMapLatest` into Room for the full row. Fall back to the
+     * player's snapshot only when Room has no row (e.g., streamed/preview
+     * content with synthetic id) so search-tab playback still works.
      */
-    private fun observePlayerState() {
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private fun observePlayerStateLive() {
+        val liveTrackFlow = playerRepository.playerState
+            .map { it.currentTrack?.id }
+            .distinctUntilChanged()
+            .flatMapLatest { id ->
+                if (id == null) flowOf<com.stash.core.model.Track?>(null)
+                else musicRepository.observeTrackById(id)
+            }
+
         combine(
             playerRepository.playerState,
             playerRepository.currentPosition,
-        ) { state, positionMs ->
+            liveTrackFlow,
+        ) { state, positionMs, liveTrack ->
             _uiState.update { current ->
-                // v0.9.13: smart-merge of player snapshot with locally-mutated
-                // Like timestamps. The player re-emits the same Track object on
-                // every position tick (~10/s); without this preservation step,
-                // applyOptimisticLikeState's writes get stomped within ~100ms
-                // and the heart icon flips back to outline. Forward-only
-                // semantics make non-null preservation always correct: a
-                // timestamp once set never legitimately needs to revert.
-                val incoming = state.currentTrack
-                val mergedTrack = if (incoming != null && current.currentTrack?.id == incoming.id) {
-                    incoming.copy(
-                        stashLikedAt = current.currentTrack?.stashLikedAt ?: incoming.stashLikedAt,
-                        spotifySavedAt = current.currentTrack?.spotifySavedAt ?: incoming.spotifySavedAt,
-                        ytMusicSavedAt = current.currentTrack?.ytMusicSavedAt ?: incoming.ytMusicSavedAt,
-                    )
-                } else {
-                    incoming
-                }
                 current.copy(
-                    currentTrack = mergedTrack,
+                    // Prefer Room's live row; fall back to player's MediaItem
+                    // snapshot for non-library content (streams, search previews).
+                    currentTrack = liveTrack ?: state.currentTrack,
                     isPlaying = state.isPlaying,
                     currentPositionMs = positionMs,
                     durationMs = state.durationMs,
@@ -134,43 +136,8 @@ class NowPlayingViewModel @Inject constructor(
             .launchIn(viewModelScope)
     }
 
-    /**
-     * v0.9.13: Live-bind the heart icon's state to Room. The player's
-     * Track snapshot doesn't refresh from the `tracks` table after
-     * marker writes, so without this observation the heart reverts to
-     * outline whenever the screen is recomposed from scratch (e.g.
-     * mini-player closed and reopened — fresh VM, fresh `_uiState`,
-     * fresh player snapshot still showing null timestamps).
-     *
-     * `flatMapLatest` re-anchors when the user skips to a different
-     * track. `distinctUntilChanged` deduplicates emissions when an
-     * unrelated `tracks` mutation re-fires the Flow but doesn't move
-     * any of the three timestamps.
-     */
-    @OptIn(ExperimentalCoroutinesApi::class)
-    private fun observeLikeStateForCurrentTrack() {
-        playerRepository.playerState
-            .map { it.currentTrack?.id }
-            .distinctUntilChanged()
-            .flatMapLatest { id ->
-                if (id == null) flowOf(null) else musicRepository.observeLikeState(id)
-            }
-            .distinctUntilChanged()
-            .onEach { state ->
-                _uiState.update { current ->
-                    val track = current.currentTrack ?: return@update current
-                    if (state == null || state.id != track.id) return@update current
-                    current.copy(
-                        currentTrack = track.copy(
-                            stashLikedAt = state.stashLikedAt,
-                            spotifySavedAt = state.spotifySavedAt,
-                            ytMusicSavedAt = state.ytMusicSavedAt,
-                        )
-                    )
-                }
-            }
-            .launchIn(viewModelScope)
-    }
+    // observeLikeStateForCurrentTrack removed in v0.9.13 — subsumed by
+    // observePlayerStateLive's Room-bound currentTrack flow above.
 
     // ------------------------------------------------------------------
     // User Actions
@@ -310,134 +277,58 @@ class NowPlayingViewModel @Inject constructor(
     }
 
     // ------------------------------------------------------------------
-    // v0.9.13 — Heart / Like actions
+    // v0.9.13 — Heart / Like actions (Stash-only, standard toggle UX)
     // ------------------------------------------------------------------
 
     /**
-     * Tap-to-like with the user's default destinations from Settings.
+     * Heart toggle. Tap on an unliked track adds it to the local Stash
+     * Liked Songs playlist; tap on a liked track removes it. Pure
+     * local-DB operation — does NOT propagate to Spotify/YT Music.
      *
-     * Stash always works locally; Spotify and YT Music only fire when the
-     * user is connected AND has the corresponding default toggled on. The
-     * dispatcher itself handles per-destination dedup — already-saved
-     * targets are no-ops.
+     * The Spotify auto-save scrobbler runs separately; un-liking
+     * locally never unsaves on Spotify (per v0.9.13 design — keeps
+     * the user's external account untouched).
      *
-     * Failures emit a per-destination Toast via [_userMessages]. Successes
-     * are silent: the heart icon flips state via the Track flow update,
-     * which is feedback enough.
+     * Heart-state visual: optimistic update writes the new
+     * stashLikedAt value to [_uiState.currentTrack] so the icon flips
+     * immediately. Room's observation eventually delivers the same
+     * value, so the two converge without a flicker.
      */
     fun onLikeTap() {
         val track = _uiState.value.currentTrack ?: return
-        viewModelScope.launch {
-            val defaults = buildSet {
-                if (likePreferences.heartDefaultStashNow()) add(com.stash.core.data.social.Destination.STASH)
-                if (likePreferences.heartDefaultSpotifyNow() &&
-                    tokenManager.spotifyAuthState.value is com.stash.core.auth.model.AuthState.Connected) {
-                    add(com.stash.core.data.social.Destination.SPOTIFY)
-                }
-                if (likePreferences.heartDefaultYtMusicNow() &&
-                    tokenManager.youTubeAuthState.value is com.stash.core.auth.model.AuthState.Connected) {
-                    add(com.stash.core.data.social.Destination.YT_MUSIC)
-                }
-            }
-            if (defaults.isEmpty()) return@launch
-            val results = likeDispatcher.like(track, defaults)
-            applyOptimisticLikeState(track.id, results)
-            results.forEach { (dest, result) ->
-                val cause = result.exceptionOrNull() ?: return@forEach
-                if (cause is com.stash.core.data.social.NoSpotifyUriException ||
-                    cause is com.stash.core.data.social.NoYouTubeIdException) {
-                    return@forEach  // Silently skip: track simply isn't on this platform.
-                }
-                _userMessages.tryEmit("Couldn't save to ${friendlyName(dest)}")
-            }
-        }
-    }
-
-    /**
-     * Long-press on the heart — opens the per-track override sheet
-     * pre-checked with the user's defaults, plus "Already saved" hints
-     * for any destination whose `*_saved_at` is already populated.
-     */
-    fun onLikeLongPress() {
-        viewModelScope.launch {
-            val track = _uiState.value.currentTrack ?: return@launch
-            _likeSheetState.value = com.stash.core.ui.components.LikeDestinationSheetState(
-                spotifyVisible = tokenManager.spotifyAuthState.value is com.stash.core.auth.model.AuthState.Connected,
-                ytVisible = tokenManager.youTubeAuthState.value is com.stash.core.auth.model.AuthState.Connected,
-                stashChecked = likePreferences.heartDefaultStashNow(),
-                spotifyChecked = likePreferences.heartDefaultSpotifyNow(),
-                ytChecked = likePreferences.heartDefaultYtMusicNow(),
-                stashAlreadySaved = track.stashLikedAt != null,
-                spotifyAlreadySaved = track.spotifySavedAt != null,
-                ytAlreadySaved = track.ytMusicSavedAt != null,
-            )
-        }
-    }
-
-    /** Dismiss the override sheet without saving. */
-    fun onLikeSheetDismiss() {
-        _likeSheetState.value = null
-    }
-
-    /**
-     * Save action from the override sheet. Selection is ephemeral — it
-     * does NOT update Settings defaults. Errors are intentionally
-     * swallowed here; the dispatcher logs them and the sheet closes
-     * either way to match Material guidance for modal sheets.
-     */
-    fun onLikeSheetSave(selected: Set<com.stash.core.ui.components.DestinationCheckbox>) {
-        val track = _uiState.value.currentTrack ?: return
-        viewModelScope.launch {
-            val mapped = selected.map { ui ->
-                when (ui) {
-                    com.stash.core.ui.components.DestinationCheckbox.STASH -> com.stash.core.data.social.Destination.STASH
-                    com.stash.core.ui.components.DestinationCheckbox.SPOTIFY -> com.stash.core.data.social.Destination.SPOTIFY
-                    com.stash.core.ui.components.DestinationCheckbox.YT_MUSIC -> com.stash.core.data.social.Destination.YT_MUSIC
-                }
-            }.toSet()
-            val results = likeDispatcher.like(track, mapped)
-            applyOptimisticLikeState(track.id, results)
-            _likeSheetState.value = null
-        }
-    }
-
-    /**
-     * v0.9.13: Mirror successful saves into [_uiState.currentTrack] so the
-     * heart icon flips immediately. The Track flowing in from
-     * [playerRepository.playerState] is a snapshot taken at track-load
-     * time and is NOT live-bound to the `tracks` table, so without this
-     * write-back the icon stays outline-white even though the DB row
-     * has the timestamp set. Only updates the destinations that
-     * actually succeeded; failures and skipped destinations leave the
-     * timestamp at whatever it was before.
-     */
-    private fun applyOptimisticLikeState(
-        trackId: Long,
-        results: Map<com.stash.core.data.social.Destination, Result<Unit>>,
-    ) {
+        val wasLiked = track.stashLikedAt != null
+        // Optimistic UI: flip the timestamp BEFORE the DB write so the
+        // icon updates within one frame. The smart-merge in
+        // observePlayerState keeps this from being stomped by position
+        // ticks; observeLikeStateForCurrentTrack converges to the
+        // canonical value when Room emits.
         val now = System.currentTimeMillis()
         _uiState.update { current ->
-            val track = current.currentTrack ?: return@update current
-            if (track.id != trackId) return@update current  // Track changed mid-flight; drop.
-            val updated = track.copy(
-                stashLikedAt = if (results[com.stash.core.data.social.Destination.STASH]?.isSuccess == true) {
-                    track.stashLikedAt ?: now
-                } else track.stashLikedAt,
-                spotifySavedAt = if (results[com.stash.core.data.social.Destination.SPOTIFY]?.isSuccess == true) {
-                    track.spotifySavedAt ?: now
-                } else track.spotifySavedAt,
-                ytMusicSavedAt = if (results[com.stash.core.data.social.Destination.YT_MUSIC]?.isSuccess == true) {
-                    track.ytMusicSavedAt ?: now
-                } else track.ytMusicSavedAt,
-            )
-            current.copy(currentTrack = updated)
+            val t = current.currentTrack ?: return@update current
+            if (t.id != track.id) return@update current
+            current.copy(currentTrack = t.copy(stashLikedAt = if (wasLiked) null else now))
         }
-    }
-
-    private fun friendlyName(dest: com.stash.core.data.social.Destination): String = when (dest) {
-        com.stash.core.data.social.Destination.STASH -> "Stash"
-        com.stash.core.data.social.Destination.SPOTIFY -> "Spotify"
-        com.stash.core.data.social.Destination.YT_MUSIC -> "YouTube Music"
+        viewModelScope.launch {
+            runCatching {
+                if (wasLiked) {
+                    stashLikedRepository.remove(track.id)
+                } else {
+                    stashLikedRepository.add(track.id)
+                }
+            }.onFailure { e ->
+                android.util.Log.w("NowPlayingViewModel", "stash like toggle failed", e)
+                _userMessages.tryEmit(
+                    if (wasLiked) "Couldn't remove from Liked Songs"
+                    else "Couldn't add to Liked Songs"
+                )
+                // Roll back the optimistic flip so UI reflects truth.
+                _uiState.update { current ->
+                    val t = current.currentTrack ?: return@update current
+                    if (t.id != track.id) return@update current
+                    current.copy(currentTrack = t.copy(stashLikedAt = track.stashLikedAt))
+                }
+            }
+        }
     }
 
     // ------------------------------------------------------------------
