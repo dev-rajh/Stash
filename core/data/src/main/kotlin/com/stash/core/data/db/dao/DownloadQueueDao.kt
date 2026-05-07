@@ -68,8 +68,13 @@ interface DownloadQueueDao {
     @Query("""
         SELECT dq.* FROM download_queue dq
         INNER JOIN tracks t ON t.id = dq.track_id
+        LEFT JOIN track_blocklist bl
+            ON bl.canonical_key = (t.canonical_artist || '|' || t.canonical_title)
+            OR (bl.spotify_uri IS NOT NULL AND bl.spotify_uri = t.spotify_uri)
+            OR (bl.youtube_id  IS NOT NULL AND bl.youtube_id  = t.youtube_id)
         WHERE dq.status = 'PENDING'
           AND t.source IN (:sources)
+          AND bl.canonical_key IS NULL
           AND EXISTS (
               SELECT 1 FROM playlist_tracks pt
               INNER JOIN playlists p ON p.id = pt.playlist_id
@@ -92,8 +97,13 @@ interface DownloadQueueDao {
     @Query("""
         SELECT dq.* FROM download_queue dq
         INNER JOIN tracks t ON t.id = dq.track_id
+        LEFT JOIN track_blocklist bl
+            ON bl.canonical_key = (t.canonical_artist || '|' || t.canonical_title)
+            OR (bl.spotify_uri IS NOT NULL AND bl.spotify_uri = t.spotify_uri)
+            OR (bl.youtube_id  IS NOT NULL AND bl.youtube_id  = t.youtube_id)
         WHERE dq.status = 'FAILED' AND dq.retry_count < 3
           AND t.source IN (:sources)
+          AND bl.canonical_key IS NULL
           AND EXISTS (
               SELECT 1 FROM playlist_tracks pt
               INNER JOIN playlists p ON p.id = pt.playlist_id
@@ -212,9 +222,14 @@ interface DownloadQueueDao {
      */
     @Query("""
         SELECT t.id FROM tracks t
+        LEFT JOIN track_blocklist bl
+            ON bl.canonical_key = (t.canonical_artist || '|' || t.canonical_title)
+            OR (bl.spotify_uri IS NOT NULL AND bl.spotify_uri = t.spotify_uri)
+            OR (bl.youtube_id  IS NOT NULL AND bl.youtube_id  = t.youtube_id)
         WHERE t.is_downloaded = 0
           AND t.match_dismissed = 0
           AND t.source IN (:sources)
+          AND bl.canonical_key IS NULL
           AND EXISTS (
               SELECT 1 FROM playlist_tracks pt
               INNER JOIN playlists p ON p.id = pt.playlist_id
