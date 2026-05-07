@@ -15,6 +15,7 @@ import com.stash.core.data.db.dao.RemoteSnapshotDao
 import com.stash.core.data.db.dao.SourceAccountDao
 import com.stash.core.data.db.dao.StashMixRecipeDao
 import com.stash.core.data.db.dao.SyncHistoryDao
+import com.stash.core.data.db.dao.TrackBlocklistDao
 import com.stash.core.data.db.dao.TrackDao
 import com.stash.core.data.db.dao.TrackTagDao
 import com.stash.core.data.db.entity.ArtistProfileCacheEntity
@@ -28,6 +29,7 @@ import com.stash.core.data.db.entity.RemoteTrackSnapshotEntity
 import com.stash.core.data.db.entity.SourceAccountEntity
 import com.stash.core.data.db.entity.StashMixRecipeEntity
 import com.stash.core.data.db.entity.SyncHistoryEntity
+import com.stash.core.data.db.entity.TrackBlocklistEntity
 import com.stash.core.data.db.entity.TrackEntity
 import com.stash.core.data.db.entity.TrackFts
 import com.stash.core.data.db.entity.TrackTagEntity
@@ -63,8 +65,9 @@ import com.stash.core.data.db.entity.TrackTagEntity
         TrackTagEntity::class,
         StashMixRecipeEntity::class,
         DiscoveryQueueEntity::class,
+        TrackBlocklistEntity::class,
     ],
-    version = 18,
+    version = 19,
     exportSchema = true,
 )
 @TypeConverters(Converters::class)
@@ -91,6 +94,8 @@ abstract class StashDatabase : RoomDatabase() {
     abstract fun stashMixRecipeDao(): StashMixRecipeDao
 
     abstract fun discoveryQueueDao(): DiscoveryQueueDao
+
+    abstract fun trackBlocklistDao(): TrackBlocklistDao
 
 
     companion object {
