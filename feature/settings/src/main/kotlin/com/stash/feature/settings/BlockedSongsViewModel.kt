@@ -2,8 +2,8 @@ package com.stash.feature.settings
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.stash.core.data.db.entity.TrackEntity
-import com.stash.core.data.repository.MusicRepository
+import com.stash.core.data.blocklist.BlocklistGuard
+import com.stash.core.data.db.entity.TrackBlocklistEntity
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -13,54 +13,53 @@ import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 /**
- * Presentation-layer row for the Blocked Songs viewer. Decouples the UI
- * from the Room entity so the settings feature doesn't take a dependency
- * on `core:data`'s `TrackEntity` at its surface.
+ * Presentation-layer row for the Blocked Songs viewer. v0.9.15: keyed by
+ * [canonicalKey] (not trackId) since the underlying tracks row is gone
+ * after a block. Album art is no longer carried — `track_blocklist` rows
+ * persist past row deletion and have no associated artwork.
  */
 data class BlockedTrackRow(
-    val trackId: Long,
+    val canonicalKey: String,
     val title: String,
     val artist: String,
-    val album: String,
-    val albumArtUrl: String?,
 )
 
 /**
  * ViewModel backing the Settings → Blocked Songs screen.
  *
- * Exposes the currently-blocked tracks as a reactive [StateFlow] (so a new
- * block from the Home delete dialog streams into the list without a
- * manual refresh) and a single [unblock] action that clears the flag.
- * Unblocking immediately makes the next sync re-queue the track's
- * identity normally — see [MusicRepository.unblacklistTrack].
+ * v0.9.15: Sources directly from [BlocklistGuard.observeBlocklist] —
+ * the new identity-keyed `track_blocklist` table — instead of the old
+ * `tracks.is_blacklisted = 1` query. The unblock action removes by
+ * canonical key, which is what the new table is indexed by.
  */
 @HiltViewModel
 class BlockedSongsViewModel @Inject constructor(
-    private val musicRepository: MusicRepository,
+    private val blocklistGuard: BlocklistGuard,
 ) : ViewModel() {
 
-    /** Reactive list of blocked tracks, sorted by artist then title. */
+    /** Reactive list of blocked tracks, ordered most-recent-block first. */
     val blockedTracks: StateFlow<List<BlockedTrackRow>> =
-        musicRepository.getBlacklistedTracks()
-            .map { entities -> entities.map { it.toRow() } }
+        blocklistGuard.observeBlocklist()
+            .map { entries -> entries.map { it.toRow() } }
             .stateIn(
                 scope = viewModelScope,
                 started = SharingStarted.WhileSubscribed(5_000),
                 initialValue = emptyList(),
             )
 
-    /** Unblock a track. The next sync will re-queue it for download. */
-    fun unblock(trackId: Long) {
+    /**
+     * Unblock by canonical key. Removes the row from `track_blocklist`;
+     * the next sync re-queues the identity normally.
+     */
+    fun unblock(canonicalKey: String) {
         viewModelScope.launch {
-            musicRepository.unblacklistTrack(trackId)
+            blocklistGuard.unblock(canonicalKey)
         }
     }
 }
 
-private fun TrackEntity.toRow() = BlockedTrackRow(
-    trackId = id,
+private fun TrackBlocklistEntity.toRow() = BlockedTrackRow(
+    canonicalKey = canonicalKey,
     title = title,
     artist = artist,
-    album = album,
-    albumArtUrl = albumArtUrl,
 )

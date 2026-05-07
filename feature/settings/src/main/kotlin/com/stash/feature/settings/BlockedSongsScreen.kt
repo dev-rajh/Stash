@@ -125,10 +125,10 @@ fun BlockedSongsScreen(
                 )
             }
 
-            items(blocked, key = { it.trackId }) { row ->
+            items(blocked, key = { it.canonicalKey }) { row ->
                 BlockedTrackListItem(
                     row = row,
-                    onUnblock = { viewModel.unblock(row.trackId) },
+                    onUnblock = { viewModel.unblock(row.canonicalKey) },
                 )
                 HorizontalDivider(
                     modifier = Modifier.padding(start = 80.dp, end = 20.dp),
