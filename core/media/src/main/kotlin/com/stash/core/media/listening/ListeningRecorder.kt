@@ -1,8 +1,11 @@
 package com.stash.core.media.listening
 
 import android.util.Log
+import androidx.annotation.VisibleForTesting
 import com.stash.core.data.db.dao.ListeningEventDao
+import com.stash.core.data.db.dao.TrackSkipEventDao
 import com.stash.core.data.db.entity.ListeningEventEntity
+import com.stash.core.data.db.entity.TrackSkipEventEntity
 import com.stash.core.media.PlayerRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -11,6 +14,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChangedBy
 import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -28,16 +32,49 @@ import javax.inject.Singleton
  *   - Exactly one ListeningEventEntity per (track play session).
  *   - Switching tracks cancels the pending fire; the new track starts
  *     its own countdown.
- *   - If the user switches tracks before the threshold hits, no event is
- *     recorded — matching Last.fm's "not a play" convention.
+ *   - If the user switches tracks before the threshold hits, no
+ *     ListeningEventEntity is recorded — matching Last.fm's "not a
+ *     play" convention. v0.9.16: a [TrackSkipEventEntity] IS recorded
+ *     instead, feeding the skip-rate penalty in
+ *     [com.stash.core.data.mix.MixGenerator].
  */
 @Singleton
-class ListeningRecorder @Inject constructor(
+class ListeningRecorder @VisibleForTesting internal constructor(
     private val playerRepository: PlayerRepository,
     private val listeningEventDao: ListeningEventDao,
+    private val trackSkipEventDao: TrackSkipEventDao,
+    private val scope: CoroutineScope,
 ) {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private var pendingFireJob: Job? = null
+
+    @Inject
+    constructor(
+        playerRepository: PlayerRepository,
+        listeningEventDao: ListeningEventDao,
+        trackSkipEventDao: TrackSkipEventDao,
+    ) : this(
+        playerRepository = playerRepository,
+        listeningEventDao = listeningEventDao,
+        trackSkipEventDao = trackSkipEventDao,
+        scope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+    )
+
+    /**
+     * Pending threshold-fire metadata. We keep the [firedFlag] alongside
+     * the [job] because [Job.cancel] completes the job synchronously —
+     * `isCompleted` cannot distinguish "delay body ran" from "delay was
+     * cancelled mid-flight". The flag is set inside the delay body
+     * BEFORE the listening_events insert, so a track-change collector
+     * reading `firedFlag.get()` after `cancel()` sees the truthful state.
+     */
+    private data class PendingFire(
+        val trackId: Long,
+        val sessionStart: Long,
+        val job: Job,
+        val firedFlag: AtomicBoolean,
+        val positionAtScheduleMs: Long,
+    )
+
+    private var pending: PendingFire? = null
 
     /** Must be called exactly once from Application.onCreate. */
     fun start() {
@@ -49,14 +86,49 @@ class ListeningRecorder @Inject constructor(
             playerRepository.playerState
                 .distinctUntilChangedBy { it.currentTrack?.id }
                 .collect { state ->
-                    pendingFireJob?.cancel()
+                    // 1. Snapshot previous pending and record a skip if
+                    //    its delayed-fire never completed (cancellation
+                    //    completes the Job either way, so isCompleted is
+                    //    unreliable — we use an AtomicBoolean flag set
+                    //    inside the delay block right before the insert).
+                    val previousPending = pending
+                    if (previousPending != null) {
+                        previousPending.job.cancel()
+                        if (!previousPending.firedFlag.get()) {
+                            val skipAt = System.currentTimeMillis()
+                            val position = previousPending.positionAtScheduleMs
+                            // Inline (rather than `scope.launch { ... }`) so
+                            // the suspend insert completes within the collect
+                            // tick — keeps the skip ordered with respect to
+                            // the next track's scheduling and lets the test
+                            // harness observe the insert without an extra
+                            // dispatcher round-trip.
+                            runCatching {
+                                trackSkipEventDao.insert(
+                                    TrackSkipEventEntity(
+                                        trackId = previousPending.trackId,
+                                        skippedAt = skipAt,
+                                        positionMs = position,
+                                    ),
+                                )
+                            }.onFailure { Log.w(TAG, "skip insert failed", it) }
+                        }
+                    }
+                    pending = null
+
+                    // 2. Schedule the new track's threshold-fire.
                     val track = state.currentTrack ?: return@collect
-                    val threshold = thresholdFor(track.durationMs)
                     val sessionStart = System.currentTimeMillis()
-                    pendingFireJob = scope.launch {
+                    val threshold = thresholdFor(track.durationMs)
+                    val firedFlag = AtomicBoolean(false)
+                    val job = scope.launch {
                         delay(threshold)
                         val nowPlaying = playerRepository.playerState.value.currentTrack?.id
                         if (nowPlaying == track.id) {
+                            // Mark fired BEFORE the insert so a race with
+                            // the next track-change collector observes
+                            // the correct state when it reads .get().
+                            firedFlag.set(true)
                             runCatching {
                                 listeningEventDao.insert(
                                     ListeningEventEntity(
@@ -71,6 +143,13 @@ class ListeningRecorder @Inject constructor(
                             }.onFailure { Log.w(TAG, "Failed to insert listening event", it) }
                         }
                     }
+                    pending = PendingFire(
+                        trackId = track.id,
+                        sessionStart = sessionStart,
+                        job = job,
+                        firedFlag = firedFlag,
+                        positionAtScheduleMs = playerRepository.playerState.value.positionMs,
+                    )
                 }
         }
     }
