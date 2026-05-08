@@ -32,6 +32,7 @@ import com.stash.core.data.db.entity.SyncHistoryEntity
 import com.stash.core.data.db.entity.TrackBlocklistEntity
 import com.stash.core.data.db.entity.TrackEntity
 import com.stash.core.data.db.entity.TrackFts
+import com.stash.core.data.db.entity.TrackSkipEventEntity
 import com.stash.core.data.db.entity.TrackTagEntity
 
 /**
@@ -66,8 +67,9 @@ import com.stash.core.data.db.entity.TrackTagEntity
         StashMixRecipeEntity::class,
         DiscoveryQueueEntity::class,
         TrackBlocklistEntity::class,
+        TrackSkipEventEntity::class,
     ],
-    version = 20,
+    version = 21,
     exportSchema = true,
 )
 @TypeConverters(Converters::class)
@@ -568,6 +570,54 @@ abstract class StashDatabase : RoomDatabase() {
                 db.execSQL("CREATE INDEX IF NOT EXISTS `index_tracks_title_artist` ON `tracks` (`title`, `artist`)")
 
                 db.execSQL("PRAGMA foreign_keys=ON")
+            }
+        }
+
+        /**
+         * v20 -> v21: Discover Mix tuning (v0.9.16).
+         *
+         * Purely additive — no recreate-table dance:
+         * 1. Four new track columns for Last.fm enrichment (mbid,
+         *    lastfm_user_playcount, lastfm_listeners, lastfm_user_loved).
+         *    Populated by TrackInfoEnrichmentWorker; nullable so
+         *    pre-enrichment rows stay valid.
+         * 2. seed_strategy on stash_mix_recipes — selects the
+         *    discovery seed source (ARTIST_SIMILAR / TAG_GRAPH /
+         *    TRACK_SIMILAR / NONE). Defaults to ARTIST_SIMILAR which
+         *    matches pre-v0.9.16 behavior so existing recipes are
+         *    behavior-preserving.
+         * 3. New track_skip_events table — captures skip events
+         *    separately from listening_events to preserve the
+         *    "every listening_event is a real listen" invariant
+         *    that the auto-save scrobbler depends on.
+         */
+        val MIGRATION_20_21 = object : Migration(20, 21) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // 1. Track-level columns for Last.fm enrichment.
+                db.execSQL("ALTER TABLE tracks ADD COLUMN mbid TEXT DEFAULT NULL")
+                db.execSQL("ALTER TABLE tracks ADD COLUMN lastfm_user_playcount INTEGER DEFAULT NULL")
+                db.execSQL("ALTER TABLE tracks ADD COLUMN lastfm_listeners INTEGER DEFAULT NULL")
+                db.execSQL("ALTER TABLE tracks ADD COLUMN lastfm_user_loved INTEGER NOT NULL DEFAULT 0")
+
+                // 2. seed_strategy on stash_mix_recipes.
+                db.execSQL(
+                    "ALTER TABLE stash_mix_recipes ADD COLUMN seed_strategy TEXT NOT NULL DEFAULT 'ARTIST_SIMILAR'"
+                )
+
+                // 3. New track_skip_events table.
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS track_skip_events (
+                        id          INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        track_id    INTEGER NOT NULL,
+                        skipped_at  INTEGER NOT NULL,
+                        position_ms INTEGER NOT NULL,
+                        FOREIGN KEY(track_id) REFERENCES tracks(id) ON DELETE CASCADE
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_track_skip_events_track_id ON track_skip_events(track_id)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_track_skip_events_skipped_at ON track_skip_events(skipped_at)")
             }
         }
     }

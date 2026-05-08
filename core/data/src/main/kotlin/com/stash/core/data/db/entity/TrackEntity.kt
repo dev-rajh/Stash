@@ -184,4 +184,34 @@ data class TrackEntity(
      */
     @ColumnInfo(name = "stash_liked_at")
     val stashLikedAt: Long? = null,
+
+    /**
+     * v0.9.16: Last.fm canonical recording MBID. Captured by
+     * TrackInfoEnrichmentWorker. Join key for any future MetaBrainz-
+     * stack work; null while the worker hasn't yet enriched this row.
+     */
+    @ColumnInfo(name = "mbid")
+    val mbid: String? = null,
+
+    /**
+     * v0.9.16: User's lifetime Last.fm playcount for this track.
+     * Richer than [playCount] (which only counts in-Stash plays) for
+     * users with pre-Stash listening history. Null = not yet enriched.
+     */
+    @ColumnInfo(name = "lastfm_user_playcount")
+    val lastfmUserPlaycount: Int? = null,
+
+    /**
+     * v0.9.16: Public Last.fm listener count. Used as a popularity
+     * bucket for novelty calibration in the recommender.
+     */
+    @ColumnInfo(name = "lastfm_listeners")
+    val lastfmListeners: Long? = null,
+
+    /**
+     * v0.9.16: Did the user love this track on Last.fm? Explicit
+     * positive label, weighted heavier than scrobble counts.
+     */
+    @ColumnInfo(name = "lastfm_user_loved", defaultValue = "0")
+    val lastfmUserLoved: Boolean = false,
 )

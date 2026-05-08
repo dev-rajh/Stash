@@ -98,4 +98,14 @@ data class StashMixRecipeEntity(
 
     @ColumnInfo(name = "last_refreshed_at")
     val lastRefreshedAt: Long? = null,
+
+    /**
+     * v0.9.16: Discovery seed strategy. ARTIST_SIMILAR (default,
+     * pre-v0.9.16 behavior), TAG_GRAPH (use the user's top tags to
+     * pull from `tag.getTopTracks`), TRACK_SIMILAR (seed from top
+     * tracks via `track.getSimilar`), or NONE (no discovery, library
+     * only). See [com.stash.core.data.mix.MixSeedStrategy].
+     */
+    @ColumnInfo(name = "seed_strategy", defaultValue = "ARTIST_SIMILAR")
+    val seedStrategy: String = "ARTIST_SIMILAR",
 )
