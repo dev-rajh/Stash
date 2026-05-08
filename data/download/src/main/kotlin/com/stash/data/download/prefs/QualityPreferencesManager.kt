@@ -85,10 +85,19 @@ fun QualityTier.toYtDlpArgs(): List<String> = when (this) {
     // 141 is more likely to appear on free authenticated accounts.
     // Library Health surfaces the resulting format breakdown so we can
     // measure yield empirically before promoting MAX to default.
+    // v0.9.16: removed the player_client override. The previous
+    // value `web_music,android_music,ios_music,tv,web` is fully
+    // broken on YouTube as of late 2025: web_music demands a GVS
+    // PO Token we can't acquire from the app, android_music and
+    // ios_music are unsupported by current yt-dlp, and tv returns
+    // DRM-protected formats. Letting yt-dlp pick its own current
+    // defaults works because the bundled youtubedl-android tracks
+    // a yt-dlp version that knows which clients still serve free
+    // formats. Format preference broadened to fall through 141 →
+    // 140 → 251 → 250 → bestaudio so a single missing itag doesn't
+    // fail the whole download.
     QualityTier.MAX -> listOf(
-        "-f", "141/251/140/bestaudio",
-        "--extractor-args",
-        "youtube:player_client=web_music,android_music,ios_music,tv,web",
+        "-f", "141/140/251/250/bestaudio",
         "--embed-metadata",
     )
     QualityTier.BEST -> listOf(
