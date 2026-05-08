@@ -190,6 +190,7 @@ fun SettingsScreen(
         onRetryYouTubeHistory = viewModel::onRetryYouTubeHistory,
         onLosslessEnabledChanged = viewModel::onLosslessEnabledChanged,
         onLosslessQualityTierChanged = viewModel::onLosslessQualityTierChanged,
+        onYoutubeFallbackChanged = viewModel::onYoutubeFallbackChanged,
         onSquidWtfCaptchaCookieChanged = viewModel::onSquidWtfCaptchaCookieChanged,
         onResetLosslessRateLimiter = viewModel::onResetLosslessRateLimiter,
         onAutoSaveEnabledChanged = viewModel::onAutoSaveEnabledChanged,
@@ -235,6 +236,7 @@ private fun SettingsContent(
     onRetryYouTubeHistory: () -> Unit,
     onLosslessEnabledChanged: (Boolean) -> Unit,
     onLosslessQualityTierChanged: (LosslessQualityTier) -> Unit,
+    onYoutubeFallbackChanged: (Boolean) -> Unit,
     onSquidWtfCaptchaCookieChanged: (String) -> Unit,
     onResetLosslessRateLimiter: () -> Unit,
     onAutoSaveEnabledChanged: (Boolean) -> Unit,
@@ -427,14 +429,52 @@ private fun SettingsContent(
             }
         }
 
-        // -- Audio Quality section --------------------------------------------
-        SectionHeader(title = "Audio Quality")
+        // -- Audio Quality section (top-level) --------------------------------
+        // v0.9.17: when lossless is on, this top-level card hides — the YT
+        // tier picker is reachable through the "YouTube fallback" expander
+        // inside the lossless card below, so the user has a single mental
+        // anchor for "audio quality." When lossless is off, today's layout
+        // is preserved exactly: standalone picker governing yt-dlp tier.
+        if (!uiState.losslessEnabled) {
+            SectionHeader(title = "Audio Quality")
 
+            GlassCard {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .selectableGroup(),
+                ) {
+                    // -- Download quality (radio group) -------------------------
+                    Text(
+                        text = "Download quality",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    AudioQualityPicker(
+                        selected = uiState.audioQuality,
+                        onSelected = onQualityChanged,
+                    )
+                }
+            }
+        }
+
+        // -- Lossless audio card ---------------------------------------------
         GlassCard(modifier = Modifier.bringIntoViewRequester(losslessRequester)) {
             var advancedExpanded by remember(uiState.losslessEnabled) { mutableStateOf(false) }
             val chevronRotation by animateFloatAsState(
                 targetValue = if (advancedExpanded) 90f else 0f,
                 label = "advancedChevron",
+            )
+            // v0.9.17: YouTube-fallback expander state. Re-keyed on the
+            // losslessEnabled flip so the card collapses cleanly when the
+            // user toggles lossless off (returning the picker to its top-
+            // level home) and on (revealing it nested behind the expander).
+            var fallbackExpanded by remember(uiState.losslessEnabled) { mutableStateOf(false) }
+            val fallbackChevronRotation by animateFloatAsState(
+                targetValue = if (fallbackExpanded) 90f else 0f,
+                label = "fallback-chevron",
             )
 
             Column(
@@ -442,31 +482,6 @@ private fun SettingsContent(
                     .fillMaxWidth()
                     .selectableGroup(),
             ) {
-                // -- Download quality (radio group) -------------------------
-                Text(
-                    text = "Download quality",
-                    style = MaterialTheme.typography.titleSmall,
-                    color = MaterialTheme.colorScheme.onSurface,
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-
-                AudioQualityPicker(
-                    selected = uiState.audioQuality,
-                    onSelected = onQualityChanged,
-                )
-
-                // -- Divider between always-on quality + experimental lossless ---
-                // glassBorder matches the existing in-card divider style used by
-                // other Settings cards (Storage, Move library, AccountConnectionCard).
-                // Do NOT use MaterialTheme.colorScheme.outlineVariant — it would
-                // visually announce the consolidation as foreign vs the surrounding
-                // GlassCard chrome.
-                HorizontalDivider(
-                    modifier = Modifier.padding(vertical = 12.dp),
-                    thickness = 1.dp,
-                    color = extendedColors.glassBorder,
-                )
-
                 // -- Lossless toggle row -------------------------------------
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -563,6 +578,71 @@ private fun SettingsContent(
                                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         )
                                     }
+                                }
+                            }
+                        }
+
+                        // -- YouTube fallback expander row (v0.9.17) -----------
+                        // Hosts the relocated yt-dlp tier picker plus the
+                        // master fallback toggle. Mirrors the Advanced
+                        // expander's chevron / padding / label treatment.
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { fallbackExpanded = !fallbackExpanded }
+                                .semantics {
+                                    role = Role.Button
+                                    stateDescription = if (fallbackExpanded) "expanded" else "collapsed"
+                                }
+                                .padding(vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                                contentDescription = null,
+                                modifier = Modifier.graphicsLayer(rotationZ = fallbackChevronRotation),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = "YouTube fallback",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Text(
+                                text = if (uiState.youtubeFallbackEnabled) "on" else "off",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+
+                        AnimatedVisibility(
+                            visible = fallbackExpanded,
+                            enter = expandVertically() + fadeIn(),
+                            exit = shrinkVertically() + fadeOut(),
+                        ) {
+                            Column(modifier = Modifier.fillMaxWidth()) {
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Switch(
+                                        checked = uiState.youtubeFallbackEnabled,
+                                        onCheckedChange = onYoutubeFallbackChanged,
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        text = "Use YouTube when lossless fails",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                    )
+                                }
+                                if (uiState.youtubeFallbackEnabled) {
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    AudioQualityPicker(
+                                        selected = uiState.audioQuality,
+                                        onSelected = onQualityChanged,
+                                    )
                                 }
                             }
                         }

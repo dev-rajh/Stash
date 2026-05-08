@@ -119,6 +119,14 @@ data class SettingsUiState(
     val heartDefaultYtMusic: Boolean = false,
     /** v0.9.13: count of tracks auto-saved in the last 7 days, for the diagnostics line. */
     val autoSavedCountLast7Days: Int = 0,
+    /**
+     * v0.9.17: when lossless is on, controls whether yt-dlp is allowed
+     * to take over a track that no lossless source could resolve. When
+     * false (default), the track sits in WAITING_FOR_LOSSLESS until a
+     * source resolves it; when true, yt-dlp picks it up at
+     * [audioQuality]. Only meaningful while [losslessEnabled] is true.
+     */
+    val youtubeFallbackEnabled: Boolean = false,
 )
 
 /**

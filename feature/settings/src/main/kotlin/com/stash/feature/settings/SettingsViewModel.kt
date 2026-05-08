@@ -153,6 +153,7 @@ class SettingsViewModel @Inject constructor(
         likePreferences.heartDefaultSpotify,
         likePreferences.heartDefaultYtMusic,
         autoSavedCountLast7Days,
+        losslessPrefs.youtubeFallbackEnabled,
     ) { values ->
         @Suppress("UNCHECKED_CAST")
         val spotifyAuth = values[0] as AuthState
@@ -180,6 +181,7 @@ class SettingsViewModel @Inject constructor(
         val heartDefaultSpotify = values[22] as Boolean
         val heartDefaultYtMusic = values[23] as Boolean
         val autoSavedCount7d = values[24] as Int
+        val youtubeFallbackEnabled = values[25] as Boolean
 
         val lastFmState: LastFmAuthState = local.lastFmAuthOverride
             ?: when {
@@ -225,6 +227,7 @@ class SettingsViewModel @Inject constructor(
             heartDefaultSpotify = heartDefaultSpotify,
             heartDefaultYtMusic = heartDefaultYtMusic,
             autoSavedCountLast7Days = autoSavedCount7d,
+            youtubeFallbackEnabled = youtubeFallbackEnabled,
         )
     }.stateIn(
         scope = viewModelScope,
@@ -663,6 +666,20 @@ class SettingsViewModel @Inject constructor(
     fun onLosslessQualityTierChanged(tier: LosslessQualityTier) {
         viewModelScope.launch {
             losslessPrefs.setQualityTier(tier)
+        }
+    }
+
+    /**
+     * v0.9.17: opt-in YouTube fallback for the FLAC-only download path.
+     * When false (default), tracks with no lossless match sit in
+     * WAITING_FOR_LOSSLESS and the LosslessRetryWorker re-resolves them
+     * later. When true, yt-dlp takes over at the user's
+     * [QualityTier]; the pref's setter also requeues any deferred rows
+     * so the existing backlog drains immediately.
+     */
+    fun onYoutubeFallbackChanged(value: Boolean) {
+        viewModelScope.launch {
+            losslessPrefs.setYoutubeFallbackEnabled(value)
         }
     }
 
