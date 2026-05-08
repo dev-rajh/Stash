@@ -29,6 +29,7 @@ import com.stash.core.data.sync.workers.TagEnrichmentWorker
 import com.stash.core.data.sync.workers.TrackInfoEnrichmentWorker
 import com.stash.core.data.sync.workers.UpdateCheckWorker
 import com.stash.core.media.preview.LosslessUrlPrefetcher
+import com.stash.data.download.lossless.LosslessRetryScheduler
 import com.stash.data.download.ytdlp.YtDlpUpdateWorker
 import dagger.hilt.android.HiltAndroidApp
 import kotlinx.coroutines.CoroutineScope
@@ -95,6 +96,16 @@ class StashApplication : Application(), Configuration.Provider {
 
     @Inject
     lateinit var losslessPrefetcher: LosslessUrlPrefetcher
+
+    /**
+     * v0.9.17: eager-bound observer that enqueues [LosslessRetryWorker]
+     * on cookie change / lastKnownBadCookie clear / circuit-breaker
+     * reset events. `lateinit` + `@Inject` makes Hilt construct the
+     * singleton when this field is first touched at [onCreate]; we then
+     * call its `start()` to wire up the three reactive collectors.
+     */
+    @Inject
+    lateinit var losslessRetryScheduler: LosslessRetryScheduler
 
     /** Application-scoped coroutine scope for one-shot startup tasks. */
     private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -215,6 +226,13 @@ class StashApplication : Application(), Configuration.Provider {
         lastFmScrobbler.start()
         youTubeHistoryScrobbler.start()
         autoSaveScrobbler.start()
+
+        // Wire the three reactive triggers (cookie change /
+        // lastKnownBadCookie transition / rate-limiter circuit-reset
+        // event) that enqueue LosslessRetryWorker for the strict-FLAC
+        // deferred set. Touching the @Inject field here forces Hilt
+        // to construct the singleton if Dagger hasn't already.
+        losslessRetryScheduler.start()
     }
 
     /**
