@@ -44,6 +44,7 @@ class LosslessSourcePreferences @Inject constructor(
     private val captchaCookieKey = stringPreferencesKey("squid_wtf_captcha_verified_at")
     private val bannerDismissedKey = booleanPreferencesKey("home_banner_dismissed")
     private val qualityTierKey = stringPreferencesKey("lossless_quality_tier")
+    private val youtubeFallbackKey = booleanPreferencesKey("youtube_fallback_enabled")
 
     /**
      * Master switch for the lossless-source pipeline. When false, the
@@ -69,6 +70,26 @@ class LosslessSourcePreferences @Inject constructor(
 
     suspend fun setEnabled(value: Boolean) {
         context.losslessDataStore.edit { prefs -> prefs[enabledKey] = value }
+    }
+
+    /**
+     * When the lossless registry can't serve a track, whether to fall
+     * through to the yt-dlp pipeline (m4a / Opus) instead of deferring
+     * the download. Defaults to `false` (v0.9.17+) — strict FLAC is the
+     * new contract.
+     *
+     * Existing v0.9.16 users who flip this to true match the previous
+     * silent-fallback behaviour exactly; the legacy yt-dlp tier picker
+     * (MAX/BEST/HIGH/NORMAL/LOW) governs the fallback's quality.
+     */
+    val youtubeFallbackEnabled: Flow<Boolean> = context.losslessDataStore.data.map { prefs ->
+        prefs[youtubeFallbackKey] ?: false
+    }
+
+    suspend fun youtubeFallbackEnabledNow(): Boolean = youtubeFallbackEnabled.first()
+
+    suspend fun setYoutubeFallbackEnabled(value: Boolean) {
+        context.losslessDataStore.edit { prefs -> prefs[youtubeFallbackKey] = value }
     }
 
     /**

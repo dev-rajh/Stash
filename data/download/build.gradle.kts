@@ -14,6 +14,10 @@ android {
             // needed so android.util.Log calls inside production code don't
             // throw "not mocked" during JVM unit tests.
             isReturnDefaultValues = true
+            // Required for Robolectric-backed DataStore tests
+            // (LosslessSourcePreferencesYoutubeFallbackTest) to resolve
+            // ApplicationProvider/preferencesDataStore against android resources.
+            isIncludeAndroidResources = true
         }
     }
 }
@@ -63,4 +67,9 @@ dependencies {
     testImplementation(libs.mockk)
     // MockWebServer for QobuzApiClient tests — fake server, real OkHttp client.
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
+    // Robolectric — Android environment for DataStore-backed pref tests
+    // (LosslessSourcePreferencesYoutubeFallbackTest), mirroring the
+    // EqStoreTest setup in :core:media.
+    testImplementation(libs.robolectric)
+    testImplementation(libs.androidx.test.core)
 }
