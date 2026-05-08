@@ -452,10 +452,14 @@ class StashApplication : Application(), Configuration.Provider {
 
         /**
          * Bump when the shipped Stash Mix recipe set changes in a way
-         * that should wipe pre-existing builtins on upgrade. v1 = the
-         * 0.4.1 switch from 7 recipes to a single "Stash Discover".
+         * that should wipe pre-existing builtins on upgrade.
+         *  - v1 = the 0.4.1 switch from 7 recipes to a single
+         *    "Stash Discover".
+         *  - v2 = the 0.9.16 switch from the single "Stash Discover"
+         *    flagship to the three-recipe set (Daily Discover / Deep
+         *    Cuts / First Listen) — see [StashMixDefaults].
          */
-        private const val STASH_MIX_RECIPE_VERSION = 1
+        private const val STASH_MIX_RECIPE_VERSION = 2
 
         /**
          * Bump when the built-in Stash Discover recipe's tunables change

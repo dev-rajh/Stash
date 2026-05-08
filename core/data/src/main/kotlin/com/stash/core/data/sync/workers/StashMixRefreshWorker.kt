@@ -91,6 +91,15 @@ class StashMixRefreshWorker @AssistedInject constructor(
         private const val AFFINITY_LOOKBACK_DAYS = 180L
 
         /**
+         * Input-data key for [enqueueOneTime] (single-recipe overload).
+         * When present and > 0, [doWork] only refreshes that one recipe
+         * instead of iterating every active builtin. Backs the manual
+         * "Refresh this mix" action surfaced from the Home long-press
+         * menu.
+         */
+        const val KEY_RECIPE_ID = "stash_mix_refresh_recipe_id"
+
+        /**
          * Schedule the periodic refresh. Default 24-hour cadence with no
          * constraints — the library-only path works offline and fast
          * enough to not care. Discovery is opportunistic and tolerates
@@ -133,6 +142,30 @@ class StashMixRefreshWorker @AssistedInject constructor(
                 work,
             )
         }
+
+        /**
+         * Fire a one-shot refresh for a single recipe. Used by the Home
+         * long-press "Refresh this mix" action. Distinct unique-work name
+         * per recipe id so refreshing mix A doesn't clobber a still-pending
+         * refresh of mix B; REPLACE means a rapid double-tap on the same
+         * mix coalesces into one job.
+         */
+        fun enqueueOneTime(context: Context, recipeId: Long) {
+            val data = androidx.work.workDataOf(KEY_RECIPE_ID to recipeId)
+            val work = OneTimeWorkRequestBuilder<StashMixRefreshWorker>()
+                .setConstraints(
+                    Constraints.Builder()
+                        .setRequiredNetworkType(NetworkType.CONNECTED)
+                        .build(),
+                )
+                .setInputData(data)
+                .build()
+            WorkManager.getInstance(context).enqueueUniqueWork(
+                "${ONE_SHOT_WORK_NAME}_$recipeId",
+                androidx.work.ExistingWorkPolicy.REPLACE,
+                work,
+            )
+        }
     }
 
     override suspend fun doWork(): Result {
@@ -142,12 +175,26 @@ class StashMixRefreshWorker @AssistedInject constructor(
         // first WorkManager tick.
         StashMixDefaults.seedIfNeeded(recipeDao)
 
-        val active = recipeDao.getActive()
+        val targetId = inputData.getLong(KEY_RECIPE_ID, -1L)
+        val active = if (targetId > 0L) {
+            val one = recipeDao.getById(targetId)?.takeIf { it.isActive }
+            if (one == null) {
+                Log.d(TAG, "single-recipe refresh: recipe $targetId not found or inactive")
+                return Result.success()
+            }
+            listOf(one)
+        } else {
+            recipeDao.getActive()
+        }
         if (active.isEmpty()) {
             Log.d(TAG, "no active recipes")
             return Result.success()
         }
-        Log.i(TAG, "refreshing ${active.size} Stash Mixes")
+        Log.i(
+            TAG,
+            "refreshing ${active.size} Stash Mix(es)" +
+                if (targetId > 0L) " (single: ${active.first().name})" else "",
+        )
 
         val now = System.currentTimeMillis()
         val lastFmConfigured = lastFmCredentials.isConfigured

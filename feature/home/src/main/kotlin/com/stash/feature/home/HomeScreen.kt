@@ -59,6 +59,7 @@ import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.PlaylistAdd
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.RemoveCircleOutline
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -97,6 +98,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.stash.core.model.MusicSource
 import com.stash.core.model.Playlist
+import com.stash.core.model.PlaylistType
 import com.stash.core.model.SyncDisplayStatus
 import com.stash.core.model.SyncState
 import com.stash.core.model.Track
@@ -500,6 +502,19 @@ fun HomeScreen(
 
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
+            // v0.9.16: Manual single-mix refresh — only meaningful for
+            // recipe-driven Stash Mixes, not sync-imported daily mixes or
+            // user playlists.
+            if (playlist.type == PlaylistType.STASH_MIX) {
+                HomeBottomSheetActionRow(
+                    icon = Icons.Default.Refresh,
+                    label = "Refresh this mix",
+                    onClick = {
+                        viewModel.refreshMix(playlist.id)
+                        selectedPlaylist = null
+                    },
+                )
+            }
             HomeBottomSheetActionRow(
                 icon = Icons.Default.PlayArrow,
                 label = "Play All",

@@ -1,14 +1,17 @@
 package com.stash.feature.home
 
+import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.stash.core.auth.TokenManager
 import com.stash.core.auth.model.AuthState
 import com.stash.core.data.db.dao.ListeningEventDao
+import com.stash.core.data.db.dao.StashMixRecipeDao
 import com.stash.core.data.lastfm.LastFmCredentials
 import com.stash.core.data.lastfm.LastFmSessionPreference
 import com.stash.core.data.repository.MusicRepository
 import com.stash.core.data.sync.toDisplayStatus
+import com.stash.core.data.sync.workers.StashMixRefreshWorker
 import com.stash.core.media.PlayerRepository
 import com.stash.core.model.MusicSource
 import com.stash.core.model.Playlist
@@ -19,6 +22,7 @@ import com.stash.data.download.files.LibrarySizeBreakdown
 import com.stash.data.download.files.LibrarySizeHolder
 import com.stash.data.download.lossless.LosslessSourcePreferences
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -53,6 +57,8 @@ class HomeViewModel @Inject constructor(
     private val losslessPrefs: LosslessSourcePreferences,
     private val settingsDeepLinkController: com.stash.core.data.navigation.SettingsDeepLinkController,
     private val tipJarRepository: com.stash.core.data.tipjar.TipJarRepository,
+    private val recipeDao: StashMixRecipeDao,
+    @ApplicationContext private val context: Context,
 ) : ViewModel() {
 
     init {
@@ -430,6 +436,21 @@ class HomeViewModel @Inject constructor(
         if (trimmed.isBlank()) return
         viewModelScope.launch {
             musicRepository.createPlaylist(trimmed)
+        }
+    }
+
+    /**
+     * v0.9.16: Manually re-run the Stash Mix refresh worker for a single
+     * recipe (the one whose materialized playlist is [playlistId]). Used by
+     * the long-press "Refresh this mix" action on Stash Mix cards. No-op if
+     * the playlist doesn't belong to a Stash Mix recipe — the menu item is
+     * already gated on `playlist.type == STASH_MIX`, so the lookup miss is
+     * a defensive guard, not a user-facing error path.
+     */
+    fun refreshMix(playlistId: Long) {
+        viewModelScope.launch {
+            val recipe = recipeDao.findByPlaylistId(playlistId) ?: return@launch
+            StashMixRefreshWorker.enqueueOneTime(context, recipe.id)
         }
     }
 
