@@ -59,6 +59,7 @@ import coil3.request.ImageRequest
 import coil3.request.allowHardware
 import coil3.toBitmap
 import com.stash.core.model.RepeatMode
+import com.stash.core.model.isFlac
 import com.stash.core.ui.components.SaveToPlaylistSheet
 import com.stash.feature.nowplaying.ui.AmbientBackground
 import com.stash.feature.nowplaying.ui.GlowingProgressBar
@@ -155,6 +156,17 @@ fun NowPlayingScreen(
                     androidx.compose.foundation.layout.Spacer(
                         modifier = Modifier.height(4.dp),
                     )
+                    if (!track.isFlac) {
+                        androidx.compose.material3.OutlinedButton(
+                            onClick = {
+                                viewModel.findInFlacForCurrentTrack()
+                                showWrongMatchDialog = false
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            androidx.compose.material3.Text("Find in FLAC")
+                        }
+                    }
                     androidx.compose.material3.OutlinedButton(
                         onClick = {
                             viewModel.flagCurrentTrackAsWrongMatch()
