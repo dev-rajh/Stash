@@ -4,6 +4,7 @@ import com.stash.core.model.Playlist
 import com.stash.core.model.SyncDisplayStatus
 import com.stash.core.model.SyncState
 import com.stash.core.model.Track
+import com.stash.feature.home.banner.WaitingForLosslessBannerState
 
 /**
  * UI state for the Home screen, combining all observable data streams
@@ -83,6 +84,17 @@ data class HomeUiState(
      */
     val tipJar: com.stash.core.data.tipjar.TipJarState =
         com.stash.core.data.tipjar.TipJarState.EMPTY,
+
+    /**
+     * v0.9.17: state of the "tracks waiting for lossless" banner. Computed
+     * by [com.stash.feature.home.banner.bannerStateFor] from four observable
+     * inputs (deferred-row count, current captcha cookie, last-known-bad
+     * cookie, kennyy circuit-breaker state). [WaitingForLosslessBannerState.Hidden]
+     * is the steady state — no banner renders. Per-session dismissal is a
+     * separate ViewModel-side flag that gates rendering at the screen level.
+     */
+    val waitingForLosslessBanner: WaitingForLosslessBannerState =
+        WaitingForLosslessBannerState.Hidden,
 ) {
     /** Total liked songs across both sources. */
     val totalLikedCount: Int get() = spotifyLikedCount + youtubeLikedCount

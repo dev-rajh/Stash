@@ -23,6 +23,9 @@ dependencies {
     implementation(libs.compose.material.icons.extended)
     implementation(libs.coil.compose)
     implementation(libs.coil.network.okhttp)
+    // For LosslessRetryWorker enqueue from the deferred-banner "retry"
+    // action (HomeViewModel.onRetryDeferredRequested).
+    implementation(libs.work.runtime.ktx)
 
     testImplementation("junit:junit:4.13.2")
 }

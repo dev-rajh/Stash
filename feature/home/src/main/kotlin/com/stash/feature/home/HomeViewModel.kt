@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.stash.core.auth.TokenManager
 import com.stash.core.auth.model.AuthState
+import com.stash.core.data.db.dao.DownloadQueueDao
 import com.stash.core.data.db.dao.ListeningEventDao
 import com.stash.core.data.db.dao.StashMixRecipeDao
 import com.stash.core.data.lastfm.LastFmCredentials
@@ -20,15 +21,29 @@ import com.stash.core.model.SyncDisplayStatus
 import com.stash.core.model.Track
 import com.stash.data.download.files.LibrarySizeBreakdown
 import com.stash.data.download.files.LibrarySizeHolder
+import com.stash.data.download.lossless.AggregatorRateLimiter
+import com.stash.data.download.lossless.LosslessRetryWorker
 import com.stash.data.download.lossless.LosslessSourcePreferences
+import com.stash.data.download.lossless.kennyy.KennyySource
+import com.stash.data.download.lossless.qobuz.QobuzSource
+import com.stash.feature.home.banner.WaitingForLosslessBannerState
+import com.stash.feature.home.banner.bannerStateFor
+import androidx.work.ExistingWorkPolicy
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkManager
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
@@ -58,6 +73,9 @@ class HomeViewModel @Inject constructor(
     private val settingsDeepLinkController: com.stash.core.data.navigation.SettingsDeepLinkController,
     private val tipJarRepository: com.stash.core.data.tipjar.TipJarRepository,
     private val recipeDao: StashMixRecipeDao,
+    private val downloadQueueDao: DownloadQueueDao,
+    private val qobuzSource: QobuzSource,
+    private val aggregatorRateLimiter: AggregatorRateLimiter,
     @ApplicationContext private val context: Context,
 ) : ViewModel() {
 
@@ -174,6 +192,60 @@ class HomeViewModel @Inject constructor(
     }
 
     /**
+     * Per-session dismissal flag for the "tracks waiting for lossless"
+     * banner. Deliberately NOT DataStore-persisted: this banner surfaces
+     * a transient remediation hint, not a long-term opt-out. Cleared on
+     * process restart (the ViewModel dies with `viewModelScope`).
+     */
+    private val _waitingBannerDismissed = MutableStateFlow(false)
+
+    /**
+     * v0.9.17: kennyy circuit-breaker state, expressed as a Flow so the
+     * banner picker can react to outage transitions.
+     *
+     * `AggregatorRateLimiter.stateOf` is suspending and not a Flow today,
+     * so we re-read it whenever the circuit-reset SharedFlow signals a
+     * transition. The `flow { }` builder seeds the initial value with a
+     * one-shot suspending read so the banner picks the right state on
+     * first emission. `distinctUntilChanged` collapses no-op re-emissions
+     * (the SharedFlow can fire spuriously on stateOf reads — see the
+     * `_circuitResetEvents.tryEmit(sourceId)` inside `stateOf` itself).
+     */
+    private val kennyyBrokenFlow: Flow<Boolean> = flow {
+        emit(aggregatorRateLimiter.stateOf(KennyySource.SOURCE_ID).isCircuitBroken)
+        aggregatorRateLimiter.circuitResetEvents
+            .filter { it == KennyySource.SOURCE_ID }
+            .collect {
+                emit(aggregatorRateLimiter.stateOf(KennyySource.SOURCE_ID).isCircuitBroken)
+            }
+    }.distinctUntilChanged()
+
+    /**
+     * Combined banner state for the "tracks waiting for lossless" Home
+     * banner. Drives [HomeUiState.waitingForLosslessBanner]. The
+     * per-session dismissal flag is applied here so the rest of the UI
+     * sees [WaitingForLosslessBannerState.Hidden] uniformly when dismissed.
+     */
+    private val bannerStateFlow: Flow<WaitingForLosslessBannerState> = combine(
+        downloadQueueDao.waitingForLosslessCount(),
+        losslessPrefs.captchaCookieValue,
+        qobuzSource.lastKnownBadCookie,
+        kennyyBrokenFlow,
+        _waitingBannerDismissed,
+    ) { count, cookie, lastBad, kennyyBroken, dismissed ->
+        if (dismissed) {
+            WaitingForLosslessBannerState.Hidden
+        } else {
+            bannerStateFor(
+                count = count,
+                currentCookie = cookie.orEmpty(),
+                lastBadCookie = lastBad,
+                kennyyBroken = kennyyBroken,
+            )
+        }
+    }
+
+    /**
      * Derives (spotifyConnected, youTubeConnected, lastFmPrompt,
      * losslessPrompt) from TokenManager + Last.fm session state +
      * lossless prefs. Bundled so the top-level combine stays at 5
@@ -200,6 +272,7 @@ class HomeViewModel @Inject constructor(
         sourceCountsFlow,
         _playlistSortOrder,
         tipJarRepository.state,
+        bannerStateFlow,
     ) { args ->
         @Suppress("UNCHECKED_CAST")
         val musicData = args[0] as MusicData
@@ -211,6 +284,7 @@ class HomeViewModel @Inject constructor(
         val sourceCounts = args[3] as SourceCounts
         val playlistSortOrder = args[4] as PlaylistSortOrder
         val tipJar = args[5] as com.stash.core.data.tipjar.TipJarState
+        val bannerState = args[6] as WaitingForLosslessBannerState
         // Stash Mixes — recipe-driven, generated locally. Separate from
         // sync-imported Daily Mixes so the UI can label them distinctly.
         val stashMixes = musicData.playlists.filter {
@@ -268,6 +342,7 @@ class HomeViewModel @Inject constructor(
             losslessPrompt = authInfo.losslessPrompt,
             hasEverSynced = syncStatus.lastSyncTime != null,
             tipJar = tipJar,
+            waitingForLosslessBanner = bannerState,
         )
     }.stateIn(
         scope = viewModelScope,
@@ -304,6 +379,35 @@ class HomeViewModel @Inject constructor(
         viewModelScope.launch {
             losslessPrefs.setBannerDismissed(true)
         }
+    }
+
+    /**
+     * v0.9.17: dismiss the "tracks waiting for lossless" banner for
+     * this session only. Cleared on process restart (the flag lives
+     * on a `MutableStateFlow` inside `viewModelScope`, not DataStore).
+     * Persistent dismissal would let users hide a real failure
+     * indefinitely — that's the wrong default for a transient outage
+     * surface.
+     */
+    fun dismissWaitingForLosslessBanner() {
+        _waitingBannerDismissed.value = true
+    }
+
+    /**
+     * v0.9.17: kick off a one-shot retry sweep for any rows currently
+     * stuck in `WAITING_FOR_LOSSLESS`. Mirrors
+     * [com.stash.data.download.lossless.LosslessRetryScheduler.enqueue]
+     * exactly — same unique work name + KEEP policy, so a manual press
+     * coalesces with any in-flight automatic sweep instead of doubling
+     * the work.
+     */
+    fun onRetryDeferredRequested() {
+        val request = OneTimeWorkRequestBuilder<LosslessRetryWorker>().build()
+        WorkManager.getInstance(context).enqueueUniqueWork(
+            LosslessRetryWorker.UNIQUE_WORK_NAME,
+            ExistingWorkPolicy.KEEP,
+            request,
+        )
     }
 
     /**
