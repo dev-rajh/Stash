@@ -143,10 +143,113 @@ Deep Cuts uses `NONE` strategy — short-circuits before the seed-generator disp
 - Schema: 22 (unchanged)
 - New branch: `feat/first-listen-tag-fallback`, worktree at `.worktrees/first-listen-tag-fallback`. Per project memory: copy `local.properties` AND `keystore.properties` AND `stash-release.jks` into the worktree (`local.properties` for Last.fm credentials at build time; signing files for release-APK install over existing v0.9.18).
 
+## v0.9.19 follow-up: discovery survivor cap
+
+### Why this is in the same spec
+
+Phase 1 debugging on the v0.9.19 install surfaced a second, latent bug: `materializeMix` re-links **every** DONE row in `discovery_queue` for a recipe with no upper bound. Over many refreshes, the playlist grows past `targetLength`. Concrete observed effect: Daily Discover went from 50 tracks pre-v0.9.19 to 100 tracks immediately after the v0.9.19 install's app-startup all-recipes refresh, because ~50 DONE survivors had accumulated between v0.9.18 install and v0.9.19 install. The first-section histogram fallback above will produce the same drift on First Listen once `StashDiscoveryWorker` chews through the 300 PENDING candidates the fallback queues.
+
+This isn't a regression introduced by v0.9.19 — it's a pre-existing structural cap miss. But the same install that exposed it (the histogram fallback driving more candidates into the discovery queue) makes shipping the fallback alone awkward: First Listen would steadily creep past 50 tracks the way Daily Discover did. Keeping both fixes in the v0.9.19 ship avoids that intermediate broken state.
+
+### Goals
+
+- Discovery survivor re-link in `materializeMix` is bounded at `targetLength * discoveryRatio` (rounded). Enforces the recipe's stated discovery slot count.
+- Newest-DONE survivors win when the cap forces us to cut. Older survivors rotate out naturally on subsequent refreshes — matches each recipe's "freshness window" framing.
+- Library shortfall-fill (`MixGenerator.kt` line 192) is **untouched** — the cap applies only to discovery survivors, not to library tracks. Daily Discover keeps its current "fill library to 50 if pool is large enough" behavior.
+
+### Non-goals
+
+- **No change to library shortfall-fill.** Trimming library tracks to `(1 - discoveryRatio) * targetLength` when discovery survivors are present would make Daily Discover exactly 30+20=50, but that's a behavior change in `MixGenerator` that v0.9.16 has shipped with for months. Out of scope here. The cap fixes the unbounded-growth bug without touching working code.
+- **No DONE-row cleanup in the discovery queue itself.** The DAO query just LIMITs what's returned; old DONE rows past the cap stay in `discovery_queue` (still useful for diagnostics, future cap-bumps, etc.). A separate sweep that deletes long-stale DONE rows is a future YAGNI revisit.
+- **No new schema column or index.** `discovery_queue.completed_at` already exists and is set when the worker transitions to DONE; that's the ordering signal.
+
+### Design
+
+**File 1: `core/data/src/main/kotlin/com/stash/core/data/db/dao/DiscoveryQueueDao.kt`**
+
+Modify `getDoneTrackIdsForRecipe` to take a `limit` parameter and add `ORDER BY completed_at DESC LIMIT :limit`:
+
+```kotlin
+@Query("""
+    SELECT track_id FROM discovery_queue
+    WHERE recipe_id = :recipeId
+      AND status = 'DONE'
+      AND track_id IS NOT NULL
+    ORDER BY completed_at DESC
+    LIMIT :limit
+""")
+suspend fun getDoneTrackIdsForRecipe(recipeId: Long, limit: Int): List<Long>
+```
+
+`completed_at` is non-null for any row where `status = 'DONE'` (`DiscoveryQueueEntity.completedAt: Long?` is set inside the worker on the DONE transition; the schema doesn't enforce non-null but the data invariant holds in practice).
+
+**File 2: `core/data/src/main/kotlin/com/stash/core/data/sync/workers/StashMixRefreshWorker.kt`**
+
+In `materializeMix`, compute the cap at the call site and pass it. The existing in-Kotlin `librarySet` filter and blocklist loop operate on the already-capped list — no change to that logic:
+
+```kotlin
+val discoveryCap = (recipe.targetLength * recipe.discoveryRatio)
+    .roundToInt()
+    .coerceAtLeast(0)
+val candidateIds = discoveryQueueDao
+    .getDoneTrackIdsForRecipe(recipe.id, limit = discoveryCap)
+    .filter { it !in librarySet }
+val discoveryTrackIds = buildList {
+    for (trackId in candidateIds) {
+        if (!blocklistGuard.isBlockedByTrackId(trackId)) add(trackId)
+    }
+}
+// ... existing forEachIndexed insertion and totalCount = tracks.size + discoveryTrackIds.size
+```
+
+### Behavior matrix
+
+| Recipe | targetLength | discoveryRatio | New cap | Total bound (library + cap) |
+|---|---|---|---|---|
+| Daily Discover | 50 | 0.4 | 20 | up to 70 (50 library w/ shortfall fill + ≤20 discovery) |
+| Deep Cuts | 50 | 0.0 | 0 | 50 (library only; LIMIT 0 returns empty) |
+| First Listen | 50 | 1.0 | 50 | up to 50 (0 library + ≤50 discovery — pure discovery) |
+
+Daily Discover settling at 70 instead of 50 is intentional and matches the spec's intent above (no library trim). The user's observation of "Daily Discover at 100" becomes "≤70" after the cap — acceptable; the unbounded growth is the real bug.
+
+### Test surface (TDD)
+
+| Test | What it asserts |
+|---|---|
+| `getDoneTrackIdsForRecipe respects limit` | Seed N+M DONE rows for one recipe, request `limit = N`, verify N rows returned. |
+| `getDoneTrackIdsForRecipe orders by completed_at DESC` | Seed two DONE rows with `completedAt = (older, newer)`, request `limit = 2`, verify newer-first. |
+| `getDoneTrackIdsForRecipe filters status=DONE` | Seed PENDING + DONE rows for the same recipe, request `limit = 99`, verify only DONE returned. |
+| `getDoneTrackIdsForRecipe filters out null track_id` | Seed a DONE row where the worker hasn't yet linked a `track_id` (transient state — possible if a row updates status before linking the final track id), verify it's excluded. |
+| `getDoneTrackIdsForRecipe with limit=0 returns empty` | Edge case: Deep Cuts hits this on every refresh. Result must be empty list, no exception. |
+
+The first four tests live in an existing `DiscoveryQueueDao` test class if one exists, otherwise a new `DiscoveryQueueDaoCapTest.kt` sibling. The `materializeMix` integration is verified manually on-device after install (no Compose/UI test added — the cap is a count check that's already exercised by the on-device smoke test).
+
+### Edge cases
+
+#### `discoveryCap = 0`
+
+Daily Discover with the user's `discoveryRatio = 0.4` rounds to 20 — non-zero. Deep Cuts with `discoveryRatio = 0.0` rounds to 0 — `LIMIT 0` returns empty list. Sqlite tolerates `LIMIT 0` natively.
+
+#### Blocklist removes some of the top `cap` rows
+
+Cap = 20, but 5 of the top 20 are blocked. Result: 15 discovery survivors re-linked. The cap is a max, not a target — we don't re-query to backfill. Matches the existing semantic (the blocklist filter has always been post-fetch; the new code just runs it on a smaller fetch).
+
+#### `completed_at` is null on a row marked DONE
+
+Possible if a future bug or an incomplete migration leaves a DONE row without a timestamp. SQLite's `ORDER BY` puts NULLs last by default — those rows sink to the bottom and get cut first under the LIMIT. Acceptable degradation; flagged here so a future audit knows where to look.
+
+### Versioning + ship
+
+Same v0.9.19 ship — no separate version bump for this fix. The version bump commit (currently `ba21749`) gets rebased to the tip after the cap-fix commit lands, so the tagged commit at release time has both fixes plus the version bump in its merge base.
+
+User explicitly defers the ship decision until manual on-device verification — the worktree-build-install steps land in this iteration, but `git push` and `git tag` wait for user sign-off after testing.
+
 ## Open questions
 
 None blocking implementation. Possible follow-ups deferred to later releases:
 
 - **Tag-enrichment throughput.** 200 tracks/day on a vast library is slow. Doubling the batch (or adding a "catch-up" mode that runs hourly until the untagged backlog is < N) would reduce the window during which the fallback is the only source of truth. Worth doing if users with >5000 tracks repeatedly ask why their listening history doesn't bias First Listen.
 - **Hybrid weighting.** When the affinity vector exists but is *thin* (few plays on enriched tracks), blending with the histogram could produce better signal than either alone. Worth exploring if v0.9.19's binary "vector if present, histogram otherwise" feels sharp at the boundary.
+- **DONE-row cleanup in `discovery_queue`.** With the cap, old DONE rows past the survivor window stay in the queue indefinitely — useful for diagnostics, but accumulates over time. A periodic sweep to prune rows older than (say) 90 days could keep the table size in check.
+- **Library shortfall-fill rebalance.** Trimming library tracks to `(1 - discoveryRatio) * targetLength` when discovery survivors are present would tighten the total to exactly `targetLength`. Worth doing if `targetLength + discoveryCap` (e.g., 70 for Daily Discover) feels too long in practice.
 - **Listening events trigger immediate tag-enrichment.** Currently `TagEnrichmentWorker` walks `findUntaggedDownloadedTrackIds` from the top — there's no "prioritize tracks the user is actively playing" signal. A small tweak would re-order the queue to enrich played-but-untagged tracks first. Different bug class; out of scope here.
