@@ -5,24 +5,24 @@ import android.util.Log
 import androidx.hilt.work.HiltWorker
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.ExistingWorkPolicy
+import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import com.stash.core.data.db.dao.DiscoveryQueueDao
 import com.stash.core.model.DownloadNetworkMode
+import com.stash.core.data.prefs.DownloadNetworkPreference
 import com.stash.core.data.db.dao.DownloadQueueDao
-import com.stash.core.data.db.dao.PlaylistDao
 import com.stash.core.data.db.dao.StashMixRecipeDao
 import com.stash.core.data.db.dao.TrackDao
 import com.stash.core.data.db.entity.DiscoveryQueueEntity
 import com.stash.core.data.db.entity.DownloadQueueEntity
-import com.stash.core.data.db.entity.PlaylistTrackCrossRef
 import com.stash.core.data.db.entity.TrackEntity
 import com.stash.core.data.sync.TrackMatcher
 import com.stash.core.model.MusicSource
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
-import java.time.Instant
 import java.util.concurrent.TimeUnit
 
 /**
@@ -54,15 +54,16 @@ class StashDiscoveryWorker @AssistedInject constructor(
     private val discoveryQueueDao: DiscoveryQueueDao,
     private val downloadQueueDao: DownloadQueueDao,
     private val trackDao: TrackDao,
-    private val playlistDao: PlaylistDao,
     private val recipeDao: StashMixRecipeDao,
     private val trackMatcher: TrackMatcher,
     private val blocklistGuard: com.stash.core.data.blocklist.BlocklistGuard,
+    private val downloadNetworkPreference: DownloadNetworkPreference,
 ) : CoroutineWorker(appContext, params) {
 
     companion object {
         private const val TAG = "StashDiscovery"
         private const val WORK_NAME = "stash_discovery"
+        private const val ONE_SHOT_WORK_NAME = "stash_discovery_oneshot"
         private const val BATCH_SIZE = 60
         // Raised from 30 → 100 on 2026-04-22. With Stash Discover at 100%
         // discovery ratio + targetLength=50, a 30/week drain couldn't
@@ -95,6 +96,26 @@ class StashDiscoveryWorker @AssistedInject constructor(
                 work,
             )
         }
+
+        /**
+         * Fire a one-shot discovery sweep — manual user trigger, no charging
+         * requirement. Respects [DownloadNetworkMode] for cellular gating via
+         * [constraintsForManualTrigger]. Unique work name + REPLACE policy so a
+         * rapid double-tap coalesces. At the end of [doWork], the existing
+         * v0.9.20 chain to [DiscoveryDownloadWorker] fires, completing the
+         * pipeline: discovery_queue PENDING → stubs + download_queue PENDING →
+         * actual downloads.
+         */
+        fun enqueueOneTime(context: Context, mode: DownloadNetworkMode) {
+            val work = OneTimeWorkRequestBuilder<StashDiscoveryWorker>()
+                .setConstraints(constraintsForManualTrigger(mode))
+                .build()
+            WorkManager.getInstance(context).enqueueUniqueWork(
+                ONE_SHOT_WORK_NAME,
+                ExistingWorkPolicy.REPLACE,
+                work,
+            )
+        }
     }
 
     override suspend fun doWork(): Result {
@@ -109,41 +130,88 @@ class StashDiscoveryWorker @AssistedInject constructor(
             Log.i(TAG, "aged out $aged stale PENDING row(s) older than 30 days")
         }
 
-        val pending = discoveryQueueDao.getPending(BATCH_SIZE)
+        // v0.9.21: pre-filter the PENDING fetch by under-cap recipes so a
+        // single recipe's deferred-at-cap backlog doesn't starve other
+        // recipes' fresh candidates out of the BATCH_SIZE window. See
+        // conversation 2026-05-12: First Listen had 100+ deferred-at-cap
+        // PENDING rows clogging the head of the queue so Deep Cuts'
+        // freshly-queued candidates never reached the worker.
+        val cappedRecipeIds = discoveryQueueDao.findRecipesAtWeeklyCap(
+            sinceMillis = System.currentTimeMillis() - WEEK_MS,
+            cap = PER_RECIPE_WEEKLY_CAP,
+        )
+        val pending = if (cappedRecipeIds.isEmpty()) {
+            discoveryQueueDao.getPending(BATCH_SIZE)
+        } else {
+            Log.i(TAG, "recipes at cap (excluded from fetch): $cappedRecipeIds")
+            discoveryQueueDao.getPendingExcludingRecipes(cappedRecipeIds, BATCH_SIZE)
+        }
         if (pending.isEmpty()) {
             Log.d(TAG, "no pending discoveries")
-            return Result.success()
+            // Don't return early — fall through to the chain. download_queue
+            // is a separate table and may hold orphan PENDING or retry-
+            // eligible FAILED rows from prior runs that still need draining.
+        } else {
+            Log.i(TAG, "draining ${pending.size} discovery candidates")
+
+            val now = System.currentTimeMillis()
+            val weekAgo = now - WEEK_MS
+
+            // Per-recipe caps — counted lazily to avoid a DAO hit per candidate.
+            val recipeBudget = HashMap<Long, Int>()
+            // Per-recipe one-shot "cap fired" log so a recipe with dozens of
+            // pending rows doesn't spam logcat with the same deferral line.
+            val cappedRecipesLogged = HashSet<Long>()
+
+            for (entry in pending) {
+                val used = recipeBudget.getOrPut(entry.recipeId) {
+                    discoveryQueueDao.countRecentCompletedForRecipe(entry.recipeId, weekAgo)
+                }
+                if (used >= PER_RECIPE_WEEKLY_CAP) {
+                    // Leave as PENDING so next week's cycle can pick it up.
+                    if (cappedRecipesLogged.add(entry.recipeId)) {
+                        Log.i(
+                            TAG,
+                            "recipe ${entry.recipeId} at cap " +
+                                "($used downloaded in last 7d, limit $PER_RECIPE_WEEKLY_CAP) — deferring pending",
+                        )
+                    }
+                    continue
+                }
+
+                val result = handle(entry, now)
+                if (result.trackId != null) {
+                    recipeBudget[entry.recipeId] = used + 1
+                }
+                discoveryQueueDao.updateStatus(
+                    id = entry.id,
+                    status = result.status,
+                    trackId = result.trackId,
+                    completedAt = now,
+                    errorMessage = result.error,
+                )
+            }
         }
-        Log.i(TAG, "draining ${pending.size} discovery candidates")
 
-        val now = System.currentTimeMillis()
-        val weekAgo = now - WEEK_MS
-
-        // Per-recipe caps — counted lazily to avoid a DAO hit per candidate.
-        val recipeBudget = HashMap<Long, Int>()
-
-        for (entry in pending) {
-            val used = recipeBudget.getOrPut(entry.recipeId) {
-                discoveryQueueDao.countRecentCompletedForRecipe(entry.recipeId, weekAgo)
-            }
-            if (used >= PER_RECIPE_WEEKLY_CAP) {
-                // Leave as PENDING so next week's cycle can pick it up.
-                Log.d(TAG, "recipe ${entry.recipeId} hit weekly cap — deferring")
-                continue
-            }
-
-            val result = handle(entry, now)
-            if (result.trackId != null) {
-                recipeBudget[entry.recipeId] = used + 1
-            }
-            discoveryQueueDao.updateStatus(
-                id = entry.id,
-                status = result.status,
-                trackId = result.trackId,
-                completedAt = now,
-                errorMessage = result.error,
-            )
-        }
+        // v0.9.20: after queueing/processing discoveries, kick the downloader
+        // so the new tracks become playable.
+        //
+        // Always chain — even when discovery_queue was empty this run. Prior
+        // runs may have queued download_queue rows that haven't been drained
+        // yet (FAILED-with-retry, leftover PENDING, app crash mid-drain).
+        //
+        // Use manual-trigger constraints (drop charging, respect user network
+        // pref) regardless of whether THIS worker invocation was periodic or
+        // manual. For the periodic path, the parent's own charging requirement
+        // already gated this worker from running — by the time we chain, we
+        // know the device is charging + on WiFi, so dropping the charging req
+        // on the chain is a no-op. For the manual path, dropping charging is
+        // the whole point: the user is actively asking for content; honor that.
+        val mode = downloadNetworkPreference.current()
+        DiscoveryDownloadWorker.enqueueOneTime(
+            applicationContext,
+            constraintsForManualTrigger(mode),
+        )
         return Result.success()
     }
 
@@ -227,20 +295,15 @@ class StashDiscoveryWorker @AssistedInject constructor(
             newId
         }
 
-        // Link to the mix's playlist at the end of the current ordering.
-        // The Home card surfaces these as they become playable; until
-        // download completes they're present-but-unplayable.
-        val currentCount = playlistDao.getById(playlistId)?.trackCount ?: 0
-        playlistDao.insertCrossRef(
-            PlaylistTrackCrossRef(
-                playlistId = playlistId,
-                trackId = trackId,
-                position = currentCount,
-                addedAt = Instant.ofEpochMilli(now),
-            )
-        )
-        playlistDao.updateTrackCount(playlistId, currentCount + 1)
-
+        // v0.9.21: Do NOT insert into playlist_tracks here. Earlier versions
+        // inserted a cross-ref at this point so the mix would "show" stubs
+        // before downloads completed, but the UI hides non-downloaded
+        // tracks anyway AND a concurrent StashMixRefreshWorker's
+        // clearPlaylistTracks would race-wipe these inserts (user-visible
+        // 5 → 13 → 5 flash, conversation 2026-05-12). Linking is owned
+        // solely by materializeMix() via getDoneTrackIdsForRecipe(), which
+        // only sees is_downloaded=1 tracks — eliminates the race and the
+        // phantom-stub flash.
         return HandledResult(
             status = DiscoveryQueueEntity.STATUS_DONE,
             trackId = trackId,

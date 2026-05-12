@@ -9,6 +9,7 @@ import androidx.work.WorkManager
 import coil3.SingletonImageLoader
 import android.util.Log
 import com.stash.core.data.db.dao.ArtistProfileCacheDao
+import com.stash.core.data.db.dao.DiscoveryQueueDao
 import com.stash.core.data.db.dao.PlaylistDao
 import com.stash.core.data.db.dao.StashMixRecipeDao
 import com.stash.core.data.db.dao.TrackDao
@@ -22,12 +23,14 @@ import com.stash.core.data.sync.SyncNotificationManager
 import com.stash.data.download.ytdlp.YtDlpManager
 import com.stash.core.data.sync.workers.ArtBackfillWorker
 import com.stash.core.data.sync.workers.AutoSaveScrobbler
+import com.stash.core.data.sync.workers.DiscoveryDownloadWorker
 import com.stash.core.data.sync.workers.QualityInfoBackfillWorker
 import com.stash.core.data.sync.workers.StashDiscoveryWorker
 import com.stash.core.data.sync.workers.StashMixRefreshWorker
 import com.stash.core.data.sync.workers.TagEnrichmentWorker
 import com.stash.core.data.sync.workers.TrackInfoEnrichmentWorker
 import com.stash.core.data.sync.workers.UpdateCheckWorker
+import com.stash.core.data.sync.workers.constraintsForManualTrigger
 import com.stash.core.media.preview.LosslessUrlPrefetcher
 import com.stash.data.download.lossless.LosslessRetryScheduler
 import com.stash.data.download.ytdlp.YtDlpUpdateWorker
@@ -87,6 +90,9 @@ class StashApplication : Application(), Configuration.Provider {
 
     @Inject
     lateinit var stashMixRecipeDao: StashMixRecipeDao
+
+    @Inject
+    lateinit var discoveryQueueDao: DiscoveryQueueDao
 
     @Inject
     lateinit var trackDao: TrackDao
@@ -169,10 +175,22 @@ class StashApplication : Application(), Configuration.Provider {
             maybeReseedStashMixes()
             StashMixDefaults.seedIfNeeded(stashMixRecipeDao)
             maybeRetuneStashDiscover()
+            maybeRetuneStashMixes()
+            maybeCleanupDiscoveryLibraryHits()
             // Fire a one-shot refresh on first launch so mixes populate
             // without waiting for the 24-hour periodic cycle. Subsequent
             // one-shots are safe (unique-work policy = REPLACE).
             StashMixRefreshWorker.enqueueOneTime(this@StashApplication)
+            // v0.9.20: drain orphan discovery download rows from prior version
+            // installs (stubs that StashDiscoveryWorker created in PR 3 era but
+            // were never downloaded because the sync-chain TrackDownloadWorker
+            // was always sync-gated). Respects user's network preference; runs
+            // when constraints are satisfied.
+            val mode = downloadNetworkPreference.current()
+            DiscoveryDownloadWorker.enqueueOneTime(
+                this@StashApplication,
+                constraintsForManualTrigger(mode),
+            )
         }
         StashMixRefreshWorker.schedulePeriodic(this)
         // Tag enrichment + discovery worker constraints come from the
@@ -341,6 +359,8 @@ class StashApplication : Application(), Configuration.Provider {
                 discoveryRatio = 1.0f,
                 freshnessWindowDays = 14,
                 targetLength = 50,
+                affinityBias = 0.0f,
+                seedStrategy = "TAG_GRAPH",
             )
             if (updated > 0) {
                 Log.i(
@@ -352,6 +372,69 @@ class StashApplication : Application(), Configuration.Provider {
                 .putInt("stash_discover_tuning_version", STASH_DISCOVER_TUNING_VERSION)
                 .apply()
         }
+    }
+
+    /**
+     * v0.9.20 pivot: Daily Discover + Deep Cuts move from library-substrate
+     * to recommendation-substrate (85% discovery, 15% library). Deep Cuts
+     * switches seed strategy from NONE to TRACK_SIMILAR. Gated by
+     * [STASH_MIX_RECIPE_TUNING_VERSION] so the migration runs exactly once
+     * per install. Fresh installs skip this because [StashMixDefaults]
+     * already seeds with the new values.
+     */
+    private suspend fun maybeRetuneStashMixes() {
+        val prefs = getSharedPreferences("stash_migrations", MODE_PRIVATE)
+        val stored = prefs.getInt("stash_mix_recipe_tuning_version", 0)
+        if (stored >= STASH_MIX_RECIPE_TUNING_VERSION) return
+
+        var totalUpdated = 0
+        for (recipe in StashMixDefaults.ALL.filter { it.isBuiltin }) {
+            val updated = stashMixRecipeDao.retuneBuiltin(
+                name = recipe.name,
+                discoveryRatio = recipe.discoveryRatio,
+                freshnessWindowDays = recipe.freshnessWindowDays,
+                targetLength = recipe.targetLength,
+                affinityBias = recipe.affinityBias,
+                seedStrategy = recipe.seedStrategy,
+            )
+            totalUpdated += updated
+        }
+        Log.i(
+            "StashMigration",
+            "Retuned $totalUpdated builtin mix recipe(s) to v$STASH_MIX_RECIPE_TUNING_VERSION",
+        )
+        prefs.edit()
+            .putInt("stash_mix_recipe_tuning_version", STASH_MIX_RECIPE_TUNING_VERSION)
+            .apply()
+    }
+
+    /**
+     * PR 7 one-time cleanup: delete pre-PR-6 era "library-hit" discovery
+     * DONE rows from `discovery_queue`. Pre-PR-6 StashDiscoveryWorker.handle()
+     * canonical-deduped Last.fm candidates against the user's library and
+     * linked existing library tracks instead of creating discovery stubs —
+     * those rows then surfaced in mixes as "discovery survivors" despite
+     * being library content. PR 6's seed-stage pre-filter prevents new
+     * library-hits; this migration cleans up the backlog.
+     *
+     * Gated by [STASH_DISCOVERY_LIBRARY_HIT_CLEANUP_VERSION] so the
+     * migration runs exactly once per install. Fresh installs after PR 7
+     * have nothing to clean up — the query is a fast no-op.
+     */
+    private suspend fun maybeCleanupDiscoveryLibraryHits() {
+        val prefs = getSharedPreferences("stash_migrations", MODE_PRIVATE)
+        val stored = prefs.getInt("stash_discovery_library_hit_cleanup_version", 0)
+        if (stored >= STASH_DISCOVERY_LIBRARY_HIT_CLEANUP_VERSION) return
+
+        val deleted = discoveryQueueDao.deleteLibraryHitDoneRows()
+        Log.i(
+            "StashMigration",
+            "Cleaned up $deleted pre-PR-6 library-hit discovery rows " +
+                "(v$STASH_DISCOVERY_LIBRARY_HIT_CLEANUP_VERSION)",
+        )
+        prefs.edit()
+            .putInt("stash_discovery_library_hit_cleanup_version", STASH_DISCOVERY_LIBRARY_HIT_CLEANUP_VERSION)
+            .apply()
     }
 
     /**
@@ -491,6 +574,28 @@ class StashApplication : Application(), Configuration.Provider {
          *    used to fill the non-discovery slots drop on next refresh.
          */
         private const val STASH_DISCOVER_TUNING_VERSION = 2
+
+        /**
+         * Bump when the built-in Stash Mix recipes' tunables change and
+         * existing installs should adopt them.
+         *  - v1 = 2026-05-11 v0.9.20 pivot: Daily Discover + Deep Cuts
+         *    move from library-substrate to recommendation-substrate
+         *    (85% discovery, 15% library). Deep Cuts switches seed
+         *    strategy from NONE to TRACK_SIMILAR.
+         */
+        private const val STASH_MIX_RECIPE_TUNING_VERSION = 1
+
+        /**
+         * Bump when [maybeCleanupDiscoveryLibraryHits] should run again.
+         *  - v1 = PR 7 one-time cleanup: removes pre-PR-6 era discovery_queue
+         *    DONE rows whose linked track has source != YOUTUBE. Pre-PR-6
+         *    StashDiscoveryWorker.handle() canonical-deduped Last.fm
+         *    candidates against the library and linked existing library
+         *    tracks instead of creating stubs; those rows surfaced in mixes
+         *    as "discovery survivors" despite being library content. PR 6's
+         *    seed-stage pre-filter prevents new ones from being created.
+         */
+        private const val STASH_DISCOVERY_LIBRARY_HIT_CLEANUP_VERSION = 1
 
         /**
          * v0.9.13: bump when [maybeBackfillCodecsFromExtension] should run

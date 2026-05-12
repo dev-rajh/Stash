@@ -1,6 +1,7 @@
 package com.stash.feature.home
 
 import android.content.Context
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.stash.core.auth.TokenManager
@@ -10,8 +11,10 @@ import com.stash.core.data.db.dao.ListeningEventDao
 import com.stash.core.data.db.dao.StashMixRecipeDao
 import com.stash.core.data.lastfm.LastFmCredentials
 import com.stash.core.data.lastfm.LastFmSessionPreference
+import com.stash.core.data.prefs.DownloadNetworkPreference
 import com.stash.core.data.repository.MusicRepository
 import com.stash.core.data.sync.toDisplayStatus
+import com.stash.core.data.sync.workers.StashDiscoveryWorker
 import com.stash.core.data.sync.workers.StashMixRefreshWorker
 import com.stash.core.media.PlayerRepository
 import com.stash.core.model.MusicSource
@@ -28,13 +31,21 @@ import com.stash.data.download.lossless.kennyy.KennyySource
 import com.stash.data.download.lossless.qobuz.QobuzSource
 import com.stash.feature.home.banner.WaitingForLosslessBannerState
 import com.stash.feature.home.banner.bannerStateFor
+import androidx.work.Constraints
 import androidx.work.ExistingWorkPolicy
+import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkInfo
 import androidx.work.WorkManager
+import androidx.work.await
+import androidx.work.workDataOf
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
@@ -43,12 +54,15 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import javax.inject.Inject
+
+private const val TAG = "HomeViewModel"
 
 /**
  * ViewModel for the Home screen. Collects playlist, track, sync data,
@@ -76,8 +90,19 @@ class HomeViewModel @Inject constructor(
     private val downloadQueueDao: DownloadQueueDao,
     private val qobuzSource: QobuzSource,
     private val aggregatorRateLimiter: AggregatorRateLimiter,
+    private val downloadNetworkPreference: DownloadNetworkPreference,
     @ApplicationContext private val context: Context,
 ) : ViewModel() {
+
+    private val _userMessages = MutableSharedFlow<String>(
+        // Bumped to 8 to mirror NowPlayingViewModel — actions that emit two
+        // back-to-back messages (refresh start → done, lossless retry start →
+        // result) need headroom against the Toast collector's drain rate.
+        extraBufferCapacity = 8,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+    /** One-shot snackbar messages (e.g. "Refreshing Daily Discover…"). */
+    val userMessages: SharedFlow<String> = _userMessages.asSharedFlow()
 
     init {
         // v0.9.13: warm the tip-jar cache on cold-start, then trigger a
@@ -402,12 +427,72 @@ class HomeViewModel @Inject constructor(
      * the work.
      */
     fun onRetryDeferredRequested() {
-        val request = OneTimeWorkRequestBuilder<LosslessRetryWorker>().build()
-        WorkManager.getInstance(context).enqueueUniqueWork(
-            LosslessRetryWorker.UNIQUE_WORK_NAME,
-            ExistingWorkPolicy.KEEP,
-            request,
-        )
+        viewModelScope.launch {
+            // Snapshot the current count before we kick the worker so the
+            // start message has a number to show. This is an approximation:
+            // a concurrent TrackDownloadWorker flipping rows out of
+            // WAITING_FOR_LOSSLESS between this read and the sweep can make
+            // countAtStart drift from the worker's own KEY_TOTAL. The result
+            // message below uses the worker-authoritative total, so the math
+            // stays consistent — only the start-message N can be stale.
+            val countAtStart = downloadQueueDao.waitingForLosslessCount().first()
+            if (countAtStart <= 0) return@launch  // banner shouldn't be visible
+
+            _userMessages.tryEmit("Looking for FLAC versions of $countAtStart tracks\u2026")
+
+            val request = OneTimeWorkRequestBuilder<LosslessRetryWorker>().build()
+            // KEEP policy: a rapid double-tap coalesces. Suspend on the
+            // Operation's await() (work-runtime-ktx) so we don't block the
+            // viewModelScope's Main.immediate dispatcher.
+            WorkManager.getInstance(context).enqueueUniqueWork(
+                LosslessRetryWorker.UNIQUE_WORK_NAME,
+                ExistingWorkPolicy.KEEP,
+                request,
+            ).await()
+
+            // Under KEEP policy a coalesced tap means WorkManager kept the
+            // existing work's id and dropped our request.id entirely. Filtering
+            // on request.id would hang forever waiting for an id that never
+            // gets enqueued. So we take a snapshot of the current WorkInfo list
+            // for this unique name and lock in whichever is most relevant:
+            //   1) the in-flight (non-terminal) WorkInfo if one exists
+            //   2) else the most-recent WorkInfo in the list (already terminal,
+            //      e.g. the sweep finished between await() and our snapshot —
+            //      fire its result immediately)
+            //   3) else our own request.id as a defensive fallback (truly nothing
+            //      yet — the Flow will emit again when our work materializes).
+            val initial = WorkManager.getInstance(context)
+                .getWorkInfosForUniqueWorkFlow(LosslessRetryWorker.UNIQUE_WORK_NAME)
+                .first()
+            val targetId = initial.firstOrNull { !it.state.isFinished }?.id
+                ?: initial.firstOrNull()?.id
+                ?: request.id
+
+            WorkManager.getInstance(context)
+                .getWorkInfosForUniqueWorkFlow(LosslessRetryWorker.UNIQUE_WORK_NAME)
+                .firstOrNull { infos ->
+                    val ours = infos.firstOrNull { it.id == targetId } ?: return@firstOrNull false
+                    when (ours.state) {
+                        WorkInfo.State.SUCCEEDED -> {
+                            val resolved = ours.outputData.getInt(LosslessRetryWorker.KEY_RESOLVED, 0)
+                            val total = ours.outputData.getInt(LosslessRetryWorker.KEY_TOTAL, 0)
+                            val message = if (resolved == 0) {
+                                "None resolved this time \u2014 we'll keep trying."
+                            } else {
+                                val remaining = total - resolved
+                                "Resolved $resolved/$total. $remaining still waiting."
+                            }
+                            _userMessages.tryEmit(message)
+                            true
+                        }
+                        WorkInfo.State.FAILED, WorkInfo.State.CANCELLED -> {
+                            _userMessages.tryEmit("Sweep failed \u2014 try again later")
+                            true
+                        }
+                        else -> false
+                    }
+                }
+        }
     }
 
     /**
@@ -544,17 +629,76 @@ class HomeViewModel @Inject constructor(
     }
 
     /**
-     * v0.9.16: Manually re-run the Stash Mix refresh worker for a single
-     * recipe (the one whose materialized playlist is [playlistId]). Used by
-     * the long-press "Refresh this mix" action on Stash Mix cards. No-op if
-     * the playlist doesn't belong to a Stash Mix recipe — the menu item is
-     * already gated on `playlist.type == STASH_MIX`, so the lookup miss is
-     * a defensive guard, not a user-facing error path.
+     * Manually re-run the Stash Mix refresh worker for a single recipe (the
+     * one whose materialized playlist is [playlistId]). Used by the long-
+     * press "Refresh this mix" action on Stash Mix cards.
+     *
+     * Emits snackbar lifecycle messages via [userMessages]: "Refreshing X…"
+     * on enqueue, then "Refreshed X" or "Refresh failed" on the worker's
+     * terminal WorkInfo state. If the playlist is tagged `STASH_MIX` but no
+     * recipe back-links it (data-integrity bug — menu shouldn't have
+     * appeared), logs a warning and surfaces a "not linked to a recipe"
+     * message instead of silently no-opping.
      */
     fun refreshMix(playlistId: Long) {
         viewModelScope.launch {
-            val recipe = recipeDao.findByPlaylistId(playlistId) ?: return@launch
-            StashMixRefreshWorker.enqueueOneTime(context, recipe.id)
+            val recipe = recipeDao.findByPlaylistId(playlistId)
+            if (recipe == null) {
+                // Data-integrity bug: playlist.type == STASH_MIX but no recipe
+                // back-links it. Menu shouldn't have appeared. Log + soft-fail.
+                Log.w(TAG, "refreshMix: no recipe back-links playlistId=$playlistId")
+                _userMessages.tryEmit("Couldn't refresh \u2014 this mix isn't linked to a recipe")
+                return@launch
+            }
+
+            _userMessages.tryEmit("Refreshing ${recipe.name}\u2026")
+
+            // Build the request ourselves so we can capture its id for exact-
+            // match WorkInfo filtering below. enqueueUniqueWork uses the same
+            // unique name + REPLACE policy as StashMixRefreshWorker.enqueueOneTime,
+            // mirroring lines 154-168 of that worker.
+            val request = OneTimeWorkRequestBuilder<StashMixRefreshWorker>()
+                .setConstraints(
+                    Constraints.Builder()
+                        .setRequiredNetworkType(NetworkType.CONNECTED)
+                        .build(),
+                )
+                .setInputData(workDataOf(StashMixRefreshWorker.KEY_RECIPE_ID to recipe.id))
+                .build()
+            val uniqueName = "${StashMixRefreshWorker.ONE_SHOT_WORK_NAME}_${recipe.id}"
+            WorkManager.getInstance(context)
+                .enqueueUniqueWork(uniqueName, ExistingWorkPolicy.REPLACE, request)
+
+            // v0.9.20: fire the full discovery pipeline. queueDiscoveryForRecipe
+            // inside the mix refresh worker enqueues new Last.fm candidates into
+            // discovery_queue PENDING; this trigger processes them right now (subject
+            // to user's DownloadNetworkMode pref) instead of waiting up to 24h for
+            // the periodic schedule. The chain in StashDiscoveryWorker's tail will
+            // fire DiscoveryDownloadWorker, which fires StashMixRefreshWorker again
+            // at the end — the mix re-materializes with newly-downloaded survivors
+            // without the user lifting another finger.
+            val mode = downloadNetworkPreference.current()
+            StashDiscoveryWorker.enqueueOneTime(context, mode)
+
+            // Observe the unique-work Flow; filter to OUR enqueued request's id
+            // so historical entries from earlier taps (or earlier sessions)
+            // don't fire stale "Refreshed" Toasts.
+            WorkManager.getInstance(context)
+                .getWorkInfosForUniqueWorkFlow(uniqueName)
+                .firstOrNull { infos ->
+                    val ours = infos.firstOrNull { it.id == request.id } ?: return@firstOrNull false
+                    when (ours.state) {
+                        WorkInfo.State.SUCCEEDED -> {
+                            _userMessages.tryEmit("Refreshed ${recipe.name}")
+                            true
+                        }
+                        WorkInfo.State.FAILED, WorkInfo.State.CANCELLED -> {
+                            _userMessages.tryEmit("Refresh failed \u2014 try again later")
+                            true
+                        }
+                        else -> false
+                    }
+                }
         }
     }
 

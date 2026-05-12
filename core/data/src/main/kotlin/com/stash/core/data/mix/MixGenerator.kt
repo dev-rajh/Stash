@@ -109,14 +109,24 @@ class MixGenerator @Inject constructor(
      * Produces the finalized track list for [recipe]. The worker calling
      * this replaces the playlist_tracks rows for [recipe.playlistId] with
      * this ordering.
+     *
+     * v0.9.20: [excludeIds] is the cross-mix dedup primitive — when the
+     * refresh worker iterates multiple recipes back-to-back, it accumulates
+     * track ids already claimed by earlier recipes and passes them here so
+     * the current recipe can't re-pick them.
      */
-    suspend fun generate(recipe: StashMixRecipeEntity): List<TrackEntity> {
+    suspend fun generate(
+        recipe: StashMixRecipeEntity,
+        excludeIds: Set<Long> = emptySet(),
+    ): List<TrackEntity> {
         // Step 1: candidate pool — start from every downloaded,
-        // non-blacklisted track in the library.
+        // non-blacklisted track in the library. v0.9.20: filter through
+        // excludeIds first (cheap O(n) set lookup, before any other filtering).
         val rawPool = trackDao.getAllDownloaded()
+        val pool0 = if (excludeIds.isEmpty()) rawPool else rawPool.filter { it.id !in excludeIds }
 
         // Step 2: era filter (cheap, done in-memory).
-        var pool = filterByEra(rawPool, recipe)
+        var pool = filterByEra(pool0, recipe)
 
         // Step 3: include-tag filter (one DAO hit if recipe has tags).
         val includeTags = recipe.includeTagsCsv.splitTrim()
@@ -183,13 +193,14 @@ class MixGenerator @Inject constructor(
         )
 
         // Step 8: shortfall backfill from the remaining library pool.
-        // Gated on discoveryRatio < 1.0 — pure-discovery recipes like
-        // "Stash Discover" (ratio = 1.0) must NEVER fall back to library
-        // tracks, even at the cost of a sparser mix until Discovery
-        // downloads more candidates. The user has explicitly asked for
-        // zero familiarity; respecting that beats the old "better to
-        // repeat a little than look broken" heuristic.
-        if (recipe.discoveryRatio < 1.0f) {
+        // v0.9.20: gate raised from `< 1.0f` to `< 0.5f`. Recipes that should
+        // be substantially discovery-driven (>= 50% by ratio) must not silently
+        // degrade to library when discovery is sparse — that's exactly what
+        // produced the "library-heavy mixes" symptom on existing installs.
+        // A sparser-but-honest mix is better than a deceptively library-filled
+        // one. Library-only recipes (ratio == 0) and lightly-discovery recipes
+        // (< 0.5) still get the original full-fill behavior.
+        if (recipe.discoveryRatio < 0.5f) {
             val shortfall = recipe.targetLength - picked.size
             if (shortfall > 0 && picked.size < pool.size) {
                 val extra = ordered.filter { it !in picked }.take(shortfall)
@@ -302,15 +313,32 @@ class MixGenerator @Inject constructor(
     /**
      * v0.9.16: Top-N user tags ordered by tag-affinity weight. Used by
      * [com.stash.core.data.sync.workers.StashMixRefreshWorker] to drive
-     * the TAG_GRAPH seed strategy. Returns empty list when the user has
-     * no listening history yet.
+     * the TAG_GRAPH seed strategy.
+     *
+     * v0.9.19: when the listening-affinity vector is empty (fresh install,
+     * recently played tracks not yet enriched, etc.) falls back to the
+     * library-wide tag histogram. The histogram represents "what kind of
+     * music this user collects" — the right anchor for First Listen's
+     * "wider net" semantics when there's no per-play signal yet. Returns
+     * an empty list ONLY when the user has zero tags anywhere in
+     * `track_tags` (truly fresh install, enrichment hasn't run a single
+     * batch yet) — at which point TAG_GRAPH-driven recipes correctly
+     * stay empty until the user's library has any tag data.
      */
     suspend fun computeUserTopTags(limit: Int = 10): List<String> {
         val vector = buildUserTagAffinityVector()
-        return vector.entries
-            .sortedByDescending { it.value }
+        if (vector.isNotEmpty()) {
+            return vector.entries
+                .sortedByDescending { it.value }
+                .take(limit)
+                .map { it.key }
+        }
+        return trackTagDao.getTagHistogram()
+            .asSequence()
+            .filter { it.tag != "__untaggable__" }
             .take(limit)
-            .map { it.key }
+            .map { it.tag }
+            .toList()
     }
 
     /**

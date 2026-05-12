@@ -32,3 +32,31 @@ fun constraintsFor(mode: DownloadNetworkMode): Constraints = Constraints.Builder
         }
     }
 }.build()
+
+/**
+ * Constraints for **manual user-initiated triggers** — the user explicitly
+ * tapped "Refresh this mix" or the app booted with orphan downloads to
+ * drain. They're asking for content right now; the system honors that on
+ * whatever network is available.
+ *
+ * Differs from [constraintsFor]:
+ *  - Charging requirement DROPPED (user is actively using the app).
+ *  - Network requirement RELAXED from UNMETERED to CONNECTED — manual
+ *    triggers don't gate on cellular preference. The user's
+ *    DownloadNetworkMode pref still governs the periodic background
+ *    cycle (via [constraintsFor]); it doesn't govern foreground intent.
+ *
+ * `setRequiresBatteryNotLow(true)` stays on — a 5% battery + manual
+ * refresh is still a bad combination.
+ *
+ * v0.9.20 history: shipped in PR 5 respecting DownloadNetworkMode for
+ * cellular gating. After a corruption-induced pref reset left the user
+ * stuck (default mode = WIFI_AND_CHARGING → manual triggers required
+ * unmetered → no firing on cellular), we relaxed to CONNECTED to match
+ * how every major music app handles user-initiated downloads.
+ */
+@Suppress("UNUSED_PARAMETER")
+fun constraintsForManualTrigger(mode: DownloadNetworkMode): Constraints = Constraints.Builder()
+    .setRequiresBatteryNotLow(true)
+    .setRequiredNetworkType(NetworkType.CONNECTED)
+    .build()
