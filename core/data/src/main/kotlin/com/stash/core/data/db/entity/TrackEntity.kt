@@ -39,6 +39,25 @@ data class TrackEntity(
 
     val album: String = "",
 
+    /**
+     * v0.9.26 — the album's primary artist credit, distinct from the
+     * per-track [artist] string. For a Drake & 21 Savage collab album,
+     * `albumArtist = "Drake, 21 Savage"` for every track on the record
+     * even though individual tracks may credit just "Drake" or
+     * "21 Savage". Required to disambiguate two albums with the same
+     * title released by different artists (e.g. two "Singles" releases)
+     * — the Library Albums query groups by (album, album_artist), so
+     * collisions resolve cleanly and album art doesn't bleed across.
+     *
+     * Empty string is the sentinel for "unknown" so the Library
+     * Albums query can still group those tracks together coherently;
+     * the [com.stash.app.StashApplication.maybeBackfillTrackAlbums]
+     * pass fills in `album_artist` from the file's path-encoded artist
+     * folder for legacy rows.
+     */
+    @ColumnInfo(name = "album_artist", defaultValue = "")
+    val albumArtist: String = "",
+
     @ColumnInfo(name = "duration_ms")
     val durationMs: Long = 0,
 

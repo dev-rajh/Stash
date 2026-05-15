@@ -293,6 +293,25 @@ interface PlaylistDao {
     @Query("UPDATE playlists SET sync_enabled = :enabled WHERE id = :playlistId")
     suspend fun updateSyncEnabled(playlistId: Long, enabled: Boolean)
 
+    /**
+     * v0.9.26 — flip `is_active` on every playlist materialized by a
+     * built-in Stash Mix recipe. Used by the Stash-Mixes opt-out toggle
+     * so the Daily Discover / Deep Cuts / First Listen surfaces hide from
+     * Home and Library without being hard-deleted. Re-enabling restores
+     * them with their existing track lists intact.
+     */
+    @Query(
+        """
+        UPDATE playlists
+        SET is_active = :active
+        WHERE id IN (
+            SELECT playlist_id FROM stash_mix_recipes
+            WHERE is_builtin = 1 AND playlist_id IS NOT NULL
+        )
+        """
+    )
+    suspend fun setActiveForBuiltinMixes(active: Boolean): Int
+
     /** Update the cover art URL (local file path or remote URL) for a playlist. */
     @Query("UPDATE playlists SET art_url = :artUrl WHERE id = :playlistId")
     suspend fun updateArtUrl(playlistId: Long, artUrl: String?)

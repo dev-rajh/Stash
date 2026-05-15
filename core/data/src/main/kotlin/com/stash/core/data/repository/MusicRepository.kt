@@ -68,6 +68,34 @@ interface MusicRepository {
     suspend fun findByYoutubeIds(videoIds: Collection<String>): List<Track>
 
     /**
+     * v0.9.26 — set `album` on every [videoIds] row whose current album is
+     * empty. No-op for rows with a non-empty album (so a track legitimately
+     * cross-referenced to a different album by sync metadata doesn't get
+     * clobbered when the user visits a compilation page that includes it).
+     * Used by the Album Discovery screen to retroactively group already-
+     * downloaded tracks into the album the user is browsing.
+     */
+    suspend fun backfillAlbumForTracks(
+        videoIds: Collection<String>,
+        album: String,
+        albumArtist: String,
+    )
+
+    /**
+     * v0.9.26 — apply the user's Stash Mix opt-out toggle. Cancels (or
+     * re-schedules) the five background workers that drive the feature
+     * (mix refresh, discovery, discovery download, tag enrichment, track
+     * info enrichment) and flips `is_active` on the built-in recipes +
+     * their materialized playlists so the surfaces disappear from
+     * Home/Library without destroying the user's accumulated state.
+     *
+     * Called from the Settings toggle. The pref itself is stored in
+     * [com.stash.core.data.prefs.StashMixPreference]; this method is
+     * the side-effect orchestrator.
+     */
+    suspend fun applyStashMixesEnabled(enabled: Boolean)
+
+    /**
      * v0.9.14: Snapshot of every downloaded, non-blacklisted track. Used by
      * the "Shuffle Library" entry point to seed a queue from the entire
      * on-disk library, and by the auto-grow watcher to refill the queue

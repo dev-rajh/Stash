@@ -380,6 +380,41 @@ interface TrackDao {
     )
 
     /**
+     * v0.9.26 — fill `album` on a row that previously had no album recorded,
+     * using the value the user provided via album-context download (Album
+     * Discovery's "Download all" or per-row download from the album page).
+     * No-op when the column already has a value, so prior cross-identity
+     * matches don't get clobbered.
+     *
+     * Without this, an existing tracks row matched by canonical identity
+     * (same artist+title from a Spotify sync, no album recorded) stays
+     * with album = "" and the Library Albums tab still doesn't see it
+     * even though the user just downloaded it from a specific album page.
+     */
+    @Query("UPDATE tracks SET album = :album WHERE id = :trackId AND album = ''")
+    suspend fun updateAlbumIfEmpty(trackId: Long, album: String)
+
+    /** v0.9.26 — see [updateAlbumIfEmpty]; same shape for the new column. */
+    @Query("UPDATE tracks SET album_artist = :albumArtist WHERE id = :trackId AND album_artist = ''")
+    suspend fun updateAlbumArtistIfEmpty(trackId: Long, albumArtist: String)
+
+    /**
+     * v0.9.26 — rows the album-metadata backfill should attempt to fill in.
+     * Only `is_downloaded = 1 AND album = ''` rows with a non-null file path
+     * are candidates (we need the file on disk to read its embedded tag).
+     */
+    @Query(
+        """
+        SELECT id, file_path AS filePath
+        FROM tracks
+        WHERE is_downloaded = 1
+          AND (album = '' OR album_artist = '')
+          AND file_path IS NOT NULL
+        """
+    )
+    suspend fun tracksNeedingAlbumBackfill(): List<TrackBackfillRow>
+
+    /**
      * Records the codec and bitrate of a downloaded file. Called immediately
      * after [markAsDownloaded] from the sync path, with values read from the
      * file's own container via `AudioDurationExtractor.extract`. Historically
@@ -839,19 +874,40 @@ interface TrackDao {
 
     /**
      * All distinct albums with their primary artist, track count, and
-     * local art path. Ordered by album name ascending.
+     * local art path. Ordered by track count then album name.
+     *
+     * v0.9.26 — grouped by album only (not `album, artist`). Multi-artist
+     * albums like Drake & 21 Savage's "Her Loss" or Drake & PartyNextDoor's
+     * "Some Sexy Songs 4 U" have per-track artist credits that vary
+     * ("Drake", "Drake, 21 Savage", "21 Savage", "Drake, PARTYNEXTDOOR",
+     * etc.), which under the old GROUP BY produced one fragment per
+     * artist-string permutation. The display artist is picked as the
+     * most-frequent artist value within the album — for SSS4U that's
+     * "Drake, PARTYNEXTDOOR" since both feature on most tracks.
+     * MAX(art) is a deterministic tie-break; album art is consistent
+     * across an album's tracks in practice.
      */
     @Query(
         """
-        SELECT album,
-               artist,
+        SELECT t.album AS album,
+               CASE
+                   WHEN t.album_artist != '' THEN t.album_artist
+                   ELSE (
+                       SELECT artist FROM tracks
+                       WHERE album = t.album AND artist != ''
+                         AND COALESCE(album_artist, '') = COALESCE(t.album_artist, '')
+                       GROUP BY artist
+                       ORDER BY COUNT(*) DESC
+                       LIMIT 1
+                   )
+               END AS artist,
                COUNT(*) AS trackCount,
-               album_art_path AS artPath,
-               album_art_url AS artUrl
-        FROM tracks
-        WHERE album != ''
-        GROUP BY album, artist
-        ORDER BY COUNT(*) DESC, album ASC
+               MAX(t.album_art_path) AS artPath,
+               MAX(t.album_art_url) AS artUrl
+        FROM tracks t
+        WHERE t.album != ''
+        GROUP BY t.album, t.album_artist
+        ORDER BY COUNT(*) DESC, t.album ASC
         """
     )
     fun getAllAlbums(): Flow<List<AlbumSummary>>

@@ -197,6 +197,7 @@ fun SettingsScreen(
         onSyncScrobblesNow = viewModel::onSyncScrobblesNow,
         onClearScrobbleDrainResult = viewModel::onClearScrobbleDrainResult,
         onYouTubeHistoryEnabledChanged = viewModel::onYouTubeHistoryEnabledChanged,
+        onStashMixesEnabledChanged = viewModel::onStashMixesEnabledChanged,
         onRetryYouTubeHistory = viewModel::onRetryYouTubeHistory,
         onLosslessEnabledChanged = viewModel::onLosslessEnabledChanged,
         onLosslessQualityTierChanged = viewModel::onLosslessQualityTierChanged,
@@ -243,6 +244,7 @@ private fun SettingsContent(
     onSyncScrobblesNow: () -> Unit,
     onClearScrobbleDrainResult: () -> Unit,
     onYouTubeHistoryEnabledChanged: (Boolean) -> Unit,
+    onStashMixesEnabledChanged: (Boolean) -> Unit,
     onRetryYouTubeHistory: () -> Unit,
     onLosslessEnabledChanged: (Boolean) -> Unit,
     onLosslessQualityTierChanged: (LosslessQualityTier) -> Unit,
@@ -784,6 +786,41 @@ private fun SettingsContent(
                     }
                 }
 
+            }
+        }
+
+        // -- Stash Mixes (beta) toggle ----------------------------------------
+        // Lets the user opt out of the auto-generated mix surfaces (Daily
+        // Discover, Deep Cuts, First Listen) so the background discovery +
+        // download workers stop running and the playlists hide from
+        // Home/Library. See GitHub issues #56 and #57.
+        GlassCard {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Stash Mixes (beta)",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = if (uiState.stashMixesEnabled) {
+                            "Daily Discover, Deep Cuts, and First Listen mixes auto-refresh in the background."
+                        } else {
+                            "Auto-generated mix playlists are hidden. Background discovery downloads are off."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = uiState.stashMixesEnabled,
+                    onCheckedChange = onStashMixesEnabledChanged,
+                    modifier = Modifier.semantics { role = Role.Switch },
+                )
             }
         }
 

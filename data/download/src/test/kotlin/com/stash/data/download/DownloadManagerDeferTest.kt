@@ -54,6 +54,7 @@ class DownloadManagerDeferTest {
     private val losslessUrlDownloader: LosslessUrlDownloader = mockk(relaxed = true)
     private val losslessPrefs: LosslessSourcePreferences = mockk(relaxed = true)
     private val trackFinalizer: TrackFinalizer = mockk(relaxed = true)
+    private val loudnessMeasurer: com.stash.core.data.audio.LoudnessMeasurer = mockk(relaxed = true)
 
     private fun newSubject(): DownloadManager = DownloadManager(
         downloadExecutor = downloadExecutor,
@@ -72,6 +73,7 @@ class DownloadManagerDeferTest {
         losslessUrlDownloader = losslessUrlDownloader,
         losslessPrefs = losslessPrefs,
         trackFinalizer = trackFinalizer,
+        loudnessMeasurer = loudnessMeasurer,
     )
 
     private fun stubTrack(): Track = Track(

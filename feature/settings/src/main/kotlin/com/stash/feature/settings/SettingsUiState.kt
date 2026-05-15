@@ -35,6 +35,13 @@ data class SettingsUiState(
      */
     val downloadNetworkMode: DownloadNetworkMode = DownloadNetworkMode.WIFI_AND_CHARGING,
     val ytHistoryEnabled: Boolean = false,
+    /**
+     * v0.9.26 — user opt-out for Stash Mixes (Daily Discover / Deep Cuts /
+     * First Listen). Default true preserves current behavior; flipping off
+     * cancels the discovery / refresh / enrichment workers and hides the
+     * built-in mix playlists from Home / Library. See issues #56, #57.
+     */
+    val stashMixesEnabled: Boolean = true,
     val ytHistoryHealth: YouTubeScrobblerHealth = YouTubeScrobblerHealth.DISABLED,
     val ytPendingCount: Int = 0,
     /**

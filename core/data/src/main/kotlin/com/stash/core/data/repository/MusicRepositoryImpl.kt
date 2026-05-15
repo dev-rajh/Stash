@@ -39,6 +39,8 @@ class MusicRepositoryImpl @Inject constructor(
     private val discoveryQueueDao: com.stash.core.data.db.dao.DiscoveryQueueDao,
     private val blocklistGuard: com.stash.core.data.blocklist.BlocklistGuard,
     private val trackMatcher: com.stash.core.data.sync.TrackMatcher,
+    private val stashMixRecipeDao: com.stash.core.data.db.dao.StashMixRecipeDao,
+    private val downloadNetworkPreference: com.stash.core.data.prefs.DownloadNetworkPreference,
 ) : MusicRepository {
 
     // ── Deletion event plumbing ─────────────────────────────────────────
@@ -254,6 +256,54 @@ class MusicRepositoryImpl @Inject constructor(
 
     override suspend fun findByYoutubeIds(videoIds: Collection<String>): List<Track> =
         videoIds.mapNotNull { trackDao.findByYoutubeId(it)?.toDomain() }
+
+    override suspend fun applyStashMixesEnabled(enabled: Boolean) {
+        val wm = androidx.work.WorkManager.getInstance(context)
+        if (enabled) {
+            // Recipes + playlists first so the workers wake up to active state.
+            stashMixRecipeDao.setActiveForBuiltins(true)
+            playlistDao.setActiveForBuiltinMixes(true)
+            // Re-schedule the five periodic workers. Cheap idempotent operation —
+            // KEEP-policy means duplicate enqueues no-op.
+            val mode = downloadNetworkPreference.current()
+            com.stash.core.data.sync.workers.StashMixRefreshWorker.schedulePeriodic(context)
+            com.stash.core.data.sync.workers.StashDiscoveryWorker.schedulePeriodic(context, mode)
+            com.stash.core.data.sync.workers.TagEnrichmentWorker.schedulePeriodic(context, mode)
+            com.stash.core.data.sync.workers.TrackInfoEnrichmentWorker.schedulePeriodic(context)
+            // Fire a one-shot refresh so the surfaces repopulate immediately
+            // rather than waiting for the next periodic cycle.
+            com.stash.core.data.sync.workers.StashMixRefreshWorker.enqueueOneTime(context)
+        } else {
+            // Cancel periodic + one-shot work by unique name. The constants
+            // live inside the workers as private vals; the names are stable
+            // and grepped from each worker (see core/data/.../sync/workers/).
+            for (name in STASH_MIX_WORK_NAMES) {
+                wm.cancelUniqueWork(name)
+            }
+            // Hide the surfaces. Recipes off → refresh no-op even if a worker
+            // somehow slips through. Playlists off → invisible to Library/Home
+            // queries that filter on is_active = 1.
+            stashMixRecipeDao.setActiveForBuiltins(false)
+            playlistDao.setActiveForBuiltinMixes(false)
+        }
+    }
+
+    override suspend fun backfillAlbumForTracks(
+        videoIds: Collection<String>,
+        album: String,
+        albumArtist: String,
+    ) {
+        if (album.isBlank() && albumArtist.isBlank()) return
+        videoIds.forEach { videoId ->
+            val existing = trackDao.findByYoutubeId(videoId) ?: return@forEach
+            if (album.isNotBlank() && existing.album.isBlank()) {
+                trackDao.updateAlbumIfEmpty(existing.id, album)
+            }
+            if (albumArtist.isNotBlank() && existing.albumArtist.isBlank()) {
+                trackDao.updateAlbumArtistIfEmpty(existing.id, albumArtist)
+            }
+        }
+    }
 
     override suspend fun getAllDownloadedTracks(): List<Track> =
         trackDao.getAllDownloaded().map { it.toDomain() }
@@ -657,5 +707,19 @@ class MusicRepositoryImpl @Inject constructor(
 
     companion object {
         private const val DOWNLOADS_MIX_SOURCE_ID = "stash_downloads_mix"
+
+        /**
+         * WorkManager unique-work names for the five Stash Mix workers. Used
+         * by [applyStashMixesEnabled] to cancel them all in one shot when
+         * the user opts out. Names mirror the `WORK_NAME` / `UNIQUE_WORK_NAME`
+         * constants inside each worker — kept in sync by code review.
+         */
+        private val STASH_MIX_WORK_NAMES = listOf(
+            "stash_mix_refresh",
+            "stash_discovery",
+            "stash_tag_enrichment",
+            "stash_track_info_enrichment",
+            "discovery_download",
+        )
     }
 }

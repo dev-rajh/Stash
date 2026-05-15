@@ -84,6 +84,7 @@ class DownloadManager @Inject constructor(
     private val losslessUrlDownloader: LosslessUrlDownloader,
     private val losslessPrefs: LosslessSourcePreferences,
     private val trackFinalizer: TrackFinalizer,
+    private val loudnessMeasurer: com.stash.core.data.audio.LoudnessMeasurer,
 ) {
     /** Limits concurrent downloads. 8 parallel slots — with native opus (no FFmpeg
      *  transcode) downloads are almost entirely network-bound so more parallelism helps. */
@@ -382,23 +383,16 @@ class DownloadManager @Inject constructor(
                     }
                 }
 
-                // Persist loudness (LUFS + true peak) measured by TrackFinalizer.
-                // Null = ebur128 couldn't parse a Summary block (very short file,
-                // ffmpeg failure); the columns stay NULL so LoudnessBackfillWorker
-                // can retry later. Non-fatal — file is on disk and playable, only
-                // the per-track makeup gain is unavailable until backfill.
-                finalized.loudness?.let { l ->
-                    runCatching {
-                        trackDao.updateLoudness(
-                            track.id,
-                            l.lufs,
-                            l.truePeakDbfs,
-                            System.currentTimeMillis(),
-                        )
-                    }.onFailure { e ->
-                        Log.w(TAG, "lossless: updateLoudness failed for ${track.id}: ${e.message}")
-                    }
-                }
+                // Trigger loudness measurement off the download thread. The
+                // measurement (~25–50 s of ffmpeg ebur128) used to run
+                // synchronously inside TrackFinalizer and serialised entire
+                // albums behind it. Now it's fire-and-forget: the DB row
+                // gets updated whenever the background scan completes, the
+                // download flow returns immediately.
+                loudnessMeasurer.measureAndPersistInBackground(
+                    trackId = track.id,
+                    file = File(finalized.committed.filePath),
+                )
 
                 emitProgress(track.id, 1f, DownloadStatus.COMPLETED)
                 return TrackDownloadResult.Success(finalized.committed.filePath)

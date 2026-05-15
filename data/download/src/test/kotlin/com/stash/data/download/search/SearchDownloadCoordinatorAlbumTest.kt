@@ -56,6 +56,7 @@ class SearchDownloadCoordinatorAlbumTest {
     private val context: Context = mockk(relaxed = true)
     private val losslessPrefs: LosslessSourcePreferences = mockk(relaxed = true)
     private val downloadQueueDao: DownloadQueueDao = mockk(relaxed = true)
+    private val loudnessMeasurer: com.stash.core.data.audio.LoudnessMeasurer = mockk(relaxed = true)
 
     private val tmpCacheDir: File = File(
         System.getProperty("java.io.tmpdir"),
@@ -75,6 +76,7 @@ class SearchDownloadCoordinatorAlbumTest {
         context = context,
         losslessPrefs = losslessPrefs,
         downloadQueueDao = downloadQueueDao,
+        loudnessMeasurer = loudnessMeasurer,
     )
 
     @Before
@@ -117,7 +119,7 @@ class SearchDownloadCoordinatorAlbumTest {
         )
         coEvery {
             trackFinalizer.finalizeFile(any(), capture(finalizerSlot), any(), any())
-        } returns TrackFinalizer.FinalizeResult.Success(committed, meta, loudness = null)
+        } returns TrackFinalizer.FinalizeResult.Success(committed, meta)
 
         coEvery { trackDao.findByYoutubeId("vid42") } returns stubExistingTrackRow()
     }

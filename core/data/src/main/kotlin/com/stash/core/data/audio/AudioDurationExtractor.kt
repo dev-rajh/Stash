@@ -110,6 +110,35 @@ class AudioDurationExtractor @Inject constructor(
         }
     }
 
+    /**
+     * v0.9.26 — read the embedded `album` tag from a downloaded file.
+     * Cheap one-call MMR pull; used by the album-metadata backfill in
+     * [com.stash.app.StashApplication] to recover the album column for
+     * tracks that landed before the v0.9.26 fix wrote `tracks.album`.
+     *
+     * Returns `null` (not empty) if the tag is absent or the file can't
+     * be opened — the caller skips that row instead of clobbering an
+     * already-empty value.
+     */
+    fun extractAlbum(filePath: String): String? {
+        val retriever = MediaMetadataRetriever()
+        return try {
+            if (filePath.startsWith("content://")) {
+                retriever.setDataSource(context, Uri.parse(filePath))
+            } else {
+                retriever.setDataSource(filePath)
+            }
+            retriever
+                .extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM)
+                ?.takeIf { it.isNotBlank() }
+        } catch (e: Exception) {
+            Log.w(TAG, "extractAlbum failed for $filePath: ${e.javaClass.simpleName}: ${e.message}")
+            null
+        } finally {
+            runCatching { retriever.release() }
+        }
+    }
+
     companion object {
         private const val TAG = "AudioDurationExtractor"
 

@@ -1,7 +1,12 @@
 package com.stash.core.data.audio
 
+import android.util.Log
+import com.stash.core.data.db.dao.TrackDao
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -55,6 +60,7 @@ import javax.inject.Singleton
 @Singleton
 class LoudnessMeasurer @Inject constructor(
     private val bridge: FFmpegBridge,
+    private val trackDao: TrackDao,
 ) {
     // NOT a constructor parameter — Hilt doesn't honour Kotlin default values,
     // so injecting CoroutineDispatcher would require a project-wide @Qualifier
@@ -63,6 +69,15 @@ class LoudnessMeasurer @Inject constructor(
     // need a different dispatcher can construct via a future overload.
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO
     private val mutex = Mutex()
+
+    // Application-scope coroutine context for fire-and-forget background
+    // measurements triggered by [measureAndPersistInBackground]. A
+    // SupervisorJob so one failed measurement doesn't cancel siblings, and
+    // Dispatchers.IO so we're already off the main thread when the launch
+    // lands. This scope is intentionally NOT cancelled at the end of any
+    // single suspending caller's coroutine — the whole point is to outlive
+    // the download flow that triggered the measurement.
+    private val backgroundScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /**
      * Measures [file] and returns the parsed LUFS/peak, or [Result.Failed]
@@ -126,6 +141,56 @@ class LoudnessMeasurer @Inject constructor(
     }
 
     /**
+     * Fire-and-forget background measurement triggered from the download
+     * path. Returns immediately; the actual ffmpeg invocation + DB write
+     * happens on [backgroundScope] some time after the caller returns.
+     *
+     * Why fire-and-forget: measuring a single FLAC track via ffmpeg's
+     * ebur128 takes ~25–50 s on a mid-range phone (the decode dominates).
+     * Running it synchronously inside [TrackFinalizer.finalizeFile]
+     * serialised every album download behind the per-track measurement
+     * — a 25-track album took ~12 minutes of additional dead time. By
+     * detaching it onto a dedicated scope the download flow returns as
+     * soon as the file is on disk, and loudness data trickles in over
+     * the next few minutes in the background.
+     *
+     * The [mutex] in [measure] still serialises concurrent measurements
+     * so we don't burn N CPUs simultaneously. Failures are non-fatal:
+     * the failure path writes a NULL [Failed] row via [markLoudnessFailed]
+     * so the daily backfill worker won't pick it up again immediately.
+     */
+    fun measureAndPersistInBackground(trackId: Long, file: File) {
+        backgroundScope.launch {
+            when (val r = measure(file)) {
+                is Result.Success -> runCatching {
+                    trackDao.updateLoudness(
+                        id = trackId,
+                        lufs = r.lufs,
+                        peak = r.truePeakDbfs,
+                        now = System.currentTimeMillis(),
+                    )
+                }.onFailure { e ->
+                    Log.w(TAG, "updateLoudness failed for track $trackId: ${e.message}")
+                }
+                is Result.Failed -> {
+                    Log.w(
+                        TAG,
+                        "background loudness measurement failed for ${file.absolutePath}: ${r.reason}",
+                    )
+                    runCatching {
+                        trackDao.markLoudnessFailed(
+                            id = trackId,
+                            now = System.currentTimeMillis(),
+                        )
+                    }.onFailure { e ->
+                        Log.w(TAG, "markLoudnessFailed failed for track $trackId: ${e.message}")
+                    }
+                }
+            }
+        }
+    }
+
+    /**
      * Result of a single [measure] call. [Failed.reason] is intended for
      * logging — surface to the user as "measurement failed" without the
      * raw text.
@@ -136,6 +201,8 @@ class LoudnessMeasurer @Inject constructor(
     }
 
     private companion object {
+        private const val TAG = "LoudnessMeasurer"
+
         // `\bI:` would not match because `:` is non-word, but the preceding
         // whitespace gives us a reliable anchor. Allow `-inf` as a sentinel
         // value so the parser can flag it as a specific failure mode.

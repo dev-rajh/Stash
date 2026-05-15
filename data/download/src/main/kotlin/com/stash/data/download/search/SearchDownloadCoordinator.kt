@@ -77,6 +77,7 @@ class SearchDownloadCoordinator @Inject constructor(
      */
     private val losslessPrefs: LosslessSourcePreferences,
     private val downloadQueueDao: DownloadQueueDao,
+    private val loudnessMeasurer: com.stash.core.data.audio.LoudnessMeasurer,
 ) {
     // App-lifetime scope. Class is @Singleton.
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -255,9 +256,18 @@ class SearchDownloadCoordinator @Inject constructor(
         )
 
         // Search-specific DB writes — done here, not in TrackFinalizer,
-        // so sync's TrackFinalizer path is unaffected.
+        // so sync's TrackFinalizer path is unaffected. Wrapped in
+        // runCatching: an exception escaping here would propagate up the
+        // flow and prevent SearchDownloadStatus.Completed from emitting,
+        // leaving the UI's per-row spinner stuck even though the file is
+        // already on disk. The file is the load-bearing artefact; if a DB
+        // write fails the next library scan / sync will reconcile.
         if (finalized is TrackFinalizer.FinalizeResult.Success) {
-            upsertSearchTrack(track, match.format, finalized, match.coverArtUrl)
+            runCatching {
+                upsertSearchTrack(track, match.format, finalized, match.coverArtUrl)
+            }.onFailure { e ->
+                Log.e(TAG, "upsertSearchTrack failed for ${track.videoId}: ${e.message}", e)
+            }
         }
 
         // Free preview-cache space now that bytes are on permanent storage.
@@ -306,7 +316,13 @@ class SearchDownloadCoordinator @Inject constructor(
         )
 
         if (finalized is TrackFinalizer.FinalizeResult.Success) {
-            upsertSearchTrack(track, format, finalized, track.thumbnailUrl)
+            // Same defensive runCatching as the lossless path — DB-write
+            // failures must not prevent Completed from emitting.
+            runCatching {
+                upsertSearchTrack(track, format, finalized, track.thumbnailUrl)
+            }.onFailure { e ->
+                Log.e(TAG, "upsertSearchTrack (yt-dlp) failed for ${track.videoId}: ${e.message}", e)
+            }
         }
         return finalized
     }
@@ -345,10 +361,24 @@ class SearchDownloadCoordinator @Inject constructor(
                 artist = canonicalize(track.artist),
             )
 
+        val albumName = track.album.orEmpty()
+        val albumArtistName = track.albumArtist.orEmpty()
         val trackId: Long = existing?.id ?: trackDao.insert(
             com.stash.core.data.db.entity.TrackEntity(
                 title = track.title,
                 artist = track.artist,
+                // Album from the discovery-screen context (set by
+                // AlbumDiscoveryScreen / AlbumDiscoveryViewModel when the user
+                // taps Download All on an album, or null when downloading a
+                // loose search result). Without this the row lands with
+                // album = "" and TrackDao.getAllAlbums (filtered by
+                // album != '') never surfaces it in the Library Albums tab.
+                album = albumName,
+                // v0.9.26 — album_artist disambiguates same-titled releases
+                // by different artists ("Singles" by Usher vs "Singles" by
+                // Drake) and lets multi-artist collab albums stay grouped
+                // even when per-track artist credits vary.
+                albumArtist = albumArtistName,
                 youtubeId = track.videoId,
                 canonicalTitle = canonicalize(track.title),
                 canonicalArtist = canonicalize(track.artist),
@@ -359,6 +389,20 @@ class SearchDownloadCoordinator @Inject constructor(
                 albumArtUrl = track.thumbnailUrl,
             )
         )
+
+        // If the row already existed (from a prior sync or a different
+        // identity-equivalent download) and has no album/album_artist
+        // recorded, fill them in now that we know them. Same fix as the
+        // insert path — without this, an imported-then-redownloaded track
+        // would still hide its album from the Library tab.
+        if (existing != null && existing.album.isBlank() && albumName.isNotBlank()) {
+            runCatching { trackDao.updateAlbumIfEmpty(trackId, albumName) }
+                .onFailure { e -> Log.w(TAG, "updateAlbumIfEmpty failed: ${e.message}") }
+        }
+        if (existing != null && existing.albumArtist.isBlank() && albumArtistName.isNotBlank()) {
+            runCatching { trackDao.updateAlbumArtistIfEmpty(trackId, albumArtistName) }
+                .onFailure { e -> Log.w(TAG, "updateAlbumArtistIfEmpty failed: ${e.message}") }
+        }
 
         trackDao.markAsDownloaded(
             trackId = trackId,
@@ -378,17 +422,16 @@ class SearchDownloadCoordinator @Inject constructor(
             }
         }
 
-        // Loudness measurement (LUFS + true peak) was performed by TrackFinalizer
-        // as part of finalizeFile. Persist on the same row so the player can
-        // compute makeup gain without a round-trip through the backfill worker.
-        // Null = ebur128 couldn't parse a Summary block (very short file,
-        // ffmpeg failure); leaving the columns NULL lets LoudnessBackfillWorker
-        // pick the row up later.
-        finalized.loudness?.let { l ->
-            runCatching {
-                trackDao.updateLoudness(trackId, l.lufs, l.truePeakDbfs, System.currentTimeMillis())
-            }.onFailure { e -> Log.w(TAG, "updateLoudness failed: ${e.message}") }
-        }
+        // Trigger loudness measurement off the download thread. The
+        // measurement (~25–50 s of ffmpeg ebur128) used to run synchronously
+        // inside TrackFinalizer and serialised entire albums behind a
+        // single measurer mutex. Now it's fire-and-forget — the row gets
+        // updated whenever the background scan completes, the download flow
+        // returns immediately.
+        loudnessMeasurer.measureAndPersistInBackground(
+            trackId = trackId,
+            file = java.io.File(finalized.committed.filePath),
+        )
 
         coverArtUrl?.let {
             runCatching { trackDao.fillMissingAlbumArtUrl(trackId, it) }

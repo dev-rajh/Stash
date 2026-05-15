@@ -55,6 +55,7 @@ class SearchDownloadCoordinatorDeferTest {
     private val context: Context = mockk(relaxed = true)
     private val losslessPrefs: LosslessSourcePreferences = mockk(relaxed = true)
     private val downloadQueueDao: DownloadQueueDao = mockk(relaxed = true)
+    private val loudnessMeasurer: com.stash.core.data.audio.LoudnessMeasurer = mockk(relaxed = true)
 
     private fun newSubject(): SearchDownloadCoordinator = SearchDownloadCoordinator(
         registry = registry,
@@ -69,6 +70,7 @@ class SearchDownloadCoordinatorDeferTest {
         context = context,
         losslessPrefs = losslessPrefs,
         downloadQueueDao = downloadQueueDao,
+        loudnessMeasurer = loudnessMeasurer,
     )
 
     private fun stubTrack(): TrackItem = TrackItem(

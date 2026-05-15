@@ -77,6 +77,15 @@ interface StashMixRecipeDao {
     suspend fun deleteAllBuiltins(): Int
 
     /**
+     * v0.9.26 — flip `is_active` on every built-in mix recipe in one
+     * shot. Used by the Stash-Mixes opt-out toggle: setting `active = 0`
+     * pauses the recipe-refresh flow without destroying the user's
+     * accumulated discovery state (re-enabling restores everything).
+     */
+    @Query("UPDATE stash_mix_recipes SET is_active = :active WHERE is_builtin = 1")
+    suspend fun setActiveForBuiltins(active: Boolean): Int
+
+    /**
      * Non-destructive tuning migration — updates an individual builtin
      * recipe's knobs without dropping its materialized playlist or
      * cascading its discovery_queue. Used when we ship a new default

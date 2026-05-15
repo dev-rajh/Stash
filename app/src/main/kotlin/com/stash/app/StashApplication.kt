@@ -99,6 +99,12 @@ class StashApplication : Application(), Configuration.Provider {
     lateinit var trackDao: TrackDao
 
     @Inject
+    lateinit var audioExtractor: com.stash.core.data.audio.AudioDurationExtractor
+
+    @Inject
+    lateinit var stashMixPreference: com.stash.core.data.prefs.StashMixPreference
+
+    @Inject
     lateinit var downloadNetworkPreference: DownloadNetworkPreference
 
     @Inject
@@ -172,7 +178,27 @@ class StashApplication : Application(), Configuration.Provider {
         // separate daily tag enrichment (unmetered+charging), separate
         // daily discovery-queue drain (unmetered+charging). All three
         // are idempotent periodic registrations.
+        // v0.9.26 (issues #56, #57): all Stash Mix infrastructure is gated
+        // on the user-facing opt-out toggle. When disabled, the workers
+        // never schedule (and any survivors from a previous install are
+        // cancelled by MusicRepositoryImpl.applyStashMixesEnabled on
+        // first toggle), the built-in recipes/playlists stay inactive,
+        // and Home/Library don't surface them.
         applicationScope.launch {
+            val stashMixesEnabled = stashMixPreference.current()
+            if (!stashMixesEnabled) {
+                // Best-effort cancel of any periodic work left over from an
+                // earlier run where the toggle was on. Idempotent.
+                val wm = WorkManager.getInstance(applicationContext)
+                listOf(
+                    "stash_mix_refresh",
+                    "stash_discovery",
+                    "stash_tag_enrichment",
+                    "stash_track_info_enrichment",
+                    "discovery_download",
+                ).forEach { wm.cancelUniqueWork(it) }
+                return@launch
+            }
             maybeReseedStashMixes()
             StashMixDefaults.seedIfNeeded(stashMixRecipeDao)
             maybeRetuneStashDiscover()
@@ -182,6 +208,7 @@ class StashApplication : Application(), Configuration.Provider {
             // without waiting for the 24-hour periodic cycle. Subsequent
             // one-shots are safe (unique-work policy = REPLACE).
             StashMixRefreshWorker.enqueueOneTime(this@StashApplication)
+            StashMixRefreshWorker.schedulePeriodic(this@StashApplication)
             // v0.9.20: drain orphan discovery download rows from prior version
             // installs (stubs that StashDiscoveryWorker created in PR 3 era but
             // were never downloaded because the sync-chain TrackDownloadWorker
@@ -192,16 +219,6 @@ class StashApplication : Application(), Configuration.Provider {
                 this@StashApplication,
                 constraintsForManualTrigger(mode),
             )
-        }
-        StashMixRefreshWorker.schedulePeriodic(this)
-        LoudnessBackfillWorker.schedulePeriodic(this)
-        // Tag enrichment + discovery worker constraints come from the
-        // user's DownloadNetworkMode preference. Re-scheduling when the
-        // setting changes is the Settings ViewModel's job — this path is
-        // only the startup register. `UPDATE` policy on those workers
-        // means a mode change at runtime replaces the pending schedule.
-        applicationScope.launch {
-            val mode = downloadNetworkPreference.current()
             TagEnrichmentWorker.schedulePeriodic(this@StashApplication, mode)
             StashDiscoveryWorker.schedulePeriodic(this@StashApplication, mode)
             TrackInfoEnrichmentWorker.schedulePeriodic(this@StashApplication)
@@ -214,6 +231,7 @@ class StashApplication : Application(), Configuration.Provider {
                 androidx.work.OneTimeWorkRequestBuilder<TrackInfoEnrichmentWorker>().build(),
             )
         }
+        LoudnessBackfillWorker.schedulePeriodic(this)
         // Repair missing album_art_url on tracks downloaded before 0.5.3 —
         // primarily Stash Discover candidates whose match pipeline surfaced
         // no thumbnail (see ArtBackfillWorker KDoc). KEEP policy means the
@@ -237,6 +255,7 @@ class StashApplication : Application(), Configuration.Provider {
         applicationScope.launch { maybeEnableYouTubePlaylistSync() }
         applicationScope.launch { maybeHideEmptyYouTubePlaylists() }
         applicationScope.launch { maybeBackfillCodecsFromExtension() }
+        applicationScope.launch { maybeBackfillTrackAlbums() }
 
         // Start the local listening-history recorder + optional Last.fm
         // and YouTube Music scrobbler. All are safe to start unconditionally —
@@ -288,6 +307,89 @@ class StashApplication : Application(), Configuration.Provider {
      * always name files with the correct extension; the column was the
      * lossy field, not the path.
      */
+    /**
+     * v0.9.26 — one-shot pass that fills `tracks.album` for every
+     * downloaded row whose column is still empty. Two sources, in order:
+     *
+     *  1. The file's embedded `album` tag (read via MediaMetadataRetriever).
+     *     Works for any track tagged by [com.stash.data.download.files.MetadataEmbedder]
+     *     when the album was known at download time (sync path always
+     *     knows it; the search path knows it after the v0.9.25 fix).
+     *  2. The album folder name from the file path. Stash organises files
+     *     as `music/<artist-slug>/<album-slug>/title.ext`, so the
+     *     second-to-last path segment is the album slug. We de-kebab it
+     *     for a readable title-case fallback. Lossy on capitalisation
+     *     and special characters but recovers correctly for almost all
+     *     real albums.
+     *
+     * Albums that can't be resolved by either source stay empty (the
+     * track was downloaded before any album context existed). They'll
+     * fill in when the user visits the album page in Search via the
+     * [com.stash.feature.search.AlbumDiscoveryViewModel] backfill path.
+     *
+     * Gated by [ALBUM_BACKFILL_VERSION] so each rollout runs once per
+     * install. Cheap idempotency — the predicate is `album = ''`, so a
+     * partial run picks up where it left off on the next launch.
+     */
+    private suspend fun maybeBackfillTrackAlbums() {
+        val prefs = getSharedPreferences("stash_migrations", MODE_PRIVATE)
+        val stored = prefs.getInt("album_backfill_version", 0)
+        if (stored >= ALBUM_BACKFILL_VERSION) return
+
+        val rows = runCatching { trackDao.tracksNeedingAlbumBackfill() }
+            .onFailure { Log.w("StashMigration", "tracksNeedingAlbumBackfill failed", it) }
+            .getOrDefault(emptyList())
+
+        if (rows.isEmpty()) {
+            prefs.edit().putInt("album_backfill_version", ALBUM_BACKFILL_VERSION).apply()
+            return
+        }
+
+        var filledAlbum = 0
+        var filledAlbumArtist = 0
+        for (row in rows) {
+            val path = row.filePath
+            // Prefer the embedded tag — it's lossless on capitalisation
+            // and special characters.
+            val fromTag = runCatching { audioExtractor.extractAlbum(path) }
+                .onFailure { e -> Log.w("StashMigration", "extractAlbum failed for ${row.id}: ${e.message}") }
+                .getOrNull()
+            val albumFolder = java.io.File(path).parentFile
+            val artistFolder = albumFolder?.parentFile
+            val album = fromTag ?: dekebabTitle(albumFolder?.name)
+            if (!album.isNullOrBlank()) {
+                runCatching { trackDao.updateAlbumIfEmpty(row.id, album) }
+                    .onSuccess { filledAlbum++ }
+                    .onFailure { e -> Log.w("StashMigration", "updateAlbumIfEmpty failed for ${row.id}: ${e.message}") }
+            }
+            // album_artist: lifted from the file's artist folder so the
+            // Library Albums query can disambiguate two "Singles" releases
+            // by different artists. Lossy on capitalisation (folder names
+            // are kebab-cased) but groups correctly — the display name will
+            // be whichever artist string we already store per-track once
+            // the cleanup is shipped end-to-end.
+            val albumArtist = dekebabTitle(artistFolder?.name)
+            if (!albumArtist.isNullOrBlank()) {
+                runCatching { trackDao.updateAlbumArtistIfEmpty(row.id, albumArtist) }
+                    .onSuccess { filledAlbumArtist++ }
+                    .onFailure { e -> Log.w("StashMigration", "updateAlbumArtistIfEmpty failed for ${row.id}: ${e.message}") }
+            }
+        }
+        Log.i(
+            "StashMigration",
+            "maybeBackfillTrackAlbums: scanned ${rows.size} rows, " +
+                "filled $filledAlbum album values, $filledAlbumArtist album_artist values",
+        )
+        prefs.edit().putInt("album_backfill_version", ALBUM_BACKFILL_VERSION).apply()
+    }
+
+    /** De-kebab a folder slug back into a readable Title Case string. */
+    private fun dekebabTitle(slug: String?): String? =
+        slug?.takeIf { it.isNotBlank() }
+            ?.replace('-', ' ')
+            ?.split(' ')
+            ?.joinToString(" ") { word -> word.replaceFirstChar { it.titlecase() } }
+
     private suspend fun maybeBackfillCodecsFromExtension() {
         val prefs = getSharedPreferences("stash_migrations", MODE_PRIVATE)
         val stored = prefs.getInt("codec_backfill_version", 0)
@@ -607,6 +709,16 @@ class StashApplication : Application(), Configuration.Provider {
          * extension off the on-disk file path.
          */
         private const val CODEC_BACKFILL_VERSION = 1
+
+        /**
+         * v0.9.26: bump when [maybeBackfillTrackAlbums] should run again.
+         * v1 = initial album-only rollout.
+         * v2 = album + album_artist rollout, after the v24→v25 migration
+         *      added the new column. Existing installs that already ran
+         *      v1 (and filled `album`) re-enter the worker to populate
+         *      `album_artist` from the file path's artist folder.
+         */
+        private const val ALBUM_BACKFILL_VERSION = 2
 
         /** Recognized audio file extensions that the codec-backfill writes back. */
         private val KNOWN_CODECS = setOf(

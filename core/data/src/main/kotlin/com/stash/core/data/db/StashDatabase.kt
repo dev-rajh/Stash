@@ -70,7 +70,7 @@ import com.stash.core.data.db.entity.TrackTagEntity
         TrackBlocklistEntity::class,
         TrackSkipEventEntity::class,
     ],
-    version = 24,
+    version = 25,
     exportSchema = true,
 )
 @TypeConverters(Converters::class)
@@ -675,6 +675,26 @@ abstract class StashDatabase : RoomDatabase() {
                 db.execSQL("ALTER TABLE tracks ADD COLUMN loudness_lufs REAL")
                 db.execSQL("ALTER TABLE tracks ADD COLUMN true_peak_dbfs REAL")
                 db.execSQL("ALTER TABLE tracks ADD COLUMN loudness_measured_at INTEGER")
+            }
+        }
+
+        /**
+         * v24 → v25: per-track `album_artist` so the Library Albums query
+         * can group by (album, album_artist) instead of album alone. Without
+         * this, two distinct albums with the same title — e.g. "Singles" by
+         * Usher and "Singles" by Drake — collide into one card with mixed
+         * track lists and bleeding cover art. Multi-artist collab albums
+         * (Drake & 21 Savage's "Her Loss") still group cleanly because all
+         * tracks share the same album_artist string even though per-track
+         * artist credits vary.
+         *
+         * NOT NULL default '' so existing rows survive the ALTER. The
+         * v0.9.26 startup backfill in [com.stash.app.StashApplication]
+         * fills the column from the file's path-encoded artist folder.
+         */
+        val MIGRATION_24_25 = object : Migration(24, 25) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE tracks ADD COLUMN album_artist TEXT NOT NULL DEFAULT ''")
             }
         }
     }

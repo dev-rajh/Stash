@@ -29,4 +29,13 @@ data class TrackItem(
     val durationSeconds: Double,
     val thumbnailUrl: String?,
     val album: String? = null,
+    /**
+     * v0.9.26 — primary credit on the album as a whole (distinct from
+     * per-track [artist] credits). Populated when the user downloads
+     * via album-context flows (AlbumDiscoveryScreen), null for loose
+     * search results. Persisted to `tracks.album_artist` so the Library
+     * Albums query can disambiguate same-named releases by different
+     * artists.
+     */
+    val albumArtist: String? = null,
 )

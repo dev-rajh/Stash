@@ -83,6 +83,7 @@ class SettingsViewModel @Inject constructor(
     private val listeningEventDao: ListeningEventDao,
     private val lastFmScrobbler: LastFmScrobbler,
     private val youTubeHistoryPreference: YouTubeHistoryPreference,
+    private val stashMixPreference: com.stash.core.data.prefs.StashMixPreference,
     private val youTubeHistoryScrobbler: YouTubeHistoryScrobbler,
     private val youTubeScrobblerState: YouTubeScrobblerState,
     private val losslessPrefs: LosslessSourcePreferences,
@@ -154,6 +155,7 @@ class SettingsViewModel @Inject constructor(
         likePreferences.heartDefaultYtMusic,
         autoSavedCountLast7Days,
         losslessPrefs.youtubeFallbackEnabled,
+        stashMixPreference.enabled,
     ) { values ->
         @Suppress("UNCHECKED_CAST")
         val spotifyAuth = values[0] as AuthState
@@ -182,6 +184,7 @@ class SettingsViewModel @Inject constructor(
         val heartDefaultYtMusic = values[23] as Boolean
         val autoSavedCount7d = values[24] as Int
         val youtubeFallbackEnabled = values[25] as Boolean
+        val stashMixesEnabled = values[26] as Boolean
 
         val lastFmState: LastFmAuthState = local.lastFmAuthOverride
             ?: when {
@@ -216,6 +219,7 @@ class SettingsViewModel @Inject constructor(
             isScrobbleDraining = local.isScrobbleDraining,
             scrobbleDrainResult = local.lastScrobbleDrainResult,
             ytHistoryEnabled = ytHistoryEnabled,
+            stashMixesEnabled = stashMixesEnabled,
             ytHistoryHealth = ytHistoryHealth,
             ytPendingCount = ytPendingCount,
             losslessEnabled = losslessEnabled,
@@ -666,6 +670,22 @@ class SettingsViewModel @Inject constructor(
     fun onYouTubeHistoryEnabledChanged(enabled: Boolean) {
         viewModelScope.launch {
             youTubeHistoryPreference.setEnabled(enabled)
+        }
+    }
+
+    /**
+     * v0.9.26 — flip the Stash-Mixes opt-out. Persists the pref AND triggers
+     * the orchestrator that cancels/re-schedules the five background workers
+     * and flips `is_active` on the built-in recipes + playlists. See
+     * [com.stash.core.data.repository.MusicRepository.applyStashMixesEnabled].
+     */
+    fun onStashMixesEnabledChanged(enabled: Boolean) {
+        viewModelScope.launch {
+            stashMixPreference.setEnabled(enabled)
+            runCatching { musicRepository.applyStashMixesEnabled(enabled) }
+                .onFailure { e ->
+                    android.util.Log.e("SettingsVM", "applyStashMixesEnabled failed: ${e.message}", e)
+                }
         }
     }
 

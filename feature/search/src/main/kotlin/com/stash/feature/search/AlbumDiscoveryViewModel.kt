@@ -162,6 +162,7 @@ class AlbumDiscoveryViewModel @Inject constructor(
     fun onDownloadAllConfirmed() {
         val queue = _uiState.value.downloadConfirmQueue
         val albumTitle = _uiState.value.hero.title
+        val albumArtist = _uiState.value.hero.artist
         _uiState.update { it.copy(showDownloadConfirm = false, downloadConfirmQueue = emptyList()) }
         queue.forEach { track ->
             delegate.downloadTrack(
@@ -172,6 +173,7 @@ class AlbumDiscoveryViewModel @Inject constructor(
                     durationSeconds = track.durationSeconds,
                     thumbnailUrl = track.thumbnailUrl,
                     album = albumTitle,
+                    albumArtist = albumArtist,
                 ),
             )
         }
@@ -226,6 +228,31 @@ class AlbumDiscoveryViewModel @Inject constructor(
                 prefetcher.prefetch(detail.tracks.take(6).map { it.videoId })
             }
             delegate.refreshDownloadedIds(detail.tracks.map { it.videoId })
+
+            // Backfill the `album` column on any of this album's tracks
+            // that are already in the local library with an empty album.
+            // This covers the case where the user previously downloaded a
+            // track via a non-album-context path (loose search row, sync
+            // from a service that didn't carry album metadata, an earlier
+            // build that dropped the field) and is now visiting the album
+            // page — we now know the album name, so the Library Albums
+            // tab can group these tracks correctly without requiring a
+            // re-download.
+            val knownAlbum = detail.title
+            val knownAlbumArtist = detail.artist
+            if (knownAlbum.isNotBlank() || knownAlbumArtist.isNotBlank()) {
+                viewModelScope.launch {
+                    runCatching {
+                        musicRepository.backfillAlbumForTracks(
+                            videoIds = detail.tracks.map { it.videoId },
+                            album = knownAlbum,
+                            albumArtist = knownAlbumArtist,
+                        )
+                    }.onFailure { e ->
+                        Log.w(TAG, "backfillAlbumForTracks failed: ${e.message}")
+                    }
+                }
+            }
         } catch (t: Throwable) {
             if (t is CancellationException) throw t
             Log.e(TAG, "album fetch failed for $browseId", t)
