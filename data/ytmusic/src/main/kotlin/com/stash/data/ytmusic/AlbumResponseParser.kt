@@ -62,7 +62,7 @@ internal object AlbumResponseParser {
         for (section in secondarySections) {
             val obj = section.asObject() ?: continue
             obj["musicShelfRenderer"]?.asObject()?.let { shelf ->
-                if (tracks.isEmpty()) tracks = parseTracksFromShelf(shelf)
+                if (tracks.isEmpty()) tracks = parseTracksFromShelf(shelf, fallbackArtist = artist)
             }
             obj["musicCarouselShelfRenderer"]?.asObject()?.let { carousel ->
                 if (moreByArtist.isEmpty()) moreByArtist = parseAlbumsCarousel(carousel)
@@ -79,7 +79,7 @@ internal object AlbumResponseParser {
             for (section in singleColumnSections) {
                 val obj = section.asObject() ?: continue
                 obj["musicShelfRenderer"]?.asObject()?.let { shelf ->
-                    if (tracks.isEmpty()) tracks = parseTracksFromShelf(shelf)
+                    if (tracks.isEmpty()) tracks = parseTracksFromShelf(shelf, fallbackArtist = artist)
                 }
                 obj["musicCarouselShelfRenderer"]?.asObject()?.let { carousel ->
                     if (moreByArtist.isEmpty()) moreByArtist = parseAlbumsCarousel(carousel)

@@ -31,12 +31,15 @@ import kotlinx.serialization.json.JsonObject
  * @param shelf The parsed `musicShelfRenderer` object.
  * @return A list of [TrackSummary], or empty if the shelf has no parseable rows.
  */
-internal fun parseTracksFromShelf(shelf: JsonObject): List<TrackSummary> {
+internal fun parseTracksFromShelf(
+    shelf: JsonObject,
+    fallbackArtist: String? = null,
+): List<TrackSummary> {
     val items = shelf["contents"]?.asArray() ?: return emptyList()
     return items.mapNotNull { item ->
         item.asObject()
             ?.get("musicResponsiveListItemRenderer")?.asObject()
-            ?.let { parseTrackSummaryFromListItem(it) }
+            ?.let { parseTrackSummaryFromListItem(it, fallbackArtist = fallbackArtist) }
     }
 }
 

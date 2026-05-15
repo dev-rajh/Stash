@@ -52,7 +52,10 @@ internal fun normalizeArtistBrowseId(browseId: String): String =
  * @param renderer The parsed `musicResponsiveListItemRenderer` object.
  * @return A [TrackSummary], or null if the row is malformed.
  */
-internal fun parseTrackSummaryFromListItem(renderer: JsonObject): TrackSummary? {
+internal fun parseTrackSummaryFromListItem(
+    renderer: JsonObject,
+    fallbackArtist: String? = null,
+): TrackSummary? {
     val videoId = renderer["playlistItemData"]?.asObject()
         ?.get("videoId")?.asString()
         ?: renderer.navigatePath(
@@ -69,14 +72,22 @@ internal fun parseTrackSummaryFromListItem(renderer: JsonObject): TrackSummary? 
         ?.get("text")?.asString()
         ?: return null
 
+    // Album-page tracklists omit the artist column from flexColumns (the
+    // artist is shown once in the album header). The result is an empty
+    // artist string here, which breaks downstream lossless matching
+    // (Qobuz/Kennyy score on artist+title and can't find candidates
+    // without an artist). The caller — typically AlbumResponseParser —
+    // passes the album header's artist as fallbackArtist so per-row
+    // artists default to that when the shelf row carries none.
     val artistRuns = flexColumns.getOrNull(1)?.asObject()
         ?.navigatePath("musicResponsiveListItemFlexColumnRenderer", "text", "runs")
         ?.asArray()
-    val artist = artistRuns
+    val parsedArtist = artistRuns
         ?.mapNotNull { it.asObject()?.get("text")?.asString() }
         ?.filterNot { it == " & " || it == ", " || it == " x " }
         ?.joinToString(", ")
-        ?: ""
+        .orEmpty()
+    val artist = parsedArtist.ifBlank { fallbackArtist.orEmpty() }
 
     val album = flexColumns.getOrNull(2)?.asObject()
         ?.navigatePath("musicResponsiveListItemFlexColumnRenderer", "text", "runs")
