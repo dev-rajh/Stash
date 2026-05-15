@@ -154,6 +154,7 @@ fun AlbumDiscoveryScreen(
                                 artist = track.artist,
                                 durationSeconds = track.durationSeconds,
                                 thumbnailUrl = track.thumbnailUrl,
+                                album = state.hero.title,
                             )
                             // Warm the lossless URL cache as each album track row
                             // enters composition. Idempotent — dedupes by videoId.
@@ -176,6 +177,7 @@ fun AlbumDiscoveryScreen(
                                             artist = track.artist,
                                             durationSeconds = track.durationSeconds,
                                             thumbnailUrl = track.thumbnailUrl,
+                                            album = state.hero.title,
                                         ),
                                     )
                                 },

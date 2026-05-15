@@ -161,6 +161,7 @@ class AlbumDiscoveryViewModel @Inject constructor(
      */
     fun onDownloadAllConfirmed() {
         val queue = _uiState.value.downloadConfirmQueue
+        val albumTitle = _uiState.value.hero.title
         _uiState.update { it.copy(showDownloadConfirm = false, downloadConfirmQueue = emptyList()) }
         queue.forEach { track ->
             delegate.downloadTrack(
@@ -170,6 +171,7 @@ class AlbumDiscoveryViewModel @Inject constructor(
                     artist = track.artist,
                     durationSeconds = track.durationSeconds,
                     thumbnailUrl = track.thumbnailUrl,
+                    album = albumTitle,
                 ),
             )
         }

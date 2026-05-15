@@ -416,11 +416,13 @@ class SearchDownloadCoordinator @Inject constructor(
             .replace(Regex("\\s+"), " ")
             .trim()
 
-    /** Converts a [TrackItem] to a [TrackQuery] for the lossless registry. */
+    /** Converts a [TrackItem] to a [TrackQuery] for the lossless registry.
+     *  Passes [TrackItem.album] through so lossless matching can use it as
+     *  a tie-breaker on releases with the same track title across albums. */
     private fun TrackItem.toQuery() = TrackQuery(
         artist = artist,
         title = title,
-        album = null,
+        album = album?.takeIf { it.isNotBlank() },
         isrc = null,
         // (durationSeconds * 1_000).toLong() preserves sub-second precision —
         // .toLong().times(1_000L) would truncate 3.7s → 3_000ms (wrong).
@@ -431,11 +433,16 @@ class SearchDownloadCoordinator @Inject constructor(
      * Builds a minimal [com.stash.core.model.Track] stub for [TrackFinalizer].
      * The finalizer uses title/artist/album for metadata embedding and
      * artist/title for the library file path.
+     *
+     * [TrackItem.album] flows through here so album-context downloads land
+     * with a non-empty `tracks.album` value. Without that, downloaded album
+     * tracks don't show up in the Library's Albums view (TrackDao.getAllAlbums
+     * filters out tracks with empty album values).
      */
     private fun TrackItem.toDomainStub() = com.stash.core.model.Track(
         title = title,
         artist = artist,
-        album = "",
+        album = album.orEmpty(),
         durationMs = (durationSeconds * 1_000).toLong(),
         albumArtUrl = thumbnailUrl,
         youtubeId = videoId,

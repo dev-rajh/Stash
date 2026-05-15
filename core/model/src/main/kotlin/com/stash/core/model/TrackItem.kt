@@ -13,6 +13,13 @@ package com.stash.core.model
  * a stable [videoId] for dedup, [title]/[artist] for identity matching
  * and metadata embedding, [durationSeconds] for lossless-source duration
  * filtering, and [thumbnailUrl] for the cover-art fallback.
+ *
+ * [album] is nullable because the field is only meaningful for items
+ * sourced from album-context flows (Album Discovery screen, an artist
+ * profile's album shelf). Loose search-result rows leave it null. Carrying
+ * it through is what makes downloaded album tracks render as an album in
+ * the Library (TrackDao.getAllAlbums groups by tracks.album and excludes
+ * empty values).
  */
 data class TrackItem(
     val videoId: String,
@@ -21,4 +28,5 @@ data class TrackItem(
     /** Duration as a Double so sub-second precision is preserved. */
     val durationSeconds: Double,
     val thumbnailUrl: String?,
+    val album: String? = null,
 )

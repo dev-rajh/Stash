@@ -232,6 +232,7 @@ internal fun TrackSummary.toTrackItem() = com.stash.core.model.TrackItem(
     artist = artist,
     durationSeconds = durationSeconds,
     thumbnailUrl = thumbnailUrl,
+    album = album,
 )
 
 /**
