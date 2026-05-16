@@ -10,13 +10,17 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.CommandButton
+import androidx.media3.session.LibraryResult
+import androidx.media3.session.MediaLibraryService
 import androidx.media3.session.MediaSession
-import androidx.media3.session.MediaSessionService
 import androidx.media3.session.SessionCommand
+import androidx.media3.session.SessionError
 import androidx.media3.session.SessionResult
+import androidx.media3.common.MediaMetadata
 import com.google.common.collect.ImmutableList
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
+import com.stash.core.data.db.dao.PlaylistDao
 import com.stash.core.data.db.dao.TrackDao
 import com.stash.core.data.social.stash.StashLikedPlaylistRepository
 import com.stash.core.media.R
@@ -30,9 +34,12 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.flow.firstOrNull
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.guava.future
 import javax.inject.Inject
+import androidx.core.net.toUri
+import com.stash.core.data.db.entity.TrackEntity
 
 /**
  * Background playback service that hosts an [ExoPlayer] and exposes a [MediaSession]
@@ -47,11 +54,12 @@ import javax.inject.Inject
  *   lockscreen without opening Now Playing.
  */
 @AndroidEntryPoint
-class StashPlaybackService : MediaSessionService() {
+class StashPlaybackService : MediaLibraryService() {
 
     @Inject lateinit var eqController: EqController
     @Inject lateinit var loudnessController: LoudnessController
     @Inject lateinit var trackDao: TrackDao
+    @Inject lateinit var playlistDao: PlaylistDao
     @Inject lateinit var stashLikedRepository: StashLikedPlaylistRepository
 
     companion object {
@@ -63,9 +71,18 @@ class StashPlaybackService : MediaSessionService() {
 
         /** Custom command action for toggling Stash Liked on the current track. */
         const val COMMAND_TOGGLE_LIKE = "com.stash.TOGGLE_LIKE"
+
+        /** Extra key for the track ID in MediaMetadata extras. */
+        const val EXTRA_TRACK_ID = "stash_track_id"
+
+        private const val ROOT_ID = "ROOT"
+        private const val PLAYLISTS_ID = "PLAYLISTS"
+        private const val RECENTLY_ADDED_ID = "RECENTLY_ADDED"
+        private const val PLAYLIST_PREFIX = "PLAYLIST_"
+        private const val SHUFFLE_PLAY_PREFIX = "SHUFFLE_PLAY_"
     }
 
-    private var mediaSession: MediaSession? = null
+    private var mediaSession: MediaLibrarySession? = null
 
     // Service-scoped CoroutineScope for the like-state observer + toggle
     // suspending calls. Cancelled in onDestroy so the observer doesn't leak
@@ -124,8 +141,7 @@ class StashPlaybackService : MediaSessionService() {
             )
         } else null
 
-        val sessionBuilder = MediaSession.Builder(this, player)
-            .setCallback(StashSessionCallback())
+        val sessionBuilder = MediaLibrarySession.Builder(this, player, StashSessionCallback())
         if (sessionActivity != null) {
             sessionBuilder.setSessionActivity(sessionActivity)
         }
@@ -145,11 +161,19 @@ class StashPlaybackService : MediaSessionService() {
         //      state and ramps to the new target via LoudnessGainProcessor.
         player.addListener(object : Player.Listener {
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-                refreshLikeButton()
+                updateCustomLayout()
                 onTrackTransitionForLoudness(mediaItem)
             }
+
+            override fun onRepeatModeChanged(repeatMode: Int) {
+                updateCustomLayout()
+            }
+
+            override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) {
+                updateCustomLayout()
+            }
         })
-        refreshLikeButton()
+        updateCustomLayout()
     }
 
     /**
@@ -161,7 +185,7 @@ class StashPlaybackService : MediaSessionService() {
      * those cases [computeGain] returns 0 dB which is the safe bypass.
      *
      * Visibility is `internal` so unit tests can invoke the hook directly
-     * without booting a full [MediaSessionService] / [ExoPlayer].
+     * without booting a full [MediaLibraryService] / [ExoPlayer].
      */
     internal fun onTrackTransitionForLoudness(mediaItem: MediaItem?) {
         val trackId = mediaItem?.mediaId?.toLongOrNull() ?: return
@@ -172,28 +196,82 @@ class StashPlaybackService : MediaSessionService() {
         }
     }
 
+    private var lastTrackId: Long? = null
+    private var lastIsLiked: Boolean = false
+
     /**
-     * Cancels any existing like-state observer and starts a new one for
-     * the player's current media item. Each emission rebuilds the
-     * MediaSession's custom layout with the appropriate heart icon.
-     * When there's no current track the custom layout is cleared so the
-     * notification doesn't render a stale heart.
+     * Updates the MediaSession custom layout with the heart, shuffle, and repeat icons.
+     * Starts a database observer for the current track's like state. For player-state
+     * changes (repeat/shuffle) on the same track, it refreshes the layout using the
+     * last known like state to avoid redundant DB observer restarts.
      */
     @OptIn(UnstableApi::class)
-    private fun refreshLikeButton() {
-        likeObserverJob?.cancel()
+    private fun updateCustomLayout() {
         val session = mediaSession ?: return
-        val trackId = session.player.currentMediaItem?.mediaId?.toLongOrNull()
+        val player = session.player
+        val trackId = player.currentMediaItem?.mediaId?.toLongOrNull()
+
         if (trackId == null) {
+            likeObserverJob?.cancel()
+            lastTrackId = null
+            lastIsLiked = false
             session.setCustomLayout(ImmutableList.of())
             return
         }
-        likeObserverJob = serviceScope.launch {
-            trackDao.observeLikeState(trackId).collect { state ->
-                val isLiked = state?.stashLikedAt != null
-                session.setCustomLayout(ImmutableList.of(buildLikeButton(isLiked)))
+
+        if (trackId != lastTrackId) {
+            likeObserverJob?.cancel()
+            lastTrackId = trackId
+            // Reset liked state and push an initial layout immediately for the new track.
+            // This prevents the previous track's heart state from lingering until the
+            // DB observer emits for the first time.
+            lastIsLiked = false
+            pushLayout(session, player, false)
+
+            likeObserverJob = serviceScope.launch {
+                trackDao.observeLikeState(trackId).collect { state ->
+                    val isLiked = state?.stashLikedAt != null
+                    // Update if the state actually changed, or if we haven't pushed for this track yet.
+                    if (isLiked != lastIsLiked) {
+                        lastIsLiked = isLiked
+                        pushLayout(session, player, lastIsLiked)
+                    }
+                }
             }
+        } else {
+            pushLayout(session, player, lastIsLiked)
         }
+    }
+
+    @OptIn(UnstableApi::class)
+    private fun pushLayout(session: MediaSession, player: Player, isLiked: Boolean) {
+        val layout = ImmutableList.of(
+            buildLikeButton(isLiked),
+            buildRepeatButton(player.repeatMode)
+        )
+        session.setCustomLayout(layout)
+    }
+
+    @OptIn(UnstableApi::class)
+    private fun buildRepeatButton(repeatMode: Int): CommandButton {
+        val iconRes = when (repeatMode) {
+            Player.REPEAT_MODE_OFF -> R.drawable.ic_repeat_off
+            Player.REPEAT_MODE_ONE -> R.drawable.ic_repeat_one
+            else -> R.drawable.ic_repeat
+        }
+        val displayNameRes = when (repeatMode) {
+            Player.REPEAT_MODE_OFF -> R.string.notification_action_repeat_off
+            Player.REPEAT_MODE_ALL -> R.string.notification_action_repeat_all
+            Player.REPEAT_MODE_ONE -> R.string.notification_action_repeat_one
+            else -> R.string.notification_action_repeat_off
+        }
+        return CommandButton.Builder()
+            .setDisplayName(getString(displayNameRes))
+            .setIconResId(iconRes)
+            .setSessionCommand(
+                SessionCommand(COMMAND_CYCLE_REPEAT, android.os.Bundle.EMPTY),
+            )
+            .build()
     }
 
     @OptIn(UnstableApi::class)
@@ -217,7 +295,7 @@ class StashPlaybackService : MediaSessionService() {
             .build()
     }
 
-    override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? {
+    override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaLibrarySession? {
         return mediaSession
     }
 
@@ -240,35 +318,370 @@ class StashPlaybackService : MediaSessionService() {
         super.onDestroy()
     }
 
-    // ---- MediaSession.Callback ----
+    // ---- MediaLibrarySession.Callback ----
 
-    private inner class StashSessionCallback : MediaSession.Callback {
+    private inner class StashSessionCallback : MediaLibrarySession.Callback {
 
-        /**
-         * Resolve media items from request metadata URIs so that the controller
-         * can set items by URI rather than providing fully-resolved [MediaItem]s.
-         *
-         * Only allows file://, android.resource://, and content:// URI schemes
-         * to prevent external controllers from injecting arbitrary network URIs.
-         */
+        fun TrackEntity.toMediaMetadata(): MediaMetadata {
+            return MediaMetadata.Builder()
+                .setTitle(this.title)
+                .setArtist(this.artist)
+                .setAlbumTitle(this.album)
+                .setArtworkUri(this.albumArtUrl?.toUri() ?: this.albumArtPath?.toUri())
+                .setIsPlayable(true)
+                .setIsBrowsable(false)
+                .setExtras(android.os.Bundle().apply {
+                    putLong(EXTRA_TRACK_ID, id)
+                })
+                .build()
+        }
+
+        private suspend fun resolveMediaItem(item: MediaItem): MediaItem {
+            // 1. If it's already a fully resolved item (has URI), use it
+            if (item.localConfiguration?.uri != null) {
+                return item
+            }
+
+            // 2. If it's a library item (has mediaId), resolve it from DB
+            val trackId = item.mediaId.toLongOrNull()
+            if (trackId != null) {
+                val track = trackDao.getById(trackId)
+                if (track != null) {
+                    return item.buildUpon()
+                        .setUri(track.filePath ?: "")
+                        .setMediaMetadata(track.toMediaMetadata())
+                        .build()
+                }
+            }
+
+            // 3. Fallback to request metadata URI (with security check)
+            val uri = item.requestMetadata.mediaUri
+            if (uri != null) {
+                val scheme = uri.scheme
+                if (scheme == "file" || scheme == "android.resource" || scheme == "content") {
+                    return item.buildUpon().setUri(uri).build()
+                }
+            }
+
+            return item
+        }
+
+        @OptIn(UnstableApi::class)
+        override fun onSetMediaItems(
+            mediaSession: MediaSession,
+            controller: MediaSession.ControllerInfo,
+            mediaItems: List<MediaItem>,
+            startIndex: Int,
+            startPositionMs: Long,
+        ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
+            return serviceScope.future {
+                if (mediaItems.size == 1 && mediaItems[0].mediaId.startsWith(SHUFFLE_PLAY_PREFIX)) {
+                    val playlistId = mediaItems[0].mediaId.removePrefix(SHUFFLE_PLAY_PREFIX).toLongOrNull()
+                    if (playlistId != null) {
+                        val tracks = playlistDao.getTracksForPlaylist(playlistId)
+                        val items = tracks.filter{track -> track.isDownloaded}.map { track ->
+                            MediaItem.Builder()
+                                .setMediaId(track.id.toString())
+                                .setUri(track.filePath ?: "")
+                                .setMediaMetadata(track.toMediaMetadata())
+                                .build()
+                        }.shuffled()
+
+                        kotlinx.coroutines.withContext(Dispatchers.Main) {
+                            mediaSession.player.shuffleModeEnabled = true
+                        }
+
+                        return@future MediaSession.MediaItemsWithStartPosition(
+                            items,
+                            0,
+                            C.TIME_UNSET
+                        )
+                    }
+                }
+                val resolvedItems = mediaItems.map { resolveMediaItem(it) }
+                MediaSession.MediaItemsWithStartPosition(resolvedItems, startIndex, startPositionMs)
+            }
+        }
+
+        @OptIn(UnstableApi::class)
         override fun onAddMediaItems(
             mediaSession: MediaSession,
             controller: MediaSession.ControllerInfo,
             mediaItems: List<MediaItem>,
         ): ListenableFuture<List<MediaItem>> {
-            val resolved = mediaItems.mapNotNull { item ->
-                val uri = item.requestMetadata.mediaUri ?: return@mapNotNull null
-                val scheme = uri.scheme
-                if (scheme != "file" && scheme != "android.resource" && scheme != "content") {
-                    return@mapNotNull null
+            return serviceScope.future {
+                if (mediaItems.size == 1 && mediaItems[0].mediaId.startsWith(SHUFFLE_PLAY_PREFIX)) {
+                    val playlistId = mediaItems[0].mediaId.removePrefix(SHUFFLE_PLAY_PREFIX).toLongOrNull()
+                    if (playlistId != null) {
+                        return@future playlistDao.getTracksForPlaylist(playlistId).map { track ->
+                            MediaItem.Builder()
+                                .setMediaId(track.id.toString())
+                                .setUri(track.filePath ?: "")
+                                .setMediaMetadata(track.toMediaMetadata())
+                                .build()
+                        }.shuffled()
+                    }
                 }
-                item.buildUpon()
-                    .setUri(uri)
-                    .build()
+                mediaItems.map { resolveMediaItem(it) }
             }
-            return Futures.immediateFuture(resolved)
         }
 
+        @OptIn(UnstableApi::class)
+        override fun onGetItem(
+            session: MediaLibrarySession,
+            browser: MediaSession.ControllerInfo,
+            mediaId: String,
+        ): ListenableFuture<LibraryResult<MediaItem>> {
+            android.util.Log.d("StashPlayback", "onGetItem: id=$mediaId client=${browser.packageName}")
+            return when (mediaId) {
+                ROOT_ID -> {
+                    val rootItem = MediaItem.Builder()
+                        .setMediaId(ROOT_ID)
+                        .setMediaMetadata(
+                            MediaMetadata.Builder()
+                                .setTitle("Stash Root")
+                                .setIsBrowsable(true)
+                                .setIsPlayable(false)
+                                .build(),
+                        )
+                        .build()
+                    Futures.immediateFuture(LibraryResult.ofItem(rootItem, null))
+                }
+                PLAYLISTS_ID -> {
+                    val playlistsItem = MediaItem.Builder()
+                        .setMediaId(PLAYLISTS_ID)
+                        .setMediaMetadata(
+                            MediaMetadata.Builder()
+                                .setTitle("Playlists")
+                                .setIsBrowsable(true)
+                                .setIsPlayable(false)
+                                .build(),
+                        )
+                        .build()
+                    Futures.immediateFuture(LibraryResult.ofItem(playlistsItem, null))
+                }
+                else -> {
+                    // Try to resolve track or playlist
+                    serviceScope.future {
+                        val trackId = mediaId.toLongOrNull()
+                        if (trackId != null) {
+                            val track = trackDao.getById(trackId)
+                            if (track != null) {
+                                return@future LibraryResult.ofItem(
+                                    MediaItem.Builder()
+                                        .setMediaId(track.id.toString())
+                                        .setUri(track.filePath ?: "")
+                                        .setMediaMetadata(
+                                            track.toMediaMetadata(),
+                                        )
+                                        .build(),
+                                    null,
+                                )
+                            }
+                        }
+                        if (mediaId.startsWith(PLAYLIST_PREFIX)) {
+                            val playlistId = mediaId.removePrefix(PLAYLIST_PREFIX).toLongOrNull()
+                            if (playlistId != null) {
+                                val playlist = playlistDao.getById(playlistId)
+                                if (playlist != null) {
+                                    return@future LibraryResult.ofItem(
+                                        MediaItem.Builder()
+                                            .setMediaId(mediaId)
+                                            .setMediaMetadata(
+                                                MediaMetadata.Builder()
+                                                    .setTitle(playlist.name)
+                                                    .setIsBrowsable(true)
+                                                    .setIsPlayable(false)
+                                                    .build(),
+                                            )
+                                            .build(),
+                                        null,
+                                    )
+                                }
+                            }
+                        }
+                        if (mediaId.startsWith(SHUFFLE_PLAY_PREFIX)) {
+                            val playlistId = mediaId.removePrefix(SHUFFLE_PLAY_PREFIX).toLongOrNull()
+                            if (playlistId != null) {
+                                val playlist = playlistDao.getById(playlistId)
+                                if (playlist != null) {
+                                    return@future LibraryResult.ofItem(
+                                        MediaItem.Builder()
+                                            .setMediaId(mediaId)
+                                            .setMediaMetadata(
+                                                MediaMetadata.Builder()
+                                                    .setTitle(getString(R.string.shuffle_play))
+                                                    .setArtworkUri("android.resource://$packageName/drawable/ic_shuffle".toUri())
+                                                    .setIsBrowsable(false)
+                                                    .setIsPlayable(true)
+                                                    .build(),
+                                            )
+                                            .build(),
+                                        null,
+                                    )
+                                }
+                            }
+                        }
+                        LibraryResult.ofError(SessionError.ERROR_BAD_VALUE)
+                    }
+                }
+            }
+        }
+
+        override fun onGetLibraryRoot(
+            session: MediaLibrarySession,
+            browser: MediaSession.ControllerInfo,
+            params: LibraryParams?,
+        ): ListenableFuture<LibraryResult<MediaItem>> {
+            val rootItem = MediaItem.Builder()
+                .setMediaId(ROOT_ID)
+                .setMediaMetadata(
+                    MediaMetadata.Builder()
+                        .setTitle("Stash Root")
+                        .setIsBrowsable(true)
+                        .setIsPlayable(false)
+                        .build(),
+                )
+                .build()
+            return Futures.immediateFuture(LibraryResult.ofItem(rootItem, params))
+        }
+
+        @OptIn(UnstableApi::class)
+        override fun onGetChildren(
+            session: MediaLibrarySession,
+            browser: MediaSession.ControllerInfo,
+            parentId: String,
+            page: Int,
+            pageSize: Int,
+            params: LibraryParams?,
+        ): ListenableFuture<LibraryResult<ImmutableList<MediaItem>>> {
+            return serviceScope.future {
+                val items = when (parentId) {
+                    ROOT_ID -> {
+                        listOf(
+                            MediaItem.Builder()
+                                .setMediaId(PLAYLISTS_ID)
+                                .setMediaMetadata(
+                                    MediaMetadata.Builder()
+                                        .setTitle("Playlists")
+                                        .setIsBrowsable(true)
+                                        .setIsPlayable(false)
+                                        .build(),
+                                )
+                                .build(),
+                            MediaItem.Builder()
+                                .setMediaId(RECENTLY_ADDED_ID)
+                                .setMediaMetadata(
+                                    MediaMetadata.Builder()
+                                        .setTitle("Recently Added")
+                                        .setIsBrowsable(true)
+                                        .setIsPlayable(false)
+                                        .build(),
+                                )
+                                .build(),
+                        )
+                    }
+                    PLAYLISTS_ID -> {
+                        playlistDao.getAllVisible().first().map { playlist ->
+                            MediaItem.Builder()
+                                .setMediaId("$PLAYLIST_PREFIX${playlist.id}")
+                                .setMediaMetadata(
+                                    MediaMetadata.Builder()
+                                        .setTitle(playlist.name)
+                                        .setSubtitle("${playlist.trackCount} tracks")
+                                        .setArtworkUri(playlist.artUrl?.toUri())
+                                        .setIsBrowsable(true)
+                                        .setIsPlayable(false)
+                                        .build(),
+                                )
+                                .build()
+                        }
+                    }
+                    RECENTLY_ADDED_ID -> {
+                        trackDao.getRecentlyAdded(20).first().map { track ->
+                            MediaItem.Builder()
+                                .setMediaId(track.id.toString())
+                                .setUri(track.filePath ?: "")
+                                .setMediaMetadata(
+                                    track.toMediaMetadata(),
+                                )
+                                .build()
+                        }
+                    }
+                    else -> {
+                        if (parentId.startsWith(PLAYLIST_PREFIX)) {
+                            val playlistId = parentId.removePrefix(PLAYLIST_PREFIX).toLongOrNull()
+                            if (playlistId != null) {
+                                val shuffleItem = MediaItem.Builder()
+                                    .setMediaId("$SHUFFLE_PLAY_PREFIX$playlistId")
+                                    .setMediaMetadata(
+                                        MediaMetadata.Builder()
+                                            .setTitle(getString(R.string.shuffle_play))
+                                            .setArtworkUri("android.resource://$packageName/drawable/ic_shuffle".toUri())
+                                            .setIsBrowsable(false)
+                                            .setIsPlayable(true)
+                                            .build(),
+                                    )
+                                    .build()
+
+                                val tracks = playlistDao.getTracksForPlaylist(playlistId).filter{track -> track.isDownloaded}.map { track ->
+                                    MediaItem.Builder()
+                                        .setMediaId(track.id.toString())
+                                        .setUri(track.filePath ?: "")
+                                        .setMediaMetadata(
+                                            track.toMediaMetadata(),
+                                        )
+                                        .build()
+                                }
+                                listOf(shuffleItem) + tracks
+                            } else emptyList()
+                        } else emptyList()
+                    }
+                }
+                LibraryResult.ofItemList(ImmutableList.copyOf(items), params)
+            }
+        }
+
+        override fun onSearch(
+            session: MediaLibrarySession,
+            browser: MediaSession.ControllerInfo,
+            query: String,
+            params: LibraryParams?,
+        ): ListenableFuture<LibraryResult<Void>> {
+            session.notifySearchResultChanged(browser, query, 0, params)
+            return Futures.immediateFuture(LibraryResult.ofVoid())
+        }
+
+        @OptIn(UnstableApi::class)
+        override fun onGetSearchResult(
+            session: MediaLibrarySession,
+            browser: MediaSession.ControllerInfo,
+            query: String,
+            page: Int,
+            pageSize: Int,
+            params: LibraryParams?,
+        ): ListenableFuture<LibraryResult<ImmutableList<MediaItem>>> {
+            return serviceScope.future {
+                // Sanitize for FTS (append * to each term for prefix matching)
+                val sanitized = query.split(" ")
+                    .filter { it.isNotBlank() }
+                    .joinToString(" ") { "$it*" }
+
+                val tracks = trackDao.searchDownloaded(sanitized).first()
+                val items = tracks.map { track ->
+                    MediaItem.Builder()
+                        .setMediaId(track.id.toString())
+                        .setUri(track.filePath ?: "")
+                        .setMediaMetadata(
+                            track.toMediaMetadata(),
+                        )
+                        .build()
+                }
+                LibraryResult.ofItemList(ImmutableList.copyOf(items), params)
+            }
+        }
+
+        @OptIn(UnstableApi::class)
         override fun onConnect(
             session: MediaSession,
             controller: MediaSession.ControllerInfo,
@@ -280,6 +693,13 @@ class StashPlaybackService : MediaSessionService() {
             )
             val sessionCommands = MediaSession.ConnectionResult.DEFAULT_SESSION_COMMANDS.buildUpon()
             customCommands.forEach { sessionCommands.add(it) }
+
+            //Android auto commands
+            sessionCommands.add(SessionCommand.COMMAND_CODE_LIBRARY_GET_LIBRARY_ROOT)
+            sessionCommands.add(SessionCommand.COMMAND_CODE_LIBRARY_GET_CHILDREN)
+            sessionCommands.add(SessionCommand.COMMAND_CODE_LIBRARY_GET_ITEM)
+            sessionCommands.add(SessionCommand.COMMAND_CODE_LIBRARY_SUBSCRIBE)
+            sessionCommands.add(SessionCommand.COMMAND_CODE_LIBRARY_SEARCH)
 
             // Default availablePlayerCommands omits COMMAND_CHANGE_MEDIA_ITEMS,
             // which is what addMediaItem / removeMediaItem / moveMediaItem
@@ -319,23 +739,62 @@ class StashPlaybackService : MediaSessionService() {
                     }
                 }
                 COMMAND_TOGGLE_LIKE -> {
-                    // Read the mediaId on the caller thread (Player APIs are
-                    // main-thread-only) but do the DAO/repo work in the
-                    // service scope so the callback returns immediately.
                     val trackId = session.player.currentMediaItem?.mediaId?.toLongOrNull()
                     if (trackId != null) {
+                        // Optimistic update: toggle the local state and push the layout
+                        // immediately so the UI feels snappy and avoids race conditions
+                        // where multiple clicks see the same stale DB state.
+                        lastIsLiked = !lastIsLiked
+                        pushLayout(session, session.player, lastIsLiked)
+
                         serviceScope.launch {
-                            val current = trackDao.observeLikeState(trackId).firstOrNull()
-                            if (current?.stashLikedAt != null) {
-                                stashLikedRepository.remove(trackId)
-                            } else {
+                            if (lastIsLiked) {
                                 stashLikedRepository.add(trackId)
+                            } else {
+                                stashLikedRepository.remove(trackId)
                             }
                         }
                     }
                 }
             }
             return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
+        }
+
+        @OptIn(UnstableApi::class)
+        override fun onPlaybackResumption(
+            session: MediaSession,
+            controller: MediaSession.ControllerInfo,
+            isForPlayback: Boolean,
+        ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
+            return serviceScope.future {
+                val track = trackDao.getLastPlayedTrack()
+                val item = if (track != null) {
+                    MediaItem.Builder()
+                        .setMediaId(track.id.toString())
+                        .setUri(track.filePath ?: "")
+                        .setMediaMetadata(track.toMediaMetadata())
+                        .build()
+                } else {
+                    // Fallback to most recently added if no last-played record exists
+                    trackDao.getRecentlyAdded(1).first().firstOrNull()?.let { recentlyAdded ->
+                        MediaItem.Builder()
+                            .setMediaId(recentlyAdded.id.toString())
+                            .setUri(recentlyAdded.filePath ?: "")
+                            .setMediaMetadata(recentlyAdded.toMediaMetadata())
+                            .build()
+                    }
+                }
+
+                if (item != null) {
+                    MediaSession.MediaItemsWithStartPosition(
+                        ImmutableList.of(item),
+                        /* startIndex= */ 0,
+                        /* startPositionMs= */ C.TIME_UNSET,
+                    )
+                } else {
+                    throw UnsupportedOperationException()
+                }
+            }
         }
     }
 }

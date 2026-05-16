@@ -17,6 +17,7 @@ import com.stash.core.media.service.StashPlaybackService
 import com.stash.core.model.PlayerState
 import com.stash.core.model.RepeatMode
 import com.stash.core.model.Track
+import com.stash.core.media.service.StashPlaybackService.Companion.EXTRA_TRACK_ID
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -33,6 +34,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import javax.inject.Inject
 import javax.inject.Singleton
+import androidx.core.net.toUri
 
 /**
  * [PlayerRepository] implementation backed by a [MediaController] that connects
@@ -51,6 +53,13 @@ class PlayerRepositoryImpl @Inject constructor(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     init {
+        // v0.9.27: Connect the controller immediately on init so we can
+        // provide live state even if the app was cold-started while
+        // music was already playing (e.g. via Android Auto).
+        scope.launch {
+            ensureController()
+        }
+
         // Evict deleted tracks from the live queue. Without this, ExoPlayer's
         // open file handle keeps audio playing after the user deletes the
         // song (correct Unix semantics, wrong UX) — see Reddit report from
@@ -420,7 +429,7 @@ class PlayerRepositoryImpl @Inject constructor(
         val track = currentItem?.toTrack()
         val queue = buildList {
             for (i in 0 until controller.mediaItemCount) {
-                controller.getMediaItemAt(i).toTrack()?.let { add(it) }
+                add(controller.getMediaItemAt(i).toTrack())
             }
         }
 
@@ -453,7 +462,6 @@ class PlayerRepositoryImpl @Inject constructor(
     companion object {
         private const val TAG = "StashPlayer"
         private const val POSITION_UPDATE_INTERVAL_MS = 250L
-        private const val EXTRA_TRACK_ID = "stash_track_id"
 
         /** Auto-grow fires once the remaining queue tail drops below this many tracks. */
         private const val LIBRARY_SHUFFLE_GROW_THRESHOLD = 5
@@ -473,14 +481,14 @@ class PlayerRepositoryImpl @Inject constructor(
             .setArtist(artist)
             .setAlbumTitle(album)
             .setArtworkUri(
-                (albumArtPath ?: albumArtUrl)?.let { Uri.parse(it) }
+                (albumArtPath ?: albumArtUrl)?.toUri()
             )
             .setExtras(Bundle().apply { putLong(EXTRA_TRACK_ID, id) })
             .build()
 
         // Ensure file:// scheme so StashPlaybackService's URI validation passes.
         val fileUri = filePath?.let { path ->
-            if (path.startsWith("/")) Uri.parse("file://$path") else Uri.parse(path)
+            if (path.startsWith("/")) "file://$path".toUri() else path.toUri()
         }
 
         val requestMetadata = MediaItem.RequestMetadata.Builder()
@@ -499,15 +507,21 @@ class PlayerRepositoryImpl @Inject constructor(
      * Best-effort reconstruction of a [Track] from a [MediaItem]'s metadata.
      * Only the fields carried through Media3 metadata are populated.
      */
-    private fun MediaItem.toTrack(): Track? {
+    private fun MediaItem.toTrack(): Track {
         val meta = mediaMetadata
-        val trackId = meta.extras?.getLong(EXTRA_TRACK_ID) ?: mediaId.toLongOrNull() ?: return null
+        // v0.9.27: allow id=0 fallback for non-library tracks (e.g. search
+        // previews with videoId strings). This makes the Like button and
+        // other actions visible in Now Playing for non-library content.
+        val trackId = meta.extras?.getLong(EXTRA_TRACK_ID) ?: mediaId.toLongOrNull() ?: 0L
         return Track(
             id = trackId,
             title = meta.title?.toString() ?: "",
             artist = meta.artist?.toString() ?: "",
             album = meta.albumTitle?.toString() ?: "",
             albumArtUrl = meta.artworkUri?.toString(),
+            // For non-library tracks, the mediaId is the YouTube videoId.
+            youtubeId = if (trackId == 0L) mediaId else null,
+            source = if (trackId == 0L) com.stash.core.model.MusicSource.YOUTUBE else com.stash.core.model.MusicSource.SPOTIFY
         )
     }
 }
