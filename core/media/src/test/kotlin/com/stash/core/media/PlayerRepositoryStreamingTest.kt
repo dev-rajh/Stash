@@ -8,7 +8,7 @@ import com.stash.core.data.db.entity.TrackEntity
 import com.stash.core.data.prefs.StreamingPreference
 import com.stash.core.data.repository.MusicRepository
 import com.stash.core.media.streaming.ConnectivityMonitor
-import com.stash.core.media.streaming.KennyyStreamResolver
+import com.stash.core.media.streaming.StreamSourceRegistry
 import com.stash.core.media.streaming.StreamUrl
 import com.stash.core.media.streaming.StreamUrlCache
 import io.mockk.coEvery
@@ -46,7 +46,7 @@ class PlayerRepositoryStreamingTest {
         every { trackDeletions } returns MutableSharedFlow()
     }
     private val streamingPreference: StreamingPreference = mockk()
-    private val streamResolver: KennyyStreamResolver = mockk()
+    private val streamResolver: StreamSourceRegistry = mockk()
     private val streamUrlCache: StreamUrlCache = mockk(relaxUnitFun = true)
     private val connectivity: ConnectivityMonitor = mockk()
     private val trackDao: TrackDao = mockk()
