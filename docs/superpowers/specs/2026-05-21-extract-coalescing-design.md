@@ -347,7 +347,33 @@ Extend `SearchViewModelTest.kt` + at least one Library VM test (e.g. `LikedSongs
 
 If all five behaviours hold, this branch lands as a normal feature merge into `feat/yt-fallback-resolver` (or whatever's current).
 
-## Risks
+## Verification Results (2026-05-21)
+
+On-device session against the installed APK (commit `e0bc1fa` — final implementation commit).
+
+**LATDIAG signal: coalescing + cap=1 work correctly.** A 4-track burst (videoIds `1kCczdwnvNo`, `B-9Yauh2OkE`, `B_ymY0xG0LI`, `0ju5LRTMFLw`) extracted sequentially at the cap=1 yt-dlp semaphore — each `extract-start` waits for the previous `extract-end`. No fast-fail `YoutubeDLException` cascades. Latencies were 11s, 15s, 26s, 27s — exactly the queue-behind-cap=1 staircase the design predicted.
+
+**Single-tap baseline preserved.** Solo extracts complete cleanly at ~11s (`extract-end videoId=5YV89lqe7yk dt=11016ms`, `dt=11439ms`, `dt=11165ms`, `dt=11741ms`, `dt=11191ms`). Identical to pre-spike baseline.
+
+**No false `NotAvailable` snackbars.** Zero `extract-fail` events across the entire session, vs. the dozens-per-minute cascade on the pre-fix branch.
+
+### Acceptance behaviours
+
+| # | Behaviour | Result |
+|---|-----------|--------|
+| 1 | No false snackbar on rapid same-track retaps (Search) | **PASS** — no snackbars; track loaded in single ~11s window |
+| 2 | No false snackbar on different-track rapid taps (Search) | **PASS** — no snackbars; cap=1 queues cleanly |
+| 3 | Library tap shows spinner | **PASS** — spinner visible on tap, persists ~11s, audio plays |
+| 4 | yt-dlp serialization (cap=1) | **PASS** — staircase queue visible in LATDIAG |
+| 5 | FLAC tracks unaffected | **PASS** — instant playback, no spinner |
+
+### Open item
+
+**Search tab: second-tap-after-prior-playback shows no spinner.** When Track A is already playing (full streaming) and the user issues a new search, taps Track B, Track B loads (full 11s extract per LATDIAG `extract-start videoId=DnYDqv8-lJE` → `extract-end dt=11439ms`) — but no spinner is visible on Track B's row during the 11s wait. Tested via both the row card and the row's Preview button.
+
+The first tap in a fresh Search session DOES show the spinner correctly. Only the second tap (after a prior streaming track has started playing and a new search has loaded results) misses the spinner. Hypothesis: a Compose recomposition timing issue, or a state-flow conflation race that causes `tappedTrackId` to briefly transition through a value the row composable never observes. Worth a follow-up branch with on-device Compose-recomposition tracing.
+
+The functional behaviour (audio plays, no false snackbar, single 11s wait) is correct. Only the spinner UX feedback is missing for that specific second-tap case.
 
 - **`putIfAbsent` race window.** Two callers can each construct a `LAZY` `Deferred`, but only one wins `putIfAbsent` — the loser's `Deferred` is never started and gets GC'd. Verify Kotlin's `async(start = CoroutineStart.LAZY)` truly doesn't perform work until `.start()` is called.
 - **`invokeOnCompletion` ordering.** The cleanup callback runs *after* the `Deferred` completes but *before* `await()` returns. There's a tiny window where the map is empty but the URL is still propagating to callers — harmless because new callers will just start a fresh extract that immediately reuses the warmed `PreviewUrlCache`.
