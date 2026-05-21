@@ -199,13 +199,6 @@ class PlayerRepositoryImpl @Inject constructor(
     @Volatile
     private var setQueueEpoch: Long = 0L
 
-    /**
-     * Cancels the previous foreground resolve when a new [setQueue] comes
-     * in. The background-fill job is tracked separately by [queueBuildJob].
-     */
-    @Volatile
-    private var foregroundResolveJob: Job? = null
-
     private val _userMessages = kotlinx.coroutines.flow.MutableSharedFlow<String>(
         extraBufferCapacity = 4,
         onBufferOverflow = kotlinx.coroutines.channels.BufferOverflow.DROP_OLDEST,
@@ -247,12 +240,6 @@ class PlayerRepositoryImpl @Inject constructor(
         // so its addMediaItem calls can't pollute the new one.
         queueBuildJob?.cancel()
         queueBuildJob = null
-        // Likewise cancel any still-running foreground resolve from a
-        // previous tap — otherwise a 30-second yt-dlp call from an old
-        // tap can complete after the user has tapped a different track
-        // and stomp on the newer playback selection.
-        foregroundResolveJob?.cancel()
-        foregroundResolveJob = null
 
         // Any explicit setQueue (playlist tap, single-song play, etc.) leaves
         // library-shuffle mode behind. Snapshot is cleared so a stale Track
