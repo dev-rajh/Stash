@@ -646,6 +646,14 @@ private fun trackQualityText(track: com.stash.core.model.Track): String? {
             add("${bitDepth}-bit/${"%.1f".format(sampleRateKHz)} kHz")
         }
         if (bitrate != null) add("$bitrate kbps")
+        // Flag the YouTube fallback so the user can tell when a track is
+        // playing from yt-dlp/InnerTube extraction rather than Qobuz. The
+        // codec ("AAC") alone doesn't convey this — Qobuz also serves AAC
+        // at MP3_320 tier. Only the streamOrigin field distinguishes the
+        // two. We don't badge "via Kennyy" / "via squid" because those
+        // are the expected primary sources; only the lossy fallback
+        // deserves a callout.
+        if (track.streamOrigin == "youtube") add("via YT")
     }.joinToString(" · ")
 }
 

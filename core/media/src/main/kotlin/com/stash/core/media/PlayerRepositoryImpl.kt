@@ -26,6 +26,7 @@ import com.stash.core.model.Track
 import com.stash.core.media.service.StashPlaybackService.Companion.EXTRA_STREAM_BIT_DEPTH
 import com.stash.core.media.service.StashPlaybackService.Companion.EXTRA_STREAM_BITRATE
 import com.stash.core.media.service.StashPlaybackService.Companion.EXTRA_STREAM_CODEC
+import com.stash.core.media.service.StashPlaybackService.Companion.EXTRA_STREAM_ORIGIN
 import com.stash.core.media.service.StashPlaybackService.Companion.EXTRA_STREAM_SAMPLE_RATE
 import com.stash.core.media.service.StashPlaybackService.Companion.EXTRA_TRACK_ID
 import com.stash.core.model.TrackItem
@@ -42,6 +43,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
@@ -185,6 +187,39 @@ class PlayerRepositoryImpl @Inject constructor(
     @Volatile
     private var queueBuildJob: Job? = null
 
+    /**
+     * Monotonic counter incremented on every [setQueue] entry. Used as
+     * a race guard for slow resolves: when a foreground resolve finally
+     * returns, we check that no newer setQueue has been called in the
+     * meantime before applying its result to the controller. Without
+     * this, taps on a long-resolving track (e.g. yt-dlp fallback at
+     * ~20-60s) would still end up calling `controller.setMediaItems`
+     * minutes later, clobbering whatever the user is currently playing.
+     */
+    @Volatile
+    private var setQueueEpoch: Long = 0L
+
+    /**
+     * Cancels the previous foreground resolve when a new [setQueue] comes
+     * in. The background-fill job is tracked separately by [queueBuildJob].
+     */
+    @Volatile
+    private var foregroundResolveJob: Job? = null
+
+    private val _userMessages = kotlinx.coroutines.flow.MutableSharedFlow<String>(
+        extraBufferCapacity = 4,
+        onBufferOverflow = kotlinx.coroutines.channels.BufferOverflow.DROP_OLDEST,
+    )
+    /**
+     * Snackbar-targeted messages from playback flow ("Couldn't play this
+     * track right now."). Surfaced when [setQueue]'s tapped track can't
+     * be resolved by any source so the user knows the tap was received
+     * but the track is genuinely unavailable. Collected by Now Playing
+     * + playlist detail screens.
+     */
+    val userMessages: kotlinx.coroutines.flow.SharedFlow<String> =
+        _userMessages.asSharedFlow()
+
     // ---- Public API ----
 
     override suspend fun play() {
@@ -212,6 +247,12 @@ class PlayerRepositoryImpl @Inject constructor(
         // so its addMediaItem calls can't pollute the new one.
         queueBuildJob?.cancel()
         queueBuildJob = null
+        // Likewise cancel any still-running foreground resolve from a
+        // previous tap — otherwise a 30-second yt-dlp call from an old
+        // tap can complete after the user has tapped a different track
+        // and stomp on the newer playback selection.
+        foregroundResolveJob?.cancel()
+        foregroundResolveJob = null
 
         // Any explicit setQueue (playlist tap, single-song play, etc.) leaves
         // library-shuffle mode behind. Snapshot is cleared so a stale Track
@@ -225,41 +266,53 @@ class PlayerRepositoryImpl @Inject constructor(
         val streamingOn = streamingPreference.current()
         val safeStart = startIndex.coerceIn(0, tracks.size - 1)
         val semaphore = Semaphore(STREAM_RESOLVE_PARALLELISM)
+        // Record this call's epoch so the resolve below can refuse to
+        // apply its result if a newer setQueue has come in meanwhile.
+        val myEpoch = ++setQueueEpoch
+        val tappedTrack = tracks[safeStart]
 
-        // Resolve the tapped track first so playback can begin immediately,
-        // regardless of queue size. For a 2671-track Liked Songs queue,
-        // pre-resolving the whole list at the start used to take minutes;
-        // resolving just the tapped track is one Kennyy round-trip (~1-2 s)
-        // and the rest of the queue fills in below while the user listens.
-        //
-        // If the tapped track itself can't be resolved (niche track not in
-        // Qobuz, transient 5xx, etc.), probe forward up to
-        // [START_TRACK_PROBE_LIMIT] entries before giving up — most queues
-        // have at least one playable track near the tap.
-        var startTrackIndex = -1
-        var startItem: MediaItem? = null
-        val probeEnd = (safeStart + START_TRACK_PROBE_LIMIT).coerceAtMost(tracks.size)
-        for (i in safeStart until probeEnd) {
-            val item = resolveTrackToMediaItem(tracks[i], semaphore, streamingOn)
-            if (item != null) {
-                startTrackIndex = i
-                startItem = item
-                break
-            }
+        // Resolve ONLY the tapped track. Earlier revisions probed forward
+        // through the next few entries looking for *anything* playable,
+        // but that has two real-user pathologies: (1) it silently
+        // substitutes the track the user actually picked, and worse,
+        // (2) when the user is already playing a track from this queue
+        // and taps a different one that fails to resolve, the probe
+        // falls forward into the currently-playing track and calls
+        // setMediaItems on it — restarting it from 0. Better to fail
+        // visibly (snackbar + log) than to surprise-restart the user's
+        // music. See #75 follow-up.
+        val startItem = resolveTrackToMediaItem(
+            tappedTrack,
+            semaphore,
+            streamingOn,
+            allowYouTube = true,
+        )
+
+        // Race guard: if another setQueue came in while we were
+        // resolving (e.g. user tapped a different track during a slow
+        // yt-dlp fallback), don't clobber the newer playback intent.
+        if (myEpoch != setQueueEpoch) {
+            Log.d(
+                TAG,
+                "setQueue[epoch=$myEpoch]: superseded by newer call (now=$setQueueEpoch); " +
+                    "discarding result for track[$safeStart] '${tappedTrack.title}'",
+            )
+            return
         }
 
         if (startItem == null) {
             Log.w(
                 TAG,
-                "setQueue: no resolvable track in tracks[$safeStart .. ${probeEnd - 1}] " +
-                    "(streamingOn=$streamingOn) — nothing to play",
+                "setQueue[epoch=$myEpoch]: track[$safeStart] '${tappedTrack.title}' failed to " +
+                    "resolve — preserving current playback",
             )
+            _userMessages.tryEmit("Couldn't play this track right now.")
             return
         }
 
         Log.i(
             TAG,
-            "setQueue: starting playback on track $startTrackIndex; " +
+            "setQueue[epoch=$myEpoch]: starting playback on track $safeStart; " +
                 "${tracks.size - 1} more to resolve in background",
         )
 
@@ -271,12 +324,22 @@ class PlayerRepositoryImpl @Inject constructor(
         // start anchor are appended first (skip-next is the common case);
         // tracks before are prepended afterwards so skip-back still works
         // once the fill catches up. Cancellable — see queueBuildJob KDoc.
-        val forward = tracks.subList(startTrackIndex + 1, tracks.size)
-        val backward = tracks.subList(0, startTrackIndex)
+        //
+        // Background-fill uses lossless-only resolution (no YouTube
+        // fallback). yt-dlp has a 2-slot extraction semaphore shared
+        // across the app; if a 2700-track Liked Songs queue were to
+        // funnel ~5% of its tracks through yt-dlp during fill, that
+        // semaphore would be saturated for ~20 minutes and the next
+        // user-tap that needs yt-dlp would queue behind it. Unmatched
+        // tracks are silently skipped from the background queue here;
+        // when the user *taps* one, setQueue is called again with that
+        // index and the full chain (incl. YouTube) runs for that track.
+        val forward = tracks.subList(safeStart + 1, tracks.size)
+        val backward = tracks.subList(0, safeStart)
         queueBuildJob = scope.launch {
             try {
-                fillQueueAppend(controller, forward, semaphore, streamingOn)
-                fillQueuePrepend(controller, backward, semaphore, streamingOn)
+                fillQueueAppend(controller, forward, semaphore, streamingOn, allowYouTube = false)
+                fillQueuePrepend(controller, backward, semaphore, streamingOn, allowYouTube = false)
                 Log.i(TAG, "setQueue: background fill complete (${tracks.size} tracks)")
             } catch (e: CancellationException) {
                 // Expected when the user starts a new queue. Don't log as failure.
@@ -299,10 +362,11 @@ class PlayerRepositoryImpl @Inject constructor(
         tracks: List<Track>,
         semaphore: Semaphore,
         streamingOn: Boolean,
+        allowYouTube: Boolean = true,
     ) {
         tracks.chunked(BACKGROUND_FILL_BATCH).forEach { batch ->
             if (!currentCoroutineActive()) return
-            val resolved = resolveBatchParallel(batch, semaphore, streamingOn)
+            val resolved = resolveBatchParallel(batch, semaphore, streamingOn, allowYouTube)
             if (resolved.isNotEmpty()) controller.addMediaItems(resolved)
         }
     }
@@ -317,6 +381,7 @@ class PlayerRepositoryImpl @Inject constructor(
         tracks: List<Track>,
         semaphore: Semaphore,
         streamingOn: Boolean,
+        allowYouTube: Boolean = true,
     ) {
         // Process from the END of [tracks] backwards in chunks. The chunk
         // closest to the current playback head is processed last so the
@@ -327,7 +392,7 @@ class PlayerRepositoryImpl @Inject constructor(
             // Resolve the batch in original (forward) order so the
             // semaphore-bounded async fan-out doesn't reshuffle results.
             val batch = batchReversed.asReversed()
-            val resolved = resolveBatchParallel(batch, semaphore, streamingOn)
+            val resolved = resolveBatchParallel(batch, semaphore, streamingOn, allowYouTube)
             if (resolved.isNotEmpty()) controller.addMediaItems(/* index = */ 0, resolved)
         }
     }
@@ -336,10 +401,11 @@ class PlayerRepositoryImpl @Inject constructor(
         batch: List<Track>,
         semaphore: Semaphore,
         streamingOn: Boolean,
+        allowYouTube: Boolean = true,
     ): List<MediaItem> = coroutineScope {
         batch.map { track ->
             async(Dispatchers.IO) {
-                resolveTrackToMediaItem(track, semaphore, streamingOn)
+                resolveTrackToMediaItem(track, semaphore, streamingOn, allowYouTube)
             }
         }.awaitAll().filterNotNull()
     }
@@ -367,6 +433,7 @@ class PlayerRepositoryImpl @Inject constructor(
         track: Track,
         semaphore: Semaphore,
         streamingOn: Boolean,
+        allowYouTube: Boolean = true,
     ): MediaItem? {
         val localPath = track.filePath
         if (track.isDownloaded && !localPath.isNullOrBlank() && filePathExistsOnDisk(localPath)) {
@@ -376,7 +443,7 @@ class PlayerRepositoryImpl @Inject constructor(
 
         return semaphore.withPermit {
             val entity = trackDao.getById(track.id) ?: track.toEntity()
-            val result = buildMediaItemForTrack(entity)
+            val result = buildMediaItemForTrack(entity, allowYouTube = allowYouTube)
             (result as? StreamRoutingResult.Item)?.mediaItem
         }
     }
@@ -594,6 +661,11 @@ class PlayerRepositoryImpl @Inject constructor(
             isDownloaded = false,
             isStreamable = true,
             albumArtUrl = item.thumbnailUrl,
+            // Search results carry a YT videoId — propagate it so the
+            // YouTube fallback resolver can extract directly when Qobuz
+            // doesn't have the track. Without this the transient row's
+            // youtubeId stays null and YouTubeStreamResolver bails.
+            youtubeId = item.videoId,
         )
         val result = buildMediaItemForTrack(transient)
         if (result is StreamRoutingResult.Item) {
@@ -625,7 +697,10 @@ class PlayerRepositoryImpl @Inject constructor(
      * If `streamResolver.resolve()` returns null, we surface NotAvailable
      * at step 6 — no need to pre-gate on a stale flag.
      */
-    internal suspend fun buildMediaItemForTrack(track: TrackEntity): StreamRoutingResult {
+    internal suspend fun buildMediaItemForTrack(
+        track: TrackEntity,
+        allowYouTube: Boolean = true,
+    ): StreamRoutingResult {
         val localPath = track.filePath
         if (track.isDownloaded && !localPath.isNullOrBlank() && filePathExistsOnDisk(localPath)) {
             val uri = if (localPath.startsWith("/")) Uri.parse("file://$localPath") else Uri.parse(localPath)
@@ -654,7 +729,7 @@ class PlayerRepositoryImpl @Inject constructor(
         }
 
         val cached = streamUrlCache.get(track.id)
-        val stream = cached ?: streamResolver.resolve(track)?.also {
+        val stream = cached ?: streamResolver.resolve(track, allowYouTube = allowYouTube)?.also {
             streamUrlCache.put(track.id, it)
         } ?: return StreamRoutingResult.NotAvailable
 
@@ -700,6 +775,7 @@ class PlayerRepositoryImpl @Inject constructor(
                             stream.bitsPerSample?.let { putInt(EXTRA_STREAM_BIT_DEPTH, it) }
                             stream.sampleRateHz?.let { putInt(EXTRA_STREAM_SAMPLE_RATE, it) }
                             stream.bitrateKbps?.let { putInt(EXTRA_STREAM_BITRATE, it) }
+                            stream.origin?.let { putString(EXTRA_STREAM_ORIGIN, it) }
                         })
                         .build()
                 )
@@ -935,14 +1011,6 @@ class PlayerRepositoryImpl @Inject constructor(
         private const val STREAM_RESOLVE_PARALLELISM = 16
 
         /**
-         * If the tapped track itself fails to resolve, probe this many
-         * adjacent tracks forward before giving up. Keeps playback alive
-         * when the user lands on a single dead row (niche track not in
-         * Qobuz, transient 5xx).
-         */
-        private const val START_TRACK_PROBE_LIMIT = 5
-
-        /**
          * Tracks per background-fill batch. Each batch fires off a
          * parallel resolve fan-out up to [STREAM_RESOLVE_PARALLELISM] in
          * flight. Same value as the resolve cap so one batch saturates
@@ -1004,6 +1072,7 @@ class PlayerRepositoryImpl @Inject constructor(
         val streamBitDepth = extras?.getInt(EXTRA_STREAM_BIT_DEPTH, 0)?.takeIf { it > 0 }
         val streamSampleRate = extras?.getInt(EXTRA_STREAM_SAMPLE_RATE, 0)?.takeIf { it > 0 }
         val streamBitrate = extras?.getInt(EXTRA_STREAM_BITRATE, 0)?.takeIf { it > 0 }
+        val streamOrigin = extras?.getString(EXTRA_STREAM_ORIGIN)
 
         return Track(
             id = trackId,
@@ -1018,6 +1087,7 @@ class PlayerRepositoryImpl @Inject constructor(
             bitsPerSample = streamBitDepth,
             sampleRateHz = streamSampleRate,
             qualityKbps = streamBitrate ?: 0,
+            streamOrigin = streamOrigin,
         )
     }
 }

@@ -49,6 +49,7 @@ class QobuzStreamResolver @Inject constructor(
             sampleRateHz = result.format.sampleRateHz.takeIf { it > 0 },
             bitrateKbps = result.format.bitrateKbps.takeIf { it > 0 },
             coverArtUrl = result.coverArtUrl?.takeIf { it.isNotBlank() },
+            origin = ORIGIN,
         )
     }
 
@@ -59,6 +60,7 @@ class QobuzStreamResolver @Inject constructor(
     }
 
     private companion object {
+        const val ORIGIN = "squid"
         val ETSP_REGEX = Regex("""[?&]etsp=(\d+)""")
     }
 }

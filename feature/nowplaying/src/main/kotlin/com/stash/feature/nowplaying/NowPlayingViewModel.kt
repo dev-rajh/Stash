@@ -139,6 +139,9 @@ class NowPlayingViewModel @Inject constructor(
                         bitsPerSample = streamFormat.bitsPerSample ?: baseTrack.bitsPerSample,
                         sampleRateHz = streamFormat.sampleRateHz ?: baseTrack.sampleRateHz,
                         qualityKbps = if (streamFormat.qualityKbps > 0) streamFormat.qualityKbps else baseTrack.qualityKbps,
+                        // streamOrigin only exists on MediaItem-derived tracks (not in
+                        // Room), so always overlay from the active item when streaming.
+                        streamOrigin = streamFormat.streamOrigin,
                     )
                 } else baseTrack
                 val trackKey = if (track?.id == 0L) track.youtubeId.hashCode().toLong() else track?.id

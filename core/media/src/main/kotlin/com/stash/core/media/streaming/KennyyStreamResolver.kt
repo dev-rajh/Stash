@@ -38,6 +38,16 @@ data class StreamUrl(
      * source didn't surface it.
      */
     val coverArtUrl: String? = null,
+    /**
+     * Which resolver served this URL — used by the UI to label tracks
+     * that are streaming from a non-lossless fallback (e.g. YouTube)
+     * so the user knows quality has degraded from the Qobuz baseline.
+     *
+     * Conventional values:
+     *  - `"kennyy"` / `"squid"`  — Qobuz catalog (lossless)
+     *  - `"youtube"`             — yt-dlp/InnerTube extraction (lossy)
+     */
+    val origin: String? = null,
 )
 
 /**
@@ -94,6 +104,7 @@ class KennyyStreamResolver @Inject constructor(
             sampleRateHz = result.format.sampleRateHz.takeIf { it > 0 },
             bitrateKbps = result.format.bitrateKbps.takeIf { it > 0 },
             coverArtUrl = result.coverArtUrl?.takeIf { it.isNotBlank() },
+            origin = ORIGIN,
         )
     }
 
@@ -104,6 +115,7 @@ class KennyyStreamResolver @Inject constructor(
     }
 
     private companion object {
+        const val ORIGIN = "kennyy"
         val ETSP_REGEX = Regex("""[?&]etsp=(\d+)""")
     }
 }
