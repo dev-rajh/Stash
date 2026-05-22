@@ -65,7 +65,6 @@ fun ArtistHero(
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .height(240.dp)
             .background(
                 Brush.verticalGradient(
                     colors = listOf(

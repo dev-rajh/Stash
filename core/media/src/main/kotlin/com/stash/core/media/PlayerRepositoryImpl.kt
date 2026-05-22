@@ -630,8 +630,12 @@ class PlayerRepositoryImpl @Inject constructor(
     override suspend fun addNext(track: Track) {
         val controller = ensureController() ?: return
         val wasEmpty = controller.mediaItemCount == 0
+        val streamingOn = streamingPreference.current()
+        // Single-track resolve — no parallelism needed, semaphore size 1.
+        val semaphore = Semaphore(1)
+        val mediaItem = resolveTrackToMediaItem(track, semaphore, streamingOn) ?: return
         val insertIndex = controller.currentMediaItemIndex + 1
-        controller.addMediaItem(insertIndex, track.toMediaItem())
+        controller.addMediaItem(insertIndex, mediaItem)
         // If the queue was empty, the user tapped "Play next" with nothing
         // playing — they expect the song to actually start, not just sit
         // silently in a queue they can't see. Prepare and play.
@@ -644,7 +648,11 @@ class PlayerRepositoryImpl @Inject constructor(
     override suspend fun addToQueue(track: Track) {
         val controller = ensureController() ?: return
         val wasEmpty = controller.mediaItemCount == 0
-        controller.addMediaItem(track.toMediaItem())
+        val streamingOn = streamingPreference.current()
+        // Single-track resolve — no parallelism needed, semaphore size 1.
+        val semaphore = Semaphore(1)
+        val mediaItem = resolveTrackToMediaItem(track, semaphore, streamingOn) ?: return
+        controller.addMediaItem(mediaItem)
         if (wasEmpty) {
             controller.prepare()
             controller.play()
@@ -655,7 +663,17 @@ class PlayerRepositoryImpl @Inject constructor(
         if (tracks.isEmpty()) return
         val controller = ensureController() ?: return
         val wasEmpty = controller.mediaItemCount == 0
-        controller.addMediaItems(tracks.map { it.toMediaItem() })
+        val streamingOn = streamingPreference.current()
+        val semaphore = Semaphore(STREAM_RESOLVE_PARALLELISM)
+        // Parallel-resolve; preserve input order so the user's queue matches
+        // the order they tapped Add-to-Queue.
+        val resolved = coroutineScope {
+            tracks.map { track ->
+                async { resolveTrackToMediaItem(track, semaphore, streamingOn) }
+            }.awaitAll()
+        }.filterNotNull()
+        if (resolved.isEmpty()) return
+        controller.addMediaItems(resolved)
         if (wasEmpty) {
             controller.prepare()
             controller.play()
