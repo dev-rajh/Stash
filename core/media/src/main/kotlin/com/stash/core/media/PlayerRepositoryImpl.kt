@@ -19,6 +19,7 @@ import com.stash.core.data.repository.MusicRepository
 import com.stash.core.media.service.StashPlaybackService
 import com.stash.core.media.streaming.ConnectivityMonitor
 import com.stash.core.media.streaming.StreamSourceRegistry
+import com.stash.core.media.streaming.StreamUrl
 import com.stash.core.media.streaming.StreamUrlCache
 import com.stash.core.model.PlayerState
 import com.stash.core.model.RepeatMode
@@ -45,8 +46,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.guava.await
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -138,6 +141,24 @@ class PlayerRepositoryImpl @Inject constructor(
                 }
             }
         }
+
+        // Next-track prefetch watcher. Whenever the player advances (currentIndex
+        // changes), eagerly resolve currentQueueTracks[currentIndex+1] so its URL
+        // is cached + the controller's MediaItem URI is refreshed BEFORE ExoPlayer
+        // starts pre-buffering the next track. Eliminates the 5-10s pause that
+        // happens when the next track's URL has expired or wasn't covered by
+        // background fill (e.g. YT-fallback tracks skipped because background
+        // fill uses allowYouTube=false).
+        //
+        // Bounded to 1 track ahead — does NOT prefetch idx+2 or further. The
+        // reactive design handles skip-ahead: on a skip, the watcher re-fires
+        // with the new currentIndex and prefetches the new next-up.
+        scope.launch {
+            playerState
+                .map { it.currentIndex }
+                .distinctUntilChanged()
+                .collect { idx -> prefetchNextTrack(idx) }
+        }
     }
 
     private val _playerState = MutableStateFlow(PlayerState())
@@ -174,6 +195,17 @@ class PlayerRepositoryImpl @Inject constructor(
      */
     @Volatile
     private var librarySnapshot: List<Track> = emptyList()
+
+    /**
+     * Snapshot of the [Track] list most recently passed to [setQueue]. Drives
+     * the next-track prefetch watcher — we look up the next-to-play Track by
+     * index here rather than relying on the controller's MediaItems, so
+     * tracks that were silently dropped by background fill (YT-fallback when
+     * allowYouTube=false in fillQueueAppend) can still be discovered for the
+     * eager prefetch.
+     */
+    @Volatile
+    private var currentQueueTracks: List<Track> = emptyList()
 
     /** Serializes auto-grow operations so multiple state updates can't fan out. */
     private val growMutex = Mutex()
@@ -246,6 +278,13 @@ class PlayerRepositoryImpl @Inject constructor(
         // list doesn't grow back into a different queue later.
         libraryShuffleActive = false
         librarySnapshot = emptyList()
+
+        // Snapshot the requested queue early so the next-track prefetch watcher
+        // can look up idx+1 even for entries that background fill (allowYouTube=false)
+        // silently drops from the controller's timeline. New queue overwrites
+        // the old; any prefetch in flight from the previous queue completes
+        // harmlessly against the old reference it already captured.
+        currentQueueTracks = tracks
 
         val controller = ensureController() ?: return
         if (tracks.isEmpty()) return
@@ -395,6 +434,89 @@ class PlayerRepositoryImpl @Inject constructor(
                 resolveTrackToMediaItem(track, semaphore, streamingOn, allowYouTube)
             }
         }.awaitAll().filterNotNull()
+    }
+
+    /**
+     * Eager-resolve `currentQueueTracks[currentIndex + 1]` and refresh the
+     * controller's MediaItem at that timeline position so the URI is fresh
+     * when ExoPlayer's pre-buffer kicks in.
+     *
+     * Skips when:
+     *  - There is no next track (current is last).
+     *  - The next track is downloaded (no resolve needed).
+     *  - The cache already has a fresh entry (expires in >60s).
+     *  - The next track isn't streamable.
+     *  - Streaming pref is off.
+     *
+     * Failures are logged and swallowed — the original (possibly stale)
+     * MediaItem stays in place and [RefreshingDataSourceFactory] handles
+     * any 403 at playback time, exactly as before this prefetch existed.
+     */
+    private suspend fun prefetchNextTrack(currentIndex: Int) {
+        val controller = controllerDeferred ?: return
+        val tracks = currentQueueTracks
+        val nextIndex = currentIndex + 1
+        if (nextIndex < 0 || nextIndex >= tracks.size) return
+
+        val next = tracks[nextIndex]
+        if (next.filePath != null) return
+        if (!next.isStreamable) return
+        if (!streamingPreference.current()) return
+
+        // Fresh-cache check — avoid redundant work when the URL is good.
+        val cached = streamUrlCache.get(next.id)
+        val nowMs = System.currentTimeMillis()
+        if (cached != null && cached.expiresAtMs > nowMs + PREFETCH_FRESH_THRESHOLD_MS) return
+
+        val t0 = System.currentTimeMillis()
+        Log.d("LATDIAG", "prefetch-next-start id=${next.id} youtubeId=${next.youtubeId}")
+        val entity = trackDao.getById(next.id) ?: next.toEntity()
+        val resolved = try {
+            streamResolver.resolve(entity, allowYouTube = true)
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (e: Exception) {
+            Log.w(TAG, "prefetch-next failed for id=${next.id}: ${e.message}")
+            Log.d("LATDIAG", "prefetch-next-end id=${next.id} dt=${System.currentTimeMillis() - t0}ms outcome=throw:${e.javaClass.simpleName}")
+            return
+        }
+        if (resolved == null) {
+            Log.d("LATDIAG", "prefetch-next-end id=${next.id} dt=${System.currentTimeMillis() - t0}ms outcome=null")
+            return
+        }
+        streamUrlCache.put(next.id, resolved)
+        Log.d("LATDIAG", "prefetch-next-end id=${next.id} dt=${System.currentTimeMillis() - t0}ms outcome=url expiresAt=${resolved.expiresAtMs}")
+
+        // Refresh the controller's MediaItem at the matching index so the
+        // player picks up the fresh URI when its pre-buffer fires. Locate
+        // the slot by matching EXTRA_TRACK_ID; the controller's timeline
+        // may have fewer items than currentQueueTracks because background
+        // fill (allowYouTube=false) skips unresolvable tracks. If the next
+        // track isn't in the controller's queue, skip — inserting it would
+        // change the user's queue order, which is out of scope here.
+        refreshControllerMediaItem(controller, next, resolved)
+    }
+
+    private fun refreshControllerMediaItem(
+        controller: MediaController,
+        next: Track,
+        resolved: StreamUrl,
+    ) {
+        val count = controller.mediaItemCount
+        for (i in 0 until count) {
+            val item = controller.getMediaItemAt(i)
+            val itemTrackId = item.mediaMetadata.extras?.getLong(EXTRA_TRACK_ID) ?: continue
+            if (itemTrackId == next.id) {
+                // Rebuild the MediaItem with the new URI but preserve the
+                // existing mediaId / metadata / extras so listeners observe a
+                // pure URI swap.
+                val refreshed = item.buildUpon()
+                    .setUri(resolved.url)
+                    .build()
+                controller.replaceMediaItem(i, refreshed)
+                return
+            }
+        }
     }
 
     /**
@@ -1004,6 +1126,9 @@ class PlayerRepositoryImpl @Inject constructor(
          * the semaphore — keeps proxy pressure consistent.
          */
         private const val BACKGROUND_FILL_BATCH = 16
+
+        /** Refresh prefetch if cached URL has less than this margin remaining. */
+        private const val PREFETCH_FRESH_THRESHOLD_MS = 60_000L
     }
 
     /**
