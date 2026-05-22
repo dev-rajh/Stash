@@ -72,6 +72,8 @@ class KennyyStreamResolverTest {
         )
         resolver.resolve(stubTrack())
         verify { monitor.recordSuccess() }
+        verify(exactly = 0) { monitor.recordFailure() }
+        verify(exactly = 0) { monitor.recordNoMatch() }
     }
 
     @Test
@@ -80,6 +82,8 @@ class KennyyStreamResolverTest {
         every { fakeKennyy.lastResolveFailedNetwork } returns true
         resolver.resolve(stubTrack())
         verify { monitor.recordFailure() }
+        verify(exactly = 0) { monitor.recordSuccess() }
+        verify(exactly = 0) { monitor.recordNoMatch() }
     }
 
     @Test
@@ -88,6 +92,8 @@ class KennyyStreamResolverTest {
         every { fakeKennyy.lastResolveFailedNetwork } returns false
         resolver.resolve(stubTrack())
         verify { monitor.recordNoMatch() }
+        verify(exactly = 0) { monitor.recordSuccess() }
+        verify(exactly = 0) { monitor.recordFailure() }
     }
 
     private fun stubTrack(): TrackEntity = TrackEntity(
