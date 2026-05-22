@@ -42,7 +42,9 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -245,9 +247,18 @@ class PlayerRepositoryImpl @Inject constructor(
     val userMessages: kotlinx.coroutines.flow.SharedFlow<String> =
         _userMessages.asSharedFlow()
 
+    private val cascadeGuard = StreamErrorCascadeGuard()
+    private val _streamingHaltedEvents = MutableSharedFlow<StreamingHaltedEvent>(
+        replay = 0,
+        extraBufferCapacity = 1,
+    )
+    override val streamingHaltedEvents: SharedFlow<StreamingHaltedEvent> =
+        _streamingHaltedEvents.asSharedFlow()
+
     // ---- Public API ----
 
     override suspend fun play() {
+        cascadeGuard.onUserTransport()
         ensureController()?.play()
     }
 
@@ -256,14 +267,17 @@ class PlayerRepositoryImpl @Inject constructor(
     }
 
     override suspend fun skipNext() {
+        cascadeGuard.onUserTransport()
         ensureController()?.seekToNextMediaItem()
     }
 
     override suspend fun skipPrevious() {
+        cascadeGuard.onUserTransport()
         ensureController()?.seekToPreviousMediaItem()
     }
 
     override suspend fun seekTo(positionMs: Long) {
+        cascadeGuard.onUserTransport()
         ensureController()?.seekTo(positionMs)
     }
 
@@ -988,6 +1002,9 @@ class PlayerRepositoryImpl @Inject constructor(
         }
 
         override fun onIsPlayingChanged(isPlaying: Boolean) {
+            if (isPlaying) {
+                cascadeGuard.onPlaybackStarted()
+            }
             controllerDeferred?.let { updateState(it) }
         }
 
@@ -1030,24 +1047,55 @@ class PlayerRepositoryImpl @Inject constructor(
          */
         override fun onPlayerError(error: PlaybackException) {
             val controller = controllerDeferred
-            val failingTitle = controller?.currentMediaItem?.mediaMetadata?.title
+            val failingTitle = controller?.currentMediaItem?.mediaMetadata?.title?.toString()
+            val isIoError = error.errorCode == PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS ||
+                error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED
+
+            if (!isIoError) {
+                // Non-IO errors (decoder, unsupported codec, etc.) are per-track and
+                // shouldn't count against the cascade window. Recover unconditionally.
+                Log.w(
+                    TAG,
+                    "onPlayerError: '$failingTitle' code=${error.errorCode} " +
+                        "(${error.errorCodeName}) — skip-next (non-IO)",
+                    error,
+                )
+                controller?.recoverOrStop()
+                return
+            }
+
+            val verdict = cascadeGuard.onError()
             Log.w(
                 TAG,
                 "onPlayerError: '$failingTitle' code=${error.errorCode} " +
-                    "(${error.errorCodeName}) — attempting skip-next recovery",
+                    "(${error.errorCodeName}) — verdict=$verdict",
                 error,
             )
-            if (controller == null) return
 
-            if (controller.hasNextMediaItem()) {
-                controller.seekToNextMediaItem()
-                controller.prepare()
-                controller.play()
-            } else {
-                // End of queue — let the player stop cleanly rather than
-                // looping on the same broken item.
-                controller.stop()
+            when (verdict) {
+                StreamErrorCascadeGuard.Verdict.Recover -> controller?.recoverOrStop()
+                StreamErrorCascadeGuard.Verdict.Halt -> {
+                    controller?.pause()
+                    _streamingHaltedEvents.tryEmit(
+                        StreamingHaltedEvent(
+                            failingTitle = failingTitle,
+                            consecutiveErrorCount = 3,
+                        ),
+                    )
+                }
             }
+        }
+    }
+
+    private fun MediaController.recoverOrStop() {
+        if (hasNextMediaItem()) {
+            seekToNextMediaItem()
+            prepare()
+            play()
+        } else {
+            // End of queue — let the player stop cleanly rather than
+            // looping on the same broken item.
+            stop()
         }
     }
 

@@ -75,6 +75,13 @@ interface PlayerRepository {
      */
     val currentPosition: Flow<Long>
 
+    /**
+     * Hot SharedFlow of cascade-halt events. Emitted at most once per
+     * outage (resets after successful playback or user transport).
+     * UI surface: in-app Snackbar in NowPlaying.
+     */
+    val streamingHaltedEvents: kotlinx.coroutines.flow.SharedFlow<StreamingHaltedEvent>
+
     /** Start or resume playback. */
     suspend fun play()
 
