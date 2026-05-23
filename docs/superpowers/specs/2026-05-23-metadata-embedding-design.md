@@ -358,10 +358,19 @@ class MetadataBackfillState @Inject constructor(
     suspend fun publishProgress(processed: Int, total: Int)
     suspend fun incrementSafSkipped()
     suspend fun markFinished()
+    /**
+     * Called by the Home banner's "Done" pulse `LaunchedEffect` (§6.1)
+     * after the 2-second display window expires. Transitions the
+     * snapshot from FINISHED back to IDLE so the banner stops
+     * rendering.
+     */
+    suspend fun markFinishedAcknowledged()
 }
 ```
 
 Keys are scalar ints/longs in a private `Preferences` DataStore named `metadata_backfill_state` (file `metadata_backfill_state.preferences_pb`). The reactive `snapshot` is built by combining the four preference keys via `data.map { ... }`.
+
+**Shared DataStore caveat.** `MetadataBackfillState` (this section) and `BackfillVersionTracker` (§5.5) both use the same `metadata_backfill_state.preferences_pb` file (with disjoint keys). The Hilt provider for `DataStore<Preferences>` must be `@Singleton`-scoped so both classes receive the **same** instance — DataStore enforces a single-instance-per-file invariant and creating two separate instances on the same file path crashes at runtime. Provide it via a small `BackfillDataStoreModule` that returns a single `Context.preferencesDataStore` delegate.
 
 #### 5.5 Trigger: `MetadataBackfillScheduler`
 
@@ -495,6 +504,7 @@ Per the project's `feedback_install_after_fix.md` memory: after each build, `./g
 - **Album-art quality vs file size.** Spotify's 640×640 JPEG is ~80 KB. M4A bloats by exactly that amount per file. Opus's `METADATA_BLOCK_PICTURE` is base64-encoded, so the actual bloat is ~108 KB. For a 1000-track library that's 80–110 MB of additional disk. Mitigation: we use the 640px tier (not 1500px), and Android's storage UI shows the audio files themselves rather than a side index, so the user perceives this as expected. If users complain, a future Settings toggle could prefer 300px or no embed.
 - **ffmpeg version skew.** youtubedl-android bundles its own ffmpeg .so. The `JunkFood02/youtubedl-android` fork is currently on ffmpeg 6.x — `-disposition:v:0 attached_pic` was added in ffmpeg 4.0, so we're safe. If the bundled binary regresses, the integration tests catch it.
 - **Backfill duration on huge libraries.** A user with 10,000 tracks waits for ~5 hours of background work. The Home banner shows progress, but a "Pause" or "Defer" option isn't in scope. We accept this — most users have <2,000 tracks based on the analytics-free intuition that this is a self-curated music app.
+- **Banner total can drift mid-backfill.** The worker reads `total` once at start. If the user downloads new tracks mid-backfill, those tracks stamp `metadata_embedded_at` at finalize time (§4.1) and never enter the backfill queue, but the banner still shows `47/50` until it finishes. This is intentional — recomputing total on every batch would jitter the banner and isn't worth the complexity. Accepted cosmetic quirk.
 
 ## Acceptance
 
