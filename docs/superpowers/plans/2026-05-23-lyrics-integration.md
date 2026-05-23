@@ -284,7 +284,7 @@ data class LyricsEntity(
 
 - [ ] **Step 5: Add `lyricsFetchedAt` to `TrackEntity`**
 
-In `core/data/src/main/kotlin/com/stash/core/data/db/entity/TrackEntity.kt`, add (alongside `metadataEmbeddedAt`):
+In `core/data/src/main/kotlin/com/stash/core/data/db/entity/TrackEntity.kt`, add **immediately after** `metadataEmbeddedAt` (for schema-diff readability — the migration JSON appends columns in declaration order):
 
 ```kotlin
 @ColumnInfo("lyrics_fetched_at")
@@ -1901,7 +1901,13 @@ class LyricsSidecarWriter @Inject constructor(
     }
 
     private fun writeSafSidecar(audioUri: String, track: TrackEntity, body: String) {
-        val tree = DocumentFile.fromTreeUri(context, android.net.Uri.parse(audioUri)) ?: return
+        // IMPORTANT: DocumentFile.fromTreeUri expects the STORAGE TREE ROOT URI,
+        // not the audio file's content URI. The tree URI lives in the user's
+        // storage preference (StoragePreference.externalTreeUri or similar).
+        // Inject the preferences accessor that FileOrganizer.writeToSafTree already
+        // uses, and read the tree URI from there — do NOT parse(audioUri).
+        val treeUri = storagePreference.externalTreeUriBlocking() ?: return  // adapt to actual API
+        val tree = DocumentFile.fromTreeUri(context, treeUri) ?: return
         val artistDir = findOrCreateDir(tree, FileOrganizerSlugs.slugify(track.albumArtist.ifBlank { track.artist }))
         val albumDir = findOrCreateDir(artistDir, FileOrganizerSlugs.slugify(track.album))
         val name = "${FileOrganizerSlugs.slugify(track.title)}.lrc"
@@ -2131,10 +2137,13 @@ class LyricsFetchWorker @AssistedInject constructor(
             )
     }
 
-    // The Track domain may expose youtubeVideoId via a dedicated column or via the
-    // existing TrackEntity.videoId field — check the schema at impl time.
+    // YouTube video ID for the InnerTube fallback path. **The field name on
+    // TrackEntity must be confirmed before this compiles** — likely `videoId`,
+    // `youtubeVideoId`, or `ytId` depending on schema history. Discover via:
+    //   grep -n "videoId\|youtubeVideoId\|ytId" core/data/src/main/kotlin/com/stash/core/data/db/entity/TrackEntity.kt
+    // If the column is a nullable String, drop the `.takeIf` guard.
     private fun extractYoutubeVideoId(track: com.stash.core.data.db.entity.TrackEntity): String? =
-        track.videoId.takeIf { it.isNotBlank() }   // adjust to actual field name
+        track.videoId.takeIf { it.isNotBlank() }   // ADJUST FIELD NAME TO MATCH SCHEMA
 
     companion object {
         const val KEY_TRACK_ID = "track_id"
@@ -3051,7 +3060,13 @@ Add fields:
 - `private val lyricsRepository: LyricsRepository` injection
 - `private val workManager: WorkManager` injection (for priority enqueue)
 - `val lyricsViewState: StateFlow<LyricsViewState>` — `combine(track, lyricsRepository.observe(track.id)) { t, row -> lyricsViewStateFor(t, row) }`
-- `val currentPositionMs: StateFlow<Long>` — already in the existing player wiring? Verify with `grep -n positionMs feature/nowplaying/src/main`
+- `val currentPositionMs: StateFlow<Long>` — discover via `grep -n "positionMs\|currentPositionMs\|playbackPosition" feature/nowplaying/src/main` and reuse if exposed. If the existing controller only exposes a one-shot getter (not a Flow), add a bridge:
+  ```kotlin
+  val currentPositionMs: StateFlow<Long> = flow {
+      while (true) { emit(playerController.currentPositionMs()); delay(250L) }
+  }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0L)
+  ```
+  250ms cadence matches the spec §8.3 polling target — fine-grained enough for line-level synced rendering, sparse enough to not burn cycles.
 - `val lyricsSheetOpen: StateFlow<Boolean>` — local state
 - `fun onShowLyrics()` — sets sheet open = true; if `lyricsFetchedAt == null`, enqueue priority worker
 - `fun onDismissLyrics()` — sets sheet open = false
