@@ -230,8 +230,8 @@ LRCLIB API (confirmed live May 2026):
 **Duration-tolerance ladder** (the single biggest accuracy lever — flagged in the v0.9.35 plan-review). LRCLIB matching is exact by default and the most common miss cause is a duration mismatch from rip-vs-master variation:
 
 1. **Exact:** call `/api/get` with `duration = durationMs / 1000` (integer seconds). If 200 → return.
-2. **±2s:** call `/api/get` with `duration - 2`, then `duration - 1`, `duration + 1`, `duration + 2`. First 200 wins.
-3. **±5s:** widen to `duration - 5 … duration + 5` (excluding values already tried). First 200 wins.
+2. **±2s, closer-to-exact first:** call `/api/get` with `duration - 1`, then `duration + 1`, then `duration - 2`, then `duration + 2`. Order is deliberate: ±1s is "integer-rounding noise" and is the most likely true match; ±2s is "different rip/master." First 200 wins.
+3. **±5s, closer-to-exact first:** widen with `-3, +3, -4, +4, -5, +5` (excluding values already tried at rung 2). First 200 wins.
 4. **Search fallback:** `/api/search?q=<artist title>`; pick top result whose duration is within ±5s AND whose Jaro-Winkler similarity over `"$artist $title"` ≥ 0.85.
 5. **Miss:** return null.
 
@@ -342,9 +342,9 @@ Writes `<basename>.lrc` next to the audio file on every successful lyrics fetch.
 **Path resolution.** Two cases:
 
 - **Internal storage** (`storagePreference.externalTreeUri == null`): `CommittedTrack.filePath` is an absolute `java.io.File` path. Sidecar is `File(filePath).resolveSibling("${File(filePath).nameWithoutExtension}.lrc")`. Write via `File.writeText(body, Charsets.UTF_8)`.
-- **SAF tree** (`externalTree != null`): `CommittedTrack.filePath` is a `content://…` URI string. Resolve the parent `DocumentFile` via `DocumentFile.fromTreeUri(...)` and walk `findOrCreateDir(artistSlug).findOrCreateDir(albumSlug).createFile("application/x-lrc", "$titleSlug.lrc")`. Write via `contentResolver.openOutputStream(...)`.
+- **SAF tree** (`externalTree != null`): `CommittedTrack.filePath` is a `content://…` URI string. Resolve the parent `DocumentFile` via `DocumentFile.fromTreeUri(...)` and walk `findOrCreateDir(artistSlug).findOrCreateDir(albumSlug).createFile("application/x-lrc", "$titleSlug.lrc")`. `DocumentFile` has no built-in `findOrCreateDir`; either reuse the equivalent helper already present in `FileOrganizer.writeToSafTree()` (preferred) or implement a local `existing ?: parent.createDirectory(name)` helper. Write the file body via `contentResolver.openOutputStream(...)`.
 
-The track's artist/album/title slugs are needed for the SAF path. **`FileOrganizer.slugify` is currently private**; the implementing change exposes it (rename to `internal fun slugify(...)` and add an `@VisibleForTesting`-style comment), or duplicates the logic into `LyricsSidecarWriter` if cross-module access is awkward. The implementing subagent picks; either is acceptable. Spec recommendation: **expose via an internal helper class** `FileOrganizerSlugs` in `:data:download`, then `:data:lyrics` depends on it — keeps slug semantics in one place.
+The track's artist/album/title slugs are needed for the SAF path. **`FileOrganizer.slugify` is currently private.** Recommended path: expose an `internal object FileOrganizerSlugs` in `:data:download` with the slug helpers, then `:data:lyrics` depends on it — keeps slug semantics in one place. (Duplicating the logic into `LyricsSidecarWriter` is a valid alternative if cross-module visibility proves awkward, but is the fallback, not the first move.)
 
 **Non-goal restated:** Stash does not read sidecars back. The write is the entire interop story.
 
@@ -448,8 +448,11 @@ Constraints:
 Location: `data/lyrics/src/main/kotlin/com/stash/data/lyrics/backfill/LyricsBackfillState.kt`
 
 ```kotlin
+/** Local enum, defined in this file (separate from MetadataBackfillState's State). */
+enum class State { IDLE, RUNNING, FINISHED }
+
 data class LyricsBackfillSnapshot(
-    val state: State,          // IDLE, RUNNING, FINISHED
+    val state: State,
     val processed: Int,
     val total: Int,
     val finishedAt: Long?,
@@ -514,11 +517,10 @@ interface LyricsFetchTrigger {
 
 `:data:download` consumes this interface; the implementation provided in `:app`'s Hilt module delegates to `LyricsFetchWorker.enqueue(trackId)` with the post-download unique-name prefix. A no-op default binding lives in `:data:download`'s test module so unit tests don't need the lyrics module.
 
-**Call sites:**
+**Call sites.** Line numbers are at spec authoring time and will drift — the implementer should locate the hooks by symbol, not line:
 
-- `DownloadManager.kt:288-290` (lossless completion) — after `trackDao.setMetadataEmbeddedAt(track.id, ...)`, add `lyricsFetchTrigger.enqueueFor(track.id)`.
-- `DownloadManager.kt:429-431` (alternate lossless completion) — same.
-- `SearchDownloadCoordinator.kt:327` (`stampEmbeddedAt(track.videoId)`) — after the stamp, call `lyricsFetchTrigger.enqueueFor(track.id)`. The trackId lookup is already done inside `stampEmbeddedAt`; refactor to return the trackId and reuse, or duplicate the lookup — implementer's choice. Recommend: have `stampEmbeddedAt` return the trackId.
+- `DownloadManager` (lossless completion) — both branches that call `trackDao.setMetadataEmbeddedAt(track.id, ...)` (line numbers as of authoring: `:288-290` and `:429-431`). After each stamp, add `lyricsFetchTrigger.enqueueFor(track.id)`.
+- `SearchDownloadCoordinator` (yt-dlp path) — the call site of `stampEmbeddedAt(track.videoId)` (line ~327 at authoring). After the stamp, call `lyricsFetchTrigger.enqueueFor(track.id)`. The trackId lookup is already done inside `stampEmbeddedAt`; recommended refactor: have `stampEmbeddedAt` return the trackId and reuse, instead of duplicating the lookup.
 
 Neither call site blocks the download; `enqueueFor` is a fire-and-forget WorkManager enqueue.
 
@@ -640,7 +642,9 @@ val lyricsBackfillBanner: LyricsBackfillBannerState = LyricsBackfillBannerState.
 
 Location: `feature/home/src/main/kotlin/com/stash/feature/home/banner/LyricsBackfillBanner.kt`
 
-Visual identical to `MetadataBackfillBanner` (GlassCard wrapper, progress indicator on `Running`, two-second "Done" pulse on `Finished`, dismiss on tap of pulse). Copy is "Fetching lyrics… (X / Y)" while running and "Lyrics fetched for X tracks" on finish. Two banners can render simultaneously during the overlap window after upgrade — that's acceptable; both are short-lived.
+Visual identical to `MetadataBackfillBanner` (GlassCard wrapper, progress indicator on `Running`, two-second "Done" pulse on `Finished`, dismiss on tap of pulse). Copy is "Fetching lyrics… (X / Y)" while running and "Lyrics fetched for X tracks" on finish.
+
+**Concurrent-backfill decision (v0.9.34 → v0.9.36 upgraders).** A user skipping v0.9.35 will see both `MetadataBackfillWorker` and `LyricsBackfillWorker` enqueued on first launch. The two backfills run **concurrently**, not serially. Both are `NetworkType.CONNECTED` + `RUN_AS_NON_EXPEDITED_WORK_REQUEST`; WorkManager schedules them cooperatively, and the LRCLIB / album-art fetch shapes are both small JSON / small JPEG — network contention is negligible compared to user-visible latency from serialising. Both Home banners render simultaneously; both are short-lived. The "is everything still running?" UX cost of two banners beats the "lyrics didn't appear for 20 minutes" UX cost of serialising. No cross-worker dependency wired.
 
 ### 10. Error handling
 
