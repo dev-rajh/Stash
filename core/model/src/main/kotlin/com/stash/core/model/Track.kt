@@ -80,4 +80,21 @@ data class Track(
      * format chip when the streaming fallback kicks in.
      */
     val streamOrigin: String? = null,
+    /**
+     * Album-level artist for grouping multi-artist releases in Plex /
+     * Foobar / Symfonium. Distinct from [artist] (the track-level
+     * credit) — a feature credit may say `artist = "Drake, 21 Savage"`
+     * while `albumArtist = "Drake"`. Empty string when unknown.
+     * Mirror of `TrackEntity.album_artist`, added v0.9.26 but only
+     * surfaced through the domain layer in v0.9.35.
+     */
+    val albumArtist: String = "",
+    /**
+     * Epoch-millis of the most recent successful tag + art embedding
+     * pass. NULL = never tagged (legacy v0.9.34 rows, or rows whose
+     * embed step failed); 0L = backfill tried and failed
+     * unrecoverably (file missing, ffmpeg error). Non-null non-zero
+     * = the file on disk carries the v0.9.35 tag set.
+     */
+    val metadataEmbeddedAt: Long? = null,
 )
