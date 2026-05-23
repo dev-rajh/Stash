@@ -178,14 +178,26 @@ add("-metadata"); add("album_artist=${sanitize(effectiveAlbumArtist)}")  // lega
 track.isrc?.takeIf { it.isNotBlank() }?.let {
     add("-metadata"); add("ISRC=${sanitize(it)}")
 }
-add("-metadata"); add("ENCODER=Stash ${BuildConfig.VERSION_NAME}")
+add("-metadata"); add("ENCODER=Stash ${appVersionProvider.versionName}")
 ```
 
 **Vorbis-comment casing.** Vorbis-comment readers (FLAC, Opus, Ogg) are conventionally case-insensitive but **some real-world readers — Symfonium, several car head units — only match the canonical uppercase form** (`ALBUMARTIST`, `ISRC`, `ENCODER`). ffmpeg passes the key string through verbatim for Vorbis comments. We write each key twice — uppercase canonical form and a lowercase legacy alias (`album_artist`) — so both ID3-style readers (which match the lowercase form by convention) and strict Vorbis readers see the value. This duplication adds <100 bytes per file and removes a class of "tag invisible in one player but visible in another" support reports.
 
 For M4A and MP3 containers, ffmpeg normalises both forms to the single canonical atom/frame (`aART` / `TPE2`); the duplicate write is a no-op.
 
-`ENCODER=Stash <version>` makes it easy to identify Stash-tagged files in a mixed library. The version string is read from `BuildConfig.VERSION_NAME` — the `:data:download` module already exposes BuildConfig via its `buildFeatures { buildConfig = true }` setting in `build.gradle.kts`.
+**Version source.** `:data:download` does not currently enable `buildFeatures { buildConfig = true }` in its `build.gradle.kts`, so `BuildConfig.VERSION_NAME` is not directly accessible inside the module. There is already a precedent for the "version indirection" pattern at `core/data/.../YouTubeHistoryScrobbler.kt:145` — a `versionCodeProvider: () -> Int` lambda is constructor-injected and supplied from a higher-level module that does have BuildConfig.
+
+Follow the same shape, extended to cover both name and code. Add a small interface in `:core:common`:
+
+```kotlin
+// core/common/src/main/kotlin/com/stash/core/common/AppVersionProvider.kt
+interface AppVersionProvider {
+    val versionName: String   // e.g. "0.9.35"
+    val versionCode: Int      // e.g. 56
+}
+```
+
+Provide a Hilt binding in `:app` (which already imports BuildConfig) that returns a concrete instance reading both fields from `BuildConfig`. `MetadataEmbedder` constructor-injects `AppVersionProvider` for the `ENCODER=Stash <version>` tag, and the same provider powers the version-gated backfill scheduler in §5.5, replacing the earlier direct `BuildConfig.VERSION_CODE` reference. This keeps the data layer testable on JVM without depending on the Android-generated BuildConfig class.
 
 #### 3.2 Always-on callers
 
@@ -320,7 +332,7 @@ class MetadataBackfillWorker @AssistedInject constructor(
 
 Every batch query is `LIMIT 50 OFFSET 0`. As each row is processed, the worker stamps `metadata_embedded_at` either to `System.currentTimeMillis()` (success) or to `0L` (irrecoverable failure: file missing, SAF row, ffmpeg threw). Either value removes the row from the `WHERE metadata_embedded_at IS NULL` filter, so the next batch query naturally returns the next 50 unprocessed rows. The loop terminates when the batch comes back empty.
 
-This avoids the offset bookkeeping a standard paginator would need, and guarantees no row is ever processed twice. Strip out the placeholder `offset += batch.size` line in the §5.1 sketch — it was leftover from a draft and is unused.
+This avoids the offset bookkeeping a standard paginator would need, and guarantees no row is ever processed twice.
 
 #### 5.4 `MetadataBackfillState`
 
@@ -379,7 +391,7 @@ class MetadataBackfillScheduler @Inject constructor(
 }
 ```
 
-`BackfillVersionTracker` stores the highest version that has enqueued backfill in a Preferences-DataStore key (`backfill_enqueued_for_version`, int). The DataStore file is `metadata_backfill_state.preferences_pb` (same file as `MetadataBackfillState`, separate key). The current binary's version is read from `BuildConfig.VERSION_CODE` exposed by the `:data:download` module. Re-runs only happen when the stored value < current version — a clean upgrade path for future tagging fixes.
+`BackfillVersionTracker` stores the highest version that has enqueued backfill in a Preferences-DataStore key (`backfill_enqueued_for_version`, int). The DataStore file is `metadata_backfill_state.preferences_pb` (same file as `MetadataBackfillState`, separate key). The current binary's version is read via `AppVersionProvider.versionCode` (§3.1) — `:data:download` does not expose BuildConfig directly. Re-runs only happen when the stored value < current version — a clean upgrade path for future tagging fixes.
 
 ### 6. Home banner
 
@@ -387,17 +399,29 @@ class MetadataBackfillScheduler @Inject constructor(
 
 Location: `feature/home/src/main/kotlin/com/stash/feature/home/HomeViewModel.kt`
 
-Add `MetadataBackfillState.snapshot` to the existing state combine. Add a new `HomeBannerState` variant alongside the existing ones (`NoSpotifyAuth`, `WaitingForLossless`, `LosslessSweepRunning`, etc. — see `HomeBannerState.kt` in the home feature for the current sealed hierarchy):
+The Home screen does **not** have a unified `HomeBannerState` sealed type or priority reducer; each banner is an independent field on `HomeUiState` driven by its own flow (existing fields: `lastFmPrompt: LastFmPromptState?`, `losslessPrompt: LosslessPromptState?`, `waitingForLosslessBanner: WaitingForLosslessBannerState`). The composables in `HomeScreen.kt` render them in source-order at the call site.
+
+This spec follows the same pattern. Add a new sealed type and a new `HomeUiState` field:
+
+Location: `feature/home/src/main/kotlin/com/stash/feature/home/banner/MetadataBackfillBannerState.kt`
 
 ```kotlin
-data class RetaggingLibrary(
-    val processed: Int,
-    val total: Int,
-    val safSkipped: Int,
-) : HomeBannerState
+/**
+ * Discrete states for the Home "re-tagging library" banner. [Hidden]
+ * is the dominant state — only rendered while a v0.9.35+ backfill
+ * worker is actively processing rows, and for a short "Done" pulse
+ * after completion.
+ */
+sealed interface MetadataBackfillBannerState {
+    data object Hidden : MetadataBackfillBannerState
+    data class Running(val processed: Int, val total: Int) : MetadataBackfillBannerState
+    data class Finished(val total: Int, val safSkipped: Int) : MetadataBackfillBannerState
+}
 ```
 
-Priority ordering in the `reduce` function: shown only when no `NoSpotifyAuth` / `WaitingForLossless` / `LosslessSweepRunning` banner is active. Concretely: append `RetaggingLibrary` to the bottom of the existing `when`/`firstNotNullOf` priority chain. Dismisses itself when `processed == total` (worker calls `markFinished`, state transitions to FINISHED, banner hides after a 2-second "Done" pulse rendered by a `LaunchedEffect` in the home composable).
+Add a `metadataBackfillBanner: MetadataBackfillBannerState = Hidden` field to `HomeUiState`. Drive it from `MetadataBackfillState.snapshot` in `HomeViewModel` via a new dedicated flow combined into the existing state assembly. Render it under the `waitingForLosslessBanner` slot in `HomeScreen.kt`. The "Done" pulse is a 2-second `LaunchedEffect` keyed off the `Finished` state that calls `MetadataBackfillState.markFinishedAcknowledged()` to transition back to Hidden.
+
+Since each banner is rendered independently, there is no priority decision to make at the state-merge layer. The Home composable renders them in declared order — the screen layout already separates the lossless waiting banner from the lastFm/lossless prompts visually.
 
 #### 6.2 Copy
 
@@ -422,7 +446,7 @@ When the worker encounters a row with `filePath.startsWith("content://")` it mar
 | ffmpeg `-c copy` fails (corrupt input, unknown container) | `embedMetadata` catches, leaves untagged file in place, returns it | No on yt-dlp path; backfill marks `metadata_embedded_at = 0L` |
 | Track file deleted between query and processing | Skip, mark `0L` | No |
 | WorkManager kills the worker mid-batch | Next launch re-enqueues; in-progress row's stamp was never written, so it's re-processed | No |
-| Migration v22→v23 fails | Room throws on first DB access; existing exception path | Yes — generic app failure (not new) |
+| Migration v26→v27 fails | Room throws on first DB access; existing exception path | Yes — generic app failure (not new) |
 
 ### 8. Testing
 
@@ -461,7 +485,7 @@ Per the project's `feedback_install_after_fix.md` memory: after each build, `./g
 ### 9. Rollout
 
 - Version bump `0.9.34 → 0.9.35`, versionCode `+1`.
-- Room schema v22 → v23, single `ALTER TABLE` migration.
+- Room schema v26 → v27, single `ALTER TABLE` migration.
 - Backfill auto-enqueues on first launch after upgrade. Idempotent: re-installing 0.9.35 over 0.9.35 doesn't re-enqueue (version tracker).
 - No new permissions. No new third-party libraries.
 - No flag — this is a behaviour fix, not an opt-in feature.
