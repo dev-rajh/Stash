@@ -1633,7 +1633,7 @@ class MetadataBackfillStateTest {
 
     @After fun tearDown() {
         // Clear the test datastore between runs
-        context.dataStoreFile("metadata_backfill_state.preferences_pb").delete()
+        context.filesDir.resolve("datastore/metadata_backfill_state.preferences_pb").delete()
     }
 
     @Test fun `defaults to IDLE with zero counts`() = runTest {
@@ -1843,7 +1843,7 @@ class BackfillVersionTrackerTest {
     private val subject = BackfillVersionTracker(context, versionProvider)
 
     @After fun tearDown() {
-        context.dataStoreFile("metadata_backfill_state.preferences_pb").delete()
+        context.filesDir.resolve("datastore/metadata_backfill_state.preferences_pb").delete()
     }
 
     @Test fun `runs for current version when never run`() = runTest {
