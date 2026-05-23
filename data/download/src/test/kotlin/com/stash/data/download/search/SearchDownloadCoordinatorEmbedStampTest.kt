@@ -11,6 +11,7 @@ import com.stash.core.data.db.dao.TrackDao
 import com.stash.core.data.db.entity.TrackEntity
 import com.stash.core.data.repository.MusicRepository
 import com.stash.core.model.MusicSource
+import com.stash.core.model.Track
 import com.stash.core.model.TrackItem
 import com.stash.data.download.DownloadExecutor
 import com.stash.data.download.DownloadResult
@@ -25,6 +26,7 @@ import io.mockk.mockk
 import io.mockk.slot
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -146,6 +148,58 @@ class SearchDownloadCoordinatorEmbedStampTest {
         assertTrue(
             "stamp ${tsSlot.captured} must be in [$before, $after]",
             tsSlot.captured in before..after,
+        )
+    }
+
+    /**
+     * Pins the I-2 fix: [SearchDownloadCoordinator.toDomainStub] must
+     * propagate [TrackItem.albumArtist] into the stub [Track] handed to
+     * [TrackFinalizer], so [MetadataEmbedder] writes the actual album-
+     * artist credit (e.g. "Drake") instead of falling back to the per-
+     * track [artist] credit (e.g. "Drake, 21 Savage"). Without this
+     * the dual-write `ALBUMARTIST` + `album_artist` Vorbis mechanism
+     * is silently defeated on the search-tab download path — the path
+     * most likely to involve multi-artist albums.
+     */
+    @Test
+    fun `yt-dlp branch propagates albumArtist into TrackFinalizer stub`() = runTest {
+        arrangeYtDlpSuccess()
+        val trackSlot = slot<Track>()
+        coEvery {
+            trackFinalizer.finalizeFile(any(), capture(trackSlot), any(), any())
+        } answers {
+            val committed = CommittedTrack(
+                filePath = "/library/Drake/Sample.opus",
+                sizeBytes = 4096L,
+            )
+            val meta = AudioMetadata(
+                durationMs = 200_000L,
+                bitrateKbps = 128,
+                format = "opus",
+                sampleRateHz = 48_000,
+                bitsPerSample = 16,
+            )
+            TrackFinalizer.FinalizeResult.Success(committed, meta)
+        }
+
+        val item = TrackItem(
+            videoId = "vid42",
+            title = "Sample",
+            artist = "Drake, 21 Savage",
+            durationSeconds = 200.0,
+            thumbnailUrl = null,
+            album = "Her Loss",
+            albumArtist = "Drake",
+        )
+
+        newSubject().download(item).toList()
+
+        coVerify { trackFinalizer.finalizeFile(any(), any(), any(), any()) }
+        assertEquals(
+            "albumArtist must flow into the stub Track so MetadataEmbedder " +
+                "writes the actual album-artist credit instead of the per-track credit",
+            "Drake",
+            trackSlot.captured.albumArtist,
         )
     }
 }

@@ -505,6 +505,7 @@ class SearchDownloadCoordinator @Inject constructor(
         title = title,
         artist = artist,
         album = album.orEmpty(),
+        albumArtist = albumArtist.orEmpty(),
         durationMs = (durationSeconds * 1_000).toLong(),
         albumArtUrl = thumbnailUrl,
         youtubeId = videoId,

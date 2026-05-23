@@ -144,8 +144,8 @@ class MetadataEmbedder @Inject constructor(
             // Opus / Ogg containers don't accept attached_pic in current ffmpeg
             // (mux fails with exit 234). Skip the picture stream for those
             // codecs — TITLE/ARTIST/ALBUMARTIST/ALBUM/ISRC/ENCODER tags still
-            // get written. Follow-up issue tracks METADATA_BLOCK_PICTURE base64
-            // support for proper Opus cover-art parity.
+            // get written. Tracked as rawnaldclark/Stash#95 for METADATA_BLOCK_PICTURE
+            // base64 support to reach Opus cover-art parity.
             val outputExt = outputFile.extension.lowercase()
             val supportsAttachedPic = outputExt !in OPUS_OGG_EXTENSIONS
 

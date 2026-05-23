@@ -368,20 +368,27 @@ class DownloadManager @Inject constructor(
 
         emitProgress(track.id, 0.85f, DownloadStatus.PROCESSING)
 
+        // Re-fetch the track so any canonicalizer-driven refresh of
+        // album_artist (or other tag-bearing fields) that landed between
+        // sync and download is picked up before TrackFinalizer embeds
+        // tags. Mirrors the pattern in executeDownload (line ~199).
+        // Fallback to the in-memory copy if the row was deleted mid-flight.
+        val effectiveTrack = trackDao.getById(track.id)?.toDomain() ?: track
+
         // Delegate embed + commit + probe to the shared TrackFinalizer.
         // TrackFinalizer is stateless w.r.t. DB — all DB writes remain here
         // so the full domain Track (spotifyUri, isrc, album, explicit, etc.)
         // is preserved without being funnelled through a thinner data class.
         val finalized = trackFinalizer.finalizeFile(
             sourceFile = fetched,
-            track = track,
+            track = effectiveTrack,
             format = match.format,
         )
         when (finalized) {
             is TrackFinalizer.FinalizeResult.Success -> {
                 Log.i(
                     TAG,
-                    "Lossless downloaded (${match.sourceId}): ${track.artist} - ${track.title}" +
+                    "Lossless downloaded (${match.sourceId}): ${effectiveTrack.artist} - ${effectiveTrack.title}" +
                         " → ${finalized.committed.filePath}",
                 )
 
@@ -397,14 +404,14 @@ class DownloadManager @Inject constructor(
                 // disk and playable; only the visual is degraded.
                 match.coverArtUrl?.let { url ->
                     runCatching {
-                        val existingArt = trackDao.getById(track.id)?.albumArtUrl
+                        val existingArt = trackDao.getById(effectiveTrack.id)?.albumArtUrl
                         val needsUpgrade = existingArt.isNullOrBlank() ||
                             com.stash.core.common.ArtUrlUpgrader.isYouTubeVideoThumbnail(existingArt)
                         if (needsUpgrade) {
-                            trackDao.updateAlbumArtUrl(track.id, url)
+                            trackDao.updateAlbumArtUrl(effectiveTrack.id, url)
                         }
                     }.onFailure { e ->
-                        Log.w(TAG, "lossless: album-art update failed for ${track.id}: ${e.message}")
+                        Log.w(TAG, "lossless: album-art update failed for ${effectiveTrack.id}: ${e.message}")
                     }
                 }
 
