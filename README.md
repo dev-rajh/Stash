@@ -1,14 +1,13 @@
 # Stash
 
-> **Your Spotify + YouTube Music library, offline in FLAC for free.**
+> **Your Spotify + YouTube Music library, in FLAC for free.**
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-purple.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Android%208.0%2B-purple)](#requirements)
 [![Release](https://img.shields.io/github/v/release/rawnaldclark/Stash?color=purple&include_prereleases)](https://github.com/rawnaldclark/Stash/releases)
 
-Stash is an offline-first Android music player that syncs your liked songs, playlists, daily mixes, and discover mixes from both **Spotify** and **YouTube Music** into a single unified local library. Tracks are downloaded as high-quality FLAC audio.
-
-**Stash is not an online streaming service.** It's a personal-library tool for people who already have Spotify or YouTube Music accounts and want their library available offline on their terms. Studio quality tracks, they're yours to keep. 
+Stash is an offline/online Android music player that syncs your liked songs, playlists, daily mixes, and discover mixes from both **Spotify** and **YouTube Music** into a single unified local library. Tracks are downloaded or streamed as high-quality FLAC audio.
+ 
 
 ---
 
