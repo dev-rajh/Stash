@@ -20,6 +20,16 @@ android {
             isIncludeAndroidResources = true
         }
     }
+
+    packaging {
+        jniLibs {
+            // Required by the instrumented MetadataEmbeddingIntegrationTest:
+            // FFmpeg.init unpacks libffmpeg.zip.so from nativeLibraryDir, which
+            // only exists on-disk when extractNativeLibs="true". Mirrors
+            // app/build.gradle.kts so the test APK behaves like the real app.
+            useLegacyPackaging = true
+        }
+    }
 }
 
 dependencies {
@@ -73,4 +83,12 @@ dependencies {
     // EqStoreTest setup in :core:media.
     testImplementation(libs.robolectric)
     testImplementation(libs.androidx.test.core)
+
+    // Instrumented tests — MetadataEmbeddingIntegrationTest runs against the
+    // ffmpeg .so bundled by youtubedl-android on a real device, since that
+    // shell-out is the only place where Opus attached_pic + Vorbis-comment
+    // casing claims can be verified end-to-end.
+    androidTestImplementation(libs.androidx.test.core)
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
 }

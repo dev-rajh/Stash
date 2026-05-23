@@ -102,6 +102,10 @@ class MetadataEmbedder @Inject constructor(
     companion object {
         private const val TAG = "MetadataEmbedder"
 
+        // Containers that don't support ffmpeg's `-disposition:v:0 attached_pic`
+        // mapping (mux fails with exit 234). Tag writing still works for these.
+        private val OPUS_OGG_EXTENSIONS = setOf("opus", "ogg")
+
         private fun sanitize(value: String): String =
             value.replace(Regex("[\\x00-\\x1f]"), "")
 
@@ -121,7 +125,15 @@ class MetadataEmbedder @Inject constructor(
         ): List<String> = buildList {
             add("-i"); add(audioFile.absolutePath)
 
-            if (albumArtFile != null && albumArtFile.exists()) {
+            // Opus / Ogg containers don't accept attached_pic in current ffmpeg
+            // (mux fails with exit 234). Skip the picture stream for those
+            // codecs — TITLE/ARTIST/ALBUMARTIST/ALBUM/ISRC/ENCODER tags still
+            // get written. Follow-up issue tracks METADATA_BLOCK_PICTURE base64
+            // support for proper Opus cover-art parity.
+            val outputExt = outputFile.extension.lowercase()
+            val supportsAttachedPic = outputExt !in OPUS_OGG_EXTENSIONS
+
+            if (supportsAttachedPic && albumArtFile != null && albumArtFile.exists()) {
                 add("-i"); add(albumArtFile.absolutePath)
                 add("-map"); add("0:a")
                 add("-map"); add("1:0")

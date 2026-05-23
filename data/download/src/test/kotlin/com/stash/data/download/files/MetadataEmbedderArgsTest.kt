@@ -77,6 +77,24 @@ class MetadataEmbedderArgsTest {
     }
 
     @Test fun `attaches art when albumArtFile is non-null and exists`() {
+        // Uses .m4a here — the Opus/Ogg gate (see MetadataEmbedder
+        // OPUS_OGG_EXTENSIONS) intentionally skips attached_pic for
+        // those codecs. M4A/FLAC/MP3 keep full art treatment.
+        val art = File.createTempFile("art", ".jpg").apply { writeBytes(byteArrayOf(0xFF.toByte(), 0xD8.toByte())) }
+        val args = MetadataEmbedder.buildFfmpegArgs(
+            audioFile = File("/tmp/in.m4a"),
+            outputFile = File("/tmp/out.m4a"),
+            track = Track(id = 1, title = "T", artist = "A"),
+            albumArtFile = art,
+            appVersion = versionProvider,
+        )
+        assertTrue(args.contains("-disposition:v:0"))
+        assertTrue(args.contains("attached_pic"))
+        assertTrue(args.contains(art.absolutePath))
+        art.delete()
+    }
+
+    @Test fun `skips attached_pic for opus output`() {
         val art = File.createTempFile("art", ".jpg").apply { writeBytes(byteArrayOf(0xFF.toByte(), 0xD8.toByte())) }
         val args = MetadataEmbedder.buildFfmpegArgs(
             audioFile = File("/tmp/in.opus"),
@@ -85,9 +103,23 @@ class MetadataEmbedderArgsTest {
             albumArtFile = art,
             appVersion = versionProvider,
         )
-        assertTrue(args.contains("-disposition:v:0"))
-        assertTrue(args.contains("attached_pic"))
-        assertTrue(args.contains(art.absolutePath))
+        assertFalse(args.contains("attached_pic"))
+        assertFalse(args.contains(art.absolutePath))
+        // Tags should still be written
+        assertTrue("title=T" in args.zipMetadataValues())
+        art.delete()
+    }
+
+    @Test fun `skips attached_pic for ogg output`() {
+        val art = File.createTempFile("art", ".jpg").apply { writeBytes(byteArrayOf(0xFF.toByte(), 0xD8.toByte())) }
+        val args = MetadataEmbedder.buildFfmpegArgs(
+            audioFile = File("/tmp/in.ogg"),
+            outputFile = File("/tmp/out.ogg"),
+            track = Track(id = 1, title = "T", artist = "A"),
+            albumArtFile = art,
+            appVersion = versionProvider,
+        )
+        assertFalse(args.contains("attached_pic"))
         art.delete()
     }
 
