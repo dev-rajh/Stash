@@ -2,8 +2,6 @@ package com.stash.data.lyrics.di
 
 import com.stash.core.common.Clock
 import com.stash.core.common.SystemClock
-import com.stash.data.lyrics.sidecar.LyricsSidecarWriter
-import com.stash.data.lyrics.sidecar.NoOpLyricsSidecarWriter
 import com.stash.data.lyrics.source.InnerTubeLyricsGateway
 import com.stash.data.lyrics.source.InnerTubeLyricsGatewayImpl
 import com.stash.data.lyrics.source.LrclibLyricsSource
@@ -29,8 +27,13 @@ import javax.inject.Singleton
  * 3. Binds [Clock] -> [SystemClock] for the repository's epoch-millis stamps.
  *    Lives here because `:core:common` is currently Hilt-free; if other
  *    modules later need [Clock], lift this binding to a shared module.
- * 4. Binds a no-op default [LyricsSidecarWriter]. Task 7 replaces it
- *    with the real internal-storage + SAF impl behind the same interface.
+ *
+ * v0.9.36 / Task 7: [com.stash.data.lyrics.sidecar.LyricsSidecarWriter] is
+ * a `@Singleton`-annotated concrete class with an `@Inject` constructor,
+ * so Hilt provides it directly without an explicit @Binds. The T6
+ * placeholder `NoOpLyricsSidecarWriter` was deleted alongside the
+ * interface — the writer now exists in its real form and there is
+ * nothing to swap.
  */
 @Module
 @InstallIn(SingletonComponent::class)
@@ -41,12 +44,6 @@ abstract class LyricsModule {
     abstract fun bindInnerTubeLyricsGateway(
         impl: InnerTubeLyricsGatewayImpl,
     ): InnerTubeLyricsGateway
-
-    @Binds
-    @Singleton
-    abstract fun bindLyricsSidecarWriter(
-        impl: NoOpLyricsSidecarWriter,
-    ): LyricsSidecarWriter
 
     companion object {
 

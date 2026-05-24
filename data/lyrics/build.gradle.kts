@@ -11,6 +11,10 @@ android {
     testOptions {
         unitTests {
             isReturnDefaultValues = true
+            // Required for the Robolectric-backed LyricsSidecarWriterTest
+            // so ApplicationProvider.getApplicationContext() resolves the
+            // Android framework + a usable ContentResolver.
+            isIncludeAndroidResources = true
         }
     }
 }
@@ -23,6 +27,10 @@ dependencies {
     // Task 5: YtMusicLyricsSource wraps the InnerTube client for plain-text
     // lyrics fallback (when LRCLIB misses).
     implementation(project(":data:ytmusic"))
+    // Task 7: LyricsSidecarWriter reuses FileOrganizerSlugs.slugify to keep
+    // the SAF directory layout (<artist>/<album>/<title>.lrc) identical
+    // to the download pipeline — no slug-semantics drift between the two.
+    implementation(project(":data:download"))
 
     implementation(libs.hilt.android)
     ksp(libs.hilt.android.compiler)
