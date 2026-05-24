@@ -13,12 +13,15 @@ android {
     }
 }
 dependencies {
-    implementation(project(":core:auth"))
+    // :core:auth was used by HomeViewModel for TokenManager / AuthState
+    // to feed the SyncStatusCard's "Connect Spotify / YouTube" prompt.
+    // Both moved to :feature:sync along with the card.
     implementation(project(":core:data"))
     implementation(project(":core:media"))
-    // For FileOrganizer.getTotalStorageBytes / getLosslessStorageBytes —
-    // disk-truth Storage stats on the Home sync card (bypassing the
-    // unreliable DB `file_size_bytes` SUM for legacy libraries).
+    // Still required after the SyncStatusCard relocation: the lossless
+    // retry/backfill banners on Home read MetadataBackfillState,
+    // LosslessRetryWorker, KennyySource, QobuzSource, and the
+    // AggregatorRateLimiter from this module.
     implementation(project(":data:download"))
     // v0.9.36: LyricsBackfillState snapshot for the LyricsBackfillBanner
     // on Home — mirrors the :data:download dependency for the v0.9.35

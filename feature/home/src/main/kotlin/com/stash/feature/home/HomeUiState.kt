@@ -1,8 +1,6 @@
 package com.stash.feature.home
 
 import com.stash.core.model.Playlist
-import com.stash.core.model.SyncDisplayStatus
-import com.stash.core.model.SyncState
 import com.stash.core.model.Track
 import com.stash.feature.home.banner.LyricsBackfillBannerState
 import com.stash.feature.home.banner.MetadataBackfillBannerState
@@ -15,10 +13,13 @@ import com.stash.feature.home.banner.WaitingForLosslessBannerState
  * Liked songs and daily mixes are split by source (Spotify / YouTube) so
  * the UI can render them in source-grouped sections with smart collapse
  * when only one source is connected.
+ *
+ * Note: sync-status, per-source connection booleans, and `hasEverSynced`
+ * used to live here too — they powered the SyncStatusCard at the top of
+ * the Home screen. The card was relocated to the Sync tab; its data
+ * plumbing moved with it to `:feature:sync`'s SyncViewModel/SyncUiState.
  */
 data class HomeUiState(
-    val syncStatus: SyncStatusInfo = SyncStatusInfo(),
-
     /**
      * Recipe-generated Stash Mixes. Rotate daily via StashMixRefreshWorker.
      * Rendered in a dedicated Home section above Daily Mixes so users
@@ -47,9 +48,6 @@ data class HomeUiState(
     /** Combined YouTube liked-songs track count (sum of playlist metadata). */
     val youtubeLikedCount: Int = 0,
 
-    val totalTracks: Int = 0,
-    val totalStorageBytes: Long = 0,
-
     /** Custom (non-mix, non-liked) playlists shown in the grid. */
     val playlists: List<Playlist> = emptyList(),
 
@@ -57,8 +55,6 @@ data class HomeUiState(
     val playlistSortOrder: PlaylistSortOrder = PlaylistSortOrder.RECENT,
 
     val isLoading: Boolean = true,
-    val spotifyConnected: Boolean = false,
-    val youTubeConnected: Boolean = false,
     /**
      * Non-null when Last.fm creds are wired but the user hasn't
      * connected yet AND there are local plays queued waiting to be
@@ -74,7 +70,6 @@ data class HomeUiState(
      * fields like pendingCount); the banner copy is static.
      */
     val losslessPrompt: LosslessPromptState? = null,
-    val hasEverSynced: Boolean = false,
 
     /**
      * v0.9.13: live tip-jar state. Drives the Home pill (compact
@@ -164,23 +159,3 @@ data object LosslessPromptState
  * to a shared module rather than crossing the feature:library boundary.
  */
 enum class PlaylistSortOrder { RECENT, ALPHABETICAL, MOST_PLAYED }
-
-/**
- * Summarised sync status information displayed in the sync status card.
- */
-data class SyncStatusInfo(
-    val lastSyncTime: Long? = null,
-    val nextSyncTime: Long? = null,
-    val totalTracks: Int = 0,
-    val spotifyTracks: Int = 0,
-    val youTubeTracks: Int = 0,
-    val totalPlaylists: Int = 0,
-    val storageUsedBytes: Long = 0,
-    /** Count of downloaded FLAC tracks. Subset of [totalTracks]. */
-    val flacTracks: Int = 0,
-    /** Sum of file sizes for downloaded FLAC tracks. Subset of [storageUsedBytes]. */
-    val flacStorageBytes: Long = 0,
-    val state: SyncState = SyncState.IDLE,
-    /** Richer display-oriented summary of the latest sync outcome. */
-    val displayStatus: SyncDisplayStatus = SyncDisplayStatus.Idle,
-)

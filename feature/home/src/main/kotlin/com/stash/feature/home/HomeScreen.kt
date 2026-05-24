@@ -1,6 +1,5 @@
 package com.stash.feature.home
 
-import android.text.format.DateUtils
 import androidx.compose.animation.core.EaseInOut
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
@@ -102,8 +101,6 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.stash.core.model.MusicSource
 import com.stash.core.model.Playlist
 import com.stash.core.model.PlaylistType
-import com.stash.core.model.SyncDisplayStatus
-import com.stash.core.model.SyncState
 import com.stash.core.model.Track
 import com.stash.core.ui.components.CreatePlaylistDialog
 import com.stash.core.ui.components.GlassCard
@@ -250,17 +247,6 @@ fun HomeScreen(
                     .fillMaxWidth()
                     .padding(horizontal = 20.dp)
                     .padding(bottom = 12.dp),
-            )
-        }
-
-        // ── Sync status card ─────────────────────────────────────────
-        item {
-            SyncStatusCard(
-                syncStatus = uiState.syncStatus,
-                spotifyConnected = uiState.spotifyConnected,
-                youTubeConnected = uiState.youTubeConnected,
-                hasEverSynced = uiState.hasEverSynced,
-                modifier = Modifier.padding(horizontal = 16.dp),
             )
         }
 
@@ -775,196 +761,6 @@ fun HomeScreen(
             },
         )
     }
-}
-
-// ── Sync status card ─────────────────────────────────────────────────────
-
-@Composable
-private fun SyncStatusCard(
-    syncStatus: SyncStatusInfo,
-    spotifyConnected: Boolean,
-    youTubeConnected: Boolean,
-    hasEverSynced: Boolean,
-    modifier: Modifier = Modifier,
-) {
-    val extendedColors = StashTheme.extendedColors
-    val anyServiceConnected = spotifyConnected || youTubeConnected
-
-    GlassCard(modifier = modifier) {
-        Column(
-            modifier = Modifier.fillMaxWidth(),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            // -- Connection + sync status header --
-            // Uses SyncDisplayStatus so "Completed with some failures" and
-            // "Interrupted mid-run" don't both read as a generic failure.
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                PulseDot(color = syncStatusDotColor(syncStatus, anyServiceConnected, hasEverSynced))
-                Text(
-                    text = syncStatusLabel(syncStatus, anyServiceConnected, hasEverSynced),
-                    style = MaterialTheme.typography.titleSmall,
-                    color = MaterialTheme.colorScheme.onSurface,
-                )
-            }
-
-            // Connected-services row removed 2026-04-21: the stats row
-            // below already labels Spotify/YouTube with their counts, so
-            // the dot+label row was pure duplication.
-
-            // -- Prompt or stats depending on sync state --
-            if (!anyServiceConnected) {
-                Text(
-                    text = "Connect Spotify or YouTube Music in Settings to start syncing your library.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            } else if (!hasEverSynced) {
-                Text(
-                    text = "Tap Sync Now to download your playlists and tracks.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            } else {
-                // Decoupled gating: show each FLAC sub-line whenever its
-                // own value is > 0. The previous AND-coupling
-                // (`flacTracks > 0 && flacStorageBytes > 0`) hid the
-                // sub-text for any user whose DB had FLAC rows but
-                // file_size_bytes still at 0 — turning the "defensive"
-                // check into a permanent display blocker. Per-stat
-                // gating is the design that v0.9.0 originally shipped
-                // with; the coupling was a regression introduced in
-                // c3c6529 and is now reverted.
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                ) {
-                    StatItem(
-                        label = "Tracks",
-                        value = syncStatus.totalTracks.toString(),
-                        subValue = if (syncStatus.flacTracks > 0) "${syncStatus.flacTracks} FLAC" else null,
-                    )
-                    StatItem(
-                        label = "Spotify",
-                        value = syncStatus.spotifyTracks.toString(),
-                    )
-                    StatItem(
-                        label = "YouTube",
-                        value = syncStatus.youTubeTracks.toString(),
-                    )
-                    StatItem(
-                        label = "Storage",
-                        value = formatBytes(syncStatus.storageUsedBytes),
-                        subValue = if (syncStatus.flacStorageBytes > 0) "${formatBytes(syncStatus.flacStorageBytes)} FLAC" else null,
-                    )
-                }
-                if (syncStatus.lastSyncTime != null) {
-                    Text(
-                        text = "Last sync ${formatRelativeTime(syncStatus.lastSyncTime)}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-        }
-    }
-}
-
-/**
- * Label shown next to the pulse dot in [SyncStatusCard]. Interprets
- * [SyncStatusInfo.displayStatus] so partial / interrupted runs aren't
- * misreported as generic failures.
- */
-@Composable
-private fun syncStatusLabel(
-    syncStatus: SyncStatusInfo,
-    anyServiceConnected: Boolean,
-    hasEverSynced: Boolean,
-): String = when {
-    !anyServiceConnected -> "No services connected"
-    !hasEverSynced -> "Ready to sync"
-    else -> when (val s = syncStatus.displayStatus) {
-        SyncDisplayStatus.Idle -> "Ready to sync"
-        SyncDisplayStatus.Running -> "Syncing..."
-        SyncDisplayStatus.Success -> "Synced"
-        is SyncDisplayStatus.PartialSuccess ->
-            "Partially synced — ${s.downloaded} saved, ${s.failed} failed"
-        is SyncDisplayStatus.Interrupted ->
-            if (s.downloaded > 0) "Interrupted — ${s.downloaded} saved"
-            else "Interrupted"
-        is SyncDisplayStatus.Failed -> "Sync failed"
-    }
-}
-
-/**
- * Color for the pulse dot in [SyncStatusCard]. Green = success-ish,
- * amber = in-progress / warning, red = genuine failure, gray = idle.
- */
-@Composable
-private fun syncStatusDotColor(
-    syncStatus: SyncStatusInfo,
-    anyServiceConnected: Boolean,
-    hasEverSynced: Boolean,
-): Color {
-    val extendedColors = StashTheme.extendedColors
-    return when {
-        !anyServiceConnected -> MaterialTheme.colorScheme.onSurfaceVariant
-        !hasEverSynced -> extendedColors.warning
-        else -> when (syncStatus.displayStatus) {
-            SyncDisplayStatus.Idle -> extendedColors.warning
-            SyncDisplayStatus.Running -> extendedColors.warning
-            SyncDisplayStatus.Success -> extendedColors.success
-            is SyncDisplayStatus.PartialSuccess -> extendedColors.warning
-            is SyncDisplayStatus.Interrupted -> extendedColors.warning
-            is SyncDisplayStatus.Failed -> Color(0xFFEF4444)
-        }
-    }
-}
-
-@Composable
-private fun StatItem(label: String, value: String, subValue: String? = null) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(
-            text = value,
-            style = MaterialTheme.typography.titleMedium,
-            color = MaterialTheme.colorScheme.primary,
-        )
-        Text(
-            text = label,
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        if (subValue != null) {
-            Text(
-                text = subValue,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.primary,
-            )
-        }
-    }
-}
-
-@Composable
-private fun PulseDot(color: Color, modifier: Modifier = Modifier) {
-    val infiniteTransition = rememberInfiniteTransition(label = "pulse")
-    val alpha by infiniteTransition.animateFloat(
-        initialValue = 1f,
-        targetValue = 0.3f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1200, easing = LinearEasing),
-            repeatMode = RepeatMode.Reverse,
-        ),
-        label = "pulseAlpha",
-    )
-    Box(
-        modifier = modifier
-            .size(8.dp)
-            .alpha(alpha)
-            .clip(CircleShape)
-            .background(color),
-    )
 }
 
 // ── Daily mix card ───────────────────────────────────────────────────────
@@ -2024,26 +1820,3 @@ private fun PlaylistSortOrder.displayName(): String = when (this) {
     PlaylistSortOrder.MOST_PLAYED -> "Most Played"
 }
 
-// ── Utilities ────────────────────────────────────────────────────────────
-
-/**
- * Formats a byte count into a human-readable string (e.g. "45.2 MB").
- */
-private fun formatBytes(bytes: Long): String {
-    if (bytes <= 0) return "0 B"
-    val units = arrayOf("B", "KB", "MB", "GB", "TB")
-    val digitGroups = (Math.log10(bytes.toDouble()) / Math.log10(1024.0)).toInt()
-    val safeIndex = digitGroups.coerceIn(0, units.lastIndex)
-    return "%.1f %s".format(bytes / Math.pow(1024.0, safeIndex.toDouble()), units[safeIndex])
-}
-
-/**
- * Formats an epoch-millis timestamp into a relative time string (e.g. "2 hours ago").
- */
-private fun formatRelativeTime(epochMillis: Long): String {
-    return DateUtils.getRelativeTimeSpanString(
-        epochMillis,
-        System.currentTimeMillis(),
-        DateUtils.MINUTE_IN_MILLIS,
-    ).toString()
-}

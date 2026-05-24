@@ -16,12 +16,14 @@ import com.stash.core.data.sync.SyncScheduler
 import com.stash.core.data.sync.SyncStateManager
 import com.stash.core.data.sync.toDisplayStatus
 import com.stash.core.model.SyncDisplayStatus
+import com.stash.data.download.files.LibrarySizeHolder
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -126,6 +128,23 @@ data class SyncUiState(
     val lastSyncHealthLabel: String = "",
     /** Tint colour for [lastSyncHealthLabel]. */
     val lastSyncHealthColor: androidx.compose.ui.graphics.Color = androidx.compose.ui.graphics.Color.Transparent,
+
+    // -- SyncStatusCard inputs (relocated from HomeUiState) -------------------
+    /**
+     * Aggregated stats + display status driving the
+     * [com.stash.feature.sync.components.SyncStatusCard] at the top of
+     * this screen. Assembled by [SyncViewModel.observeSyncStatusCard]
+     * from the latest sync history + Room track counts + disk-walked
+     * library size, mirroring the original HomeViewModel wiring verbatim.
+     */
+    val syncStatus: SyncStatusInfo = SyncStatusInfo(),
+    /**
+     * True after at least one sync has completed. Drives the
+     * "Tap Sync Now" prompt vs. the stats grid in [SyncStatusCard].
+     * Derived as `syncStatus.lastSyncTime != null` so it stays in lock-
+     * step with the displayed "Last sync …" line.
+     */
+    val hasEverSynced: Boolean = false,
 )
 
 /**
@@ -145,6 +164,14 @@ class SyncViewModel @Inject constructor(
     private val downloadQueueDao: com.stash.core.data.db.dao.DownloadQueueDao,
     private val musicRepository: com.stash.core.data.repository.MusicRepository,
     private val blocklistGuard: com.stash.core.data.blocklist.BlocklistGuard,
+    /**
+     * Disk-walked library size (storage-mode-aware: internal File walk
+     * OR SAF DocumentFile traversal). Drives the SyncStatusCard's
+     * Storage column. Mirrors HomeViewModel's injection — the Room
+     * `file_size_bytes` column is bypassed because legacy libraries
+     * have it stuck at 0 for thousands of rows.
+     */
+    private val librarySizeHolder: LibrarySizeHolder,
 ) : ViewModel() {
 
     /**
@@ -175,6 +202,7 @@ class SyncViewModel @Inject constructor(
         observeYouTubePlaylists()
         observeUnmatchedCount()
         observeFlaggedCount()
+        observeSyncStatusCard()
     }
 
     // -- Public actions -------------------------------------------------------
@@ -486,6 +514,63 @@ class SyncViewModel @Inject constructor(
         viewModelScope.launch {
             musicRepository.getFlaggedCount().collect { count ->
                 _uiState.update { it.copy(flaggedCount = count) }
+            }
+        }
+    }
+
+    /**
+     * Mirrors HomeViewModel's `syncStatusFlow` + `musicDataFlow` +
+     * `sourceCountsFlow` assembly that originally populated the
+     * SyncStatusCard at the top of the Home screen. The card now
+     * lives at the top of the Sync screen; this observer keeps it
+     * fed with the same flow shape so the relocation introduces no
+     * behavioural change.
+     *
+     * Inputs (all reactive):
+     *  - `observeLatestSync()` for last-sync timestamp + display status
+     *  - `getTrackCount()` for the "Tracks" stat
+     *  - `getSpotifyDownloadedCount()` / `getYouTubeDownloadedCount()`
+     *    for the per-source stats
+     *  - `librarySizeHolder.size` for storage (disk truth — the Room
+     *    `file_size_bytes` SUM is unreliable for legacy libraries)
+     */
+    private fun observeSyncStatusCard() {
+        val syncStatusFlow = musicRepository.observeLatestSync().map { latestSync ->
+            if (latestSync != null) {
+                SyncStatusInfo(
+                    lastSyncTime = latestSync.startedAt.toEpochMilli(),
+                    nextSyncTime = latestSync.completedAt?.toEpochMilli()?.plus(6 * 3_600_000L),
+                    state = latestSync.status,
+                    displayStatus = latestSync.toDisplayStatus(),
+                )
+            } else {
+                SyncStatusInfo(displayStatus = SyncDisplayStatus.Idle)
+            }
+        }
+
+        viewModelScope.launch {
+            combine(
+                syncStatusFlow,
+                musicRepository.getTrackCount(),
+                musicRepository.getSpotifyDownloadedCount(),
+                musicRepository.getYouTubeDownloadedCount(),
+                librarySizeHolder.size,
+            ) { base, trackCount, spotifyCount, youtubeCount, librarySize ->
+                base.copy(
+                    totalTracks = trackCount,
+                    spotifyTracks = spotifyCount,
+                    youTubeTracks = youtubeCount,
+                    storageUsedBytes = librarySize.totalBytes,
+                    flacTracks = librarySize.losslessFileCount,
+                    flacStorageBytes = librarySize.losslessBytes,
+                )
+            }.collect { status ->
+                _uiState.update {
+                    it.copy(
+                        syncStatus = status,
+                        hasEverSynced = status.lastSyncTime != null,
+                    )
+                }
             }
         }
     }
