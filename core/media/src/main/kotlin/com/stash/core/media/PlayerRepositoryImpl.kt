@@ -1054,7 +1054,16 @@ class PlayerRepositoryImpl @Inject constructor(
             // or `hasNextMediaItem()` returns false (handled in
             // `maybeSkipOfflineStreamOnly`). No manual loop needed; this
             // matches the existing `recoverOrStop` re-entrancy pattern.
-            mediaItem?.let { maybeSkipOfflineStreamOnly(controller, it) }
+            //
+            // Gate on REASON_AUTO so only natural queue advancement triggers
+            // the silent-skip. Explicit user skips (REASON_SEEK), repeat-one
+            // wraparounds (REASON_REPEAT), and code-driven queue changes
+            // (REASON_PLAYLIST_CHANGED) bypass it — those surfaces have
+            // their own gating (tap-time guard in Task 5, user intent for
+            // repeat, consumer choice for queue mutations).
+            if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) {
+                mediaItem?.let { maybeSkipOfflineStreamOnly(controller, it) }
+            }
             updateState(controller)
         }
 
