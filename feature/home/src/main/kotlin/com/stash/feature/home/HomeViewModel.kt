@@ -4,8 +4,6 @@ import android.content.Context
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.stash.core.auth.TokenManager
-import com.stash.core.auth.model.AuthState
 import com.stash.core.data.db.dao.DownloadQueueDao
 import com.stash.core.data.db.dao.ListeningEventDao
 import com.stash.core.data.db.dao.StashMixRecipeDao
@@ -14,17 +12,13 @@ import com.stash.core.data.lastfm.LastFmSessionPreference
 import com.stash.core.data.prefs.DownloadNetworkPreference
 import com.stash.core.data.prefs.StreamingPreference
 import com.stash.core.data.repository.MusicRepository
-import com.stash.core.data.sync.toDisplayStatus
 import com.stash.core.data.sync.workers.StashDiscoveryWorker
 import com.stash.core.data.sync.workers.StashMixRefreshWorker
 import com.stash.core.media.PlayerRepository
 import com.stash.core.model.MusicSource
 import com.stash.core.model.Playlist
 import com.stash.core.model.PlaylistType
-import com.stash.core.model.SyncDisplayStatus
 import com.stash.core.model.Track
-import com.stash.data.download.files.LibrarySizeBreakdown
-import com.stash.data.download.files.LibrarySizeHolder
 import com.stash.data.download.lossless.AggregatorRateLimiter
 import com.stash.data.download.lossless.LosslessRetryWorker
 import com.stash.data.download.lossless.LosslessSourcePreferences
@@ -72,24 +66,27 @@ import javax.inject.Inject
 private const val TAG = "HomeViewModel"
 
 /**
- * ViewModel for the Home screen. Collects playlist, track, sync data,
- * and authentication state from [MusicRepository] and [TokenManager],
- * combining them into a single reactive [HomeUiState].
+ * ViewModel for the Home screen. Collects playlist, track, recently-added,
+ * and prompt-banner data from [MusicRepository] and the Last.fm / lossless
+ * preference surfaces, combining them into a single reactive [HomeUiState].
  *
  * All data sources are Flow-based so the UI updates automatically when:
  * - New tracks/playlists are inserted after a sync
  * - A sync completes and a new history record appears
- * - Spotify or YouTube auth state changes (connect/disconnect)
+ *
+ * Note: the Sync status card (and its per-source connection booleans,
+ * library-size walk, and latest-sync stream) was relocated to
+ * `:feature:sync` in the SyncStatusCard relocation refactor — see
+ * SyncViewModel for the moved flow assembly. Home no longer observes
+ * TokenManager.spotifyAuthState / youTubeAuthState directly.
  */
 @HiltViewModel
 class HomeViewModel @Inject constructor(
     private val musicRepository: MusicRepository,
     private val playerRepository: PlayerRepository,
-    private val tokenManager: TokenManager,
     private val lastFmSessionPreference: LastFmSessionPreference,
     private val lastFmCredentials: LastFmCredentials,
     private val listeningEventDao: ListeningEventDao,
-    private val librarySizeHolder: LibrarySizeHolder,
     private val losslessPrefs: LosslessSourcePreferences,
     private val settingsDeepLinkController: com.stash.core.data.navigation.SettingsDeepLinkController,
     private val tipJarRepository: com.stash.core.data.tipjar.TipJarRepository,
@@ -194,45 +191,17 @@ class HomeViewModel @Inject constructor(
     }
 
     /**
-     * Derives [SyncStatusInfo] reactively from the latest sync history record.
-     * Emits a default (empty) status when no sync has ever run.
-     */
-    private val syncStatusFlow = musicRepository.observeLatestSync().map { latestSync ->
-        if (latestSync != null) {
-            SyncStatusInfo(
-                lastSyncTime = latestSync.startedAt.toEpochMilli(),
-                nextSyncTime = latestSync.completedAt?.toEpochMilli()?.plus(6 * 3_600_000L),
-                state = latestSync.status,
-                displayStatus = latestSync.toDisplayStatus(),
-            )
-        } else {
-            SyncStatusInfo(displayStatus = SyncDisplayStatus.Idle)
-        }
-    }
-
-    /**
-     * Combines the Room-backed data flows + the disk-walked library size
-     * into a single intermediate holder. The DB column `file_size_bytes`
-     * is bypassed for the Storage display because legacy libraries have it
-     * stuck at 0 for thousands of rows. [librarySizeHolder] reflects disk
-     * truth via the shared [LibrarySizeHolder] singleton (storage-mode-aware:
-     * internal File walk OR SAF DocumentFile traversal). See that class for
-     * lifecycle and walk-failure semantics.
+     * Bundles the two Room-backed flows Home needs into a single
+     * intermediate holder. Track count + disk-walked library size used
+     * to live here too — both fed the SyncStatusCard at the top of
+     * Home; that card now lives in `:feature:sync` and its plumbing
+     * moved with it.
      */
     private val musicDataFlow = combine(
         musicRepository.getAllPlaylists(),
         musicRepository.getRecentlyAdded(20),
-        musicRepository.getTrackCount(),
-        librarySizeHolder.size,
-    ) { playlists, recentlyAdded, trackCount, librarySize ->
-        MusicData(playlists, recentlyAdded, trackCount, librarySize)
-    }
-
-    private val sourceCountsFlow = combine(
-        musicRepository.getSpotifyDownloadedCount(),
-        musicRepository.getYouTubeDownloadedCount(),
-    ) { spotify, youtube ->
-        SourceCounts(spotify = spotify, youtube = youtube)
+    ) { playlists, recentlyAdded ->
+        MusicData(playlists, recentlyAdded)
     }
 
     /**
@@ -371,20 +340,17 @@ class HomeViewModel @Inject constructor(
     ) { lossless, backfill, lyrics -> BannersInfo(lossless, backfill, lyrics) }
 
     /**
-     * Derives (spotifyConnected, youTubeConnected, lastFmPrompt,
-     * losslessPrompt) from TokenManager + Last.fm session state +
-     * lossless prefs. Bundled so the top-level combine stays at 5
-     * inputs (the non-vararg ceiling).
+     * Bundles the two prompt-banner flows so the top-level combine
+     * treats them as a single positional arg. Previously also carried
+     * Spotify / YouTube auth state for the SyncStatusCard's "Connect
+     * Spotify or YouTube Music" prompt — that responsibility moved
+     * to `:feature:sync` along with the card itself.
      */
-    private val authStateFlow = combine(
-        tokenManager.spotifyAuthState,
-        tokenManager.youTubeAuthState,
+    private val promptsFlow = combine(
         lastFmPromptFlow,
         losslessPromptFlow,
-    ) { spotify, youtube, lastFmPrompt, losslessPrompt ->
-        AuthInfo(
-            spotifyConnected = spotify is AuthState.Connected,
-            youTubeConnected = youtube is AuthState.Connected,
+    ) { lastFmPrompt, losslessPrompt ->
+        PromptsInfo(
             lastFmPrompt = lastFmPrompt,
             losslessPrompt = losslessPrompt,
         )
@@ -392,24 +358,11 @@ class HomeViewModel @Inject constructor(
 
     val uiState: StateFlow<HomeUiState> = combine(
         musicDataFlow,
-        syncStatusFlow,
-        authStateFlow,
-        sourceCountsFlow,
+        promptsFlow,
         _playlistSortOrder,
         tipJarRepository.state,
         bannersInfoFlow,
-    ) { args ->
-        @Suppress("UNCHECKED_CAST")
-        val musicData = args[0] as MusicData
-        @Suppress("UNCHECKED_CAST")
-        val syncStatus = args[1] as SyncStatusInfo
-        @Suppress("UNCHECKED_CAST")
-        val authInfo = args[2] as AuthInfo
-        @Suppress("UNCHECKED_CAST")
-        val sourceCounts = args[3] as SourceCounts
-        val playlistSortOrder = args[4] as PlaylistSortOrder
-        val tipJar = args[5] as com.stash.core.data.tipjar.TipJarState
-        val banners = args[6] as BannersInfo
+    ) { musicData, prompts, playlistSortOrder, tipJar, banners ->
         val bannerState = banners.waitingForLossless
         val metadataBackfillBanner = banners.metadataBackfill
         val lyricsBackfillBanner = banners.lyricsBackfill
@@ -442,15 +395,6 @@ class HomeViewModel @Inject constructor(
             }
 
         HomeUiState(
-            syncStatus = syncStatus.copy(
-                totalTracks = musicData.trackCount,
-                spotifyTracks = sourceCounts.spotify,
-                youTubeTracks = sourceCounts.youtube,
-                totalPlaylists = musicData.playlists.size,
-                storageUsedBytes = musicData.librarySize.totalBytes,
-                flacTracks = musicData.librarySize.losslessFileCount,
-                flacStorageBytes = musicData.librarySize.losslessBytes,
-            ),
             stashMixes = stashMixes,
             spotifyMixes = spotifyMixes,
             youtubeMixes = youtubeMixes,
@@ -459,16 +403,11 @@ class HomeViewModel @Inject constructor(
             youtubeLikedPlaylists = youtubeLikedPlaylists,
             spotifyLikedCount = spotifyLikedCount,
             youtubeLikedCount = youtubeLikedCount,
-            totalTracks = musicData.trackCount,
-            totalStorageBytes = musicData.librarySize.totalBytes,
             playlists = otherPlaylists,
             playlistSortOrder = playlistSortOrder,
             isLoading = false,
-            spotifyConnected = authInfo.spotifyConnected,
-            youTubeConnected = authInfo.youTubeConnected,
-            lastFmPrompt = authInfo.lastFmPrompt,
-            losslessPrompt = authInfo.losslessPrompt,
-            hasEverSynced = syncStatus.lastSyncTime != null,
+            lastFmPrompt = prompts.lastFmPrompt,
+            losslessPrompt = prompts.losslessPrompt,
             tipJar = tipJar,
             waitingForLosslessBanner = bannerState,
             metadataBackfillBanner = metadataBackfillBanner,
@@ -959,33 +898,23 @@ class HomeViewModel @Inject constructor(
 }
 
 /**
- * Internal holder for the four music-data Room flows so we can combine
- * them into a single upstream before the top-level combine.
+ * Internal holder for the Room-backed flows Home reads so the top-level
+ * combine treats them as a single positional arg. Track count + disk-
+ * walked library size used to live here too; both belonged to the
+ * relocated SyncStatusCard pipeline.
  */
 private data class MusicData(
     val playlists: List<Playlist>,
     val recentlyAdded: List<Track>,
-    val trackCount: Int,
-    val librarySize: LibrarySizeBreakdown,
 )
 
 /**
- * Bundled per-source counts that flow into [HomeUiState.syncStatus].
- * FLAC count + storage now come from disk via [MusicData.librarySize],
- * not from this struct — see KDoc on `musicDataFlow` for why.
+ * Internal holder for the two prompt-banner flows so the top-level
+ * combine treats them as a single positional arg. Previously also
+ * carried per-source connection booleans for the SyncStatusCard —
+ * those moved to `:feature:sync` along with the card.
  */
-private data class SourceCounts(
-    val spotify: Int,
-    val youtube: Int,
-)
-
-/**
- * Internal holder for auth state so it can participate in the combine
- * as a single flow emission.
- */
-private data class AuthInfo(
-    val spotifyConnected: Boolean,
-    val youTubeConnected: Boolean,
+private data class PromptsInfo(
     val lastFmPrompt: LastFmPromptState?,
     val losslessPrompt: LosslessPromptState?,
 )

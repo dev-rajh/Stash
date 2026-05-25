@@ -55,6 +55,7 @@ import com.stash.feature.sync.components.RecentSyncsCard
 import com.stash.feature.sync.components.SyncRowStatus
 import com.stash.feature.sync.components.SyncHeroCard
 import com.stash.feature.sync.components.SyncActionProgress
+import com.stash.feature.sync.components.SyncStatusCard
 import com.stash.feature.sync.components.StatusPill
 import com.stash.feature.sync.components.formatRelativeTime
 
@@ -80,6 +81,20 @@ fun SyncScreen(
             .padding(horizontal = 16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
+        // -- Sync status card (relocated from Home) ---------------------------
+        // Lives at the very top of the Sync tab so library-status info
+        // sits with the rest of the Sync surface (was previously the
+        // first content card on Home, directly under the supporter pill).
+        item {
+            Spacer(Modifier.height(8.dp))
+            SyncStatusCard(
+                syncStatus = uiState.syncStatus,
+                spotifyConnected = uiState.spotifyConnected,
+                youTubeConnected = uiState.youTubeConnected,
+                hasEverSynced = uiState.hasEverSynced,
+            )
+        }
+
         // -- Header -----------------------------------------------------------
         item {
             Spacer(Modifier.height(8.dp))
