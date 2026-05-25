@@ -592,7 +592,9 @@ class StashPlaybackService : MediaLibraryService() {
                     val playlistId = mediaItems[0].mediaId.removePrefix(SHUFFLE_PLAY_PREFIX).toLongOrNull()
                     if (playlistId != null) {
                         val tracks = playlistDao.getTracksForPlaylist(playlistId)
-                        val items = tracks.filter{track -> track.isDownloaded}.map { track ->
+                        // v0.9.37: include streamable tracks so stream-only Mix entries are
+                        // playable. Downloaded-only filter would silently drop them.
+                        val items = tracks.filter{track -> track.isDownloaded || track.isStreamable}.map { track ->
                             MediaItem.Builder()
                                 .setMediaId(track.id.toString())
                                 .setUri(track.filePath ?: "")
@@ -841,7 +843,9 @@ class StashPlaybackService : MediaLibraryService() {
                                     )
                                     .build()
 
-                                val tracks = playlistDao.getTracksForPlaylist(playlistId).filter{track -> track.isDownloaded}.map { track ->
+                                // v0.9.37: include streamable tracks so stream-only Mix entries are
+                                // playable. Downloaded-only filter would silently drop them.
+                                val tracks = playlistDao.getTracksForPlaylist(playlistId).filter{track -> track.isDownloaded || track.isStreamable}.map { track ->
                                     MediaItem.Builder()
                                         .setMediaId(track.id.toString())
                                         .setUri(track.filePath ?: "")
