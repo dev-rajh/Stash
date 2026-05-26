@@ -1512,7 +1512,7 @@ import com.stash.core.data.db.dao.DownloadQueueDao
 import com.stash.core.data.db.dao.TrackDao
 import com.stash.core.data.db.entity.TrackEntity
 import com.stash.core.model.DownloadFailureType
-import com.stash.data.download.single.SingleTrackDownloadEnqueuer
+import com.stash.core.data.sync.SingleTrackDownloadEnqueuer  // moved from data.download.single per PF-6
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.mockk
@@ -1581,7 +1581,7 @@ import com.stash.core.data.db.dao.DownloadQueueDao
 import com.stash.core.data.db.dao.FailedDownloadRow
 import com.stash.core.data.db.dao.TrackDao
 import com.stash.core.model.DownloadFailureType
-import com.stash.data.download.single.SingleTrackDownloadEnqueuer
+import com.stash.core.data.sync.SingleTrackDownloadEnqueuer  // moved from data.download.single per PF-6
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -2059,7 +2059,7 @@ Closes #88. Deflects #71, #29, #34, #27, #21, #50.
 
 ## Test plan
 - [x] Unit: classifier, DAO, ViewModel
-- [x] AndroidTest: migration_28_29
+- [x] Unit (Robolectric): migration_28_29
 - [x] Manual on-device smoke matrix (spec §7.4)"
 ```
 
