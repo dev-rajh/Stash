@@ -45,30 +45,47 @@ class DownloadFailureClassifier @Inject constructor() {
         return DownloadFailureType.UNKNOWN
     }
 
-    private companion object {
-        const val TAG = "FailureClassifier"
+    companion object {
+        /**
+         * True only for failure types that represent a terminal track-level
+         * failure: the provider says no, or ffmpeg refuses to process. Other
+         * types (AUTH_EXPIRED / NETWORK / STORAGE_ERROR / UNKNOWN) are sync
+         * interruptions — the track itself isn't broken and the next sync
+         * will pick it up.
+         *
+         * NO_MATCH is also a terminal failure but owned by FailedMatchesScreen,
+         * not the classified-failures viewer; treat it as non-terminal here so
+         * lane separation is preserved at the worker layer.
+         */
+        fun isTerminal(type: DownloadFailureType): Boolean = when (type) {
+            DownloadFailureType.PROVIDER_UNAVAILABLE,
+            DownloadFailureType.FFMPEG_ERROR -> true
+            else -> false
+        }
 
-        val AUTH_TEXT = listOf(
+        private const val TAG = "FailureClassifier"
+
+        private val AUTH_TEXT = listOf(
             "login required", "sign in", "captcha", "403 forbidden",
             "unauthorized", "401",
         )
-        val PROVIDER_TEXT = listOf(
+        private val PROVIDER_TEXT = listOf(
             "video unavailable", "unable to extract", "private video",
             "this video has been removed", "not available in your country",
             "copyright", "region",
         )
-        val NETWORK_TEXT = listOf(
+        private val NETWORK_TEXT = listOf(
             "timed out", "timeout", "unable to resolve host", "no address",
             "connection reset", "connection refused", "unreachable",
         )
-        val NETWORK_CAUSES = setOf(
+        private val NETWORK_CAUSES = setOf(
             "SocketTimeoutException", "UnknownHostException",
             "ConnectException", "SSLException",
         )
-        val FFMPEG_TEXT = listOf(
+        private val FFMPEG_TEXT = listOf(
             "ffmpeg", "exit code", "muxer", "codec",
         )
-        val STORAGE_TEXT = listOf(
+        private val STORAGE_TEXT = listOf(
             "enospc", "no space left", "permission denied",
             "saf", "no such file", "eacces",
         )

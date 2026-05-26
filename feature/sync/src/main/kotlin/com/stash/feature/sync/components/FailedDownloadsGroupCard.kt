@@ -38,6 +38,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
@@ -46,6 +47,23 @@ import com.stash.core.model.DownloadFailureType
 import com.stash.core.ui.theme.StashTheme
 import com.stash.feature.sync.FailedDownloadsGroup
 import com.stash.feature.sync.display
+
+/**
+ * Hard cap on rows rendered in a single expanded group. Without it, a
+ * group with thousands of failures (one user hit 2325 in a single group)
+ * blows past the Compose layout budget and OOMs the app on screen open
+ * because the body is a [Column], not a [androidx.compose.foundation.lazy.LazyColumn].
+ * The "+N more" footer surfaces the excess; the user can still operate
+ * on them via the group-level retry button.
+ */
+private const val MAX_VISIBLE_ROWS_PER_GROUP = 100
+
+/**
+ * Row count above which a group starts collapsed by default — keeps the
+ * Failed Downloads screen from rendering hundreds of rows in the initial
+ * frame even when the cap above would catch the absolute worst case.
+ */
+private const val AUTO_COLLAPSE_THRESHOLD = 50
 
 /**
  * Collapsible card representing one [FailedDownloadsGroup] — a single
@@ -69,7 +87,11 @@ fun FailedDownloadsGroupCard(
     onRetryGroup: (DownloadFailureType) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    var expanded by remember(group.type) { mutableStateOf(true) }
+    // Groups with more than AUTO_COLLAPSE_THRESHOLD rows start collapsed so
+    // the screen doesn't try to render hundreds of items on first open.
+    var expanded by remember(group.type) {
+        mutableStateOf(group.rows.size <= AUTO_COLLAPSE_THRESHOLD)
+    }
     val display = group.type.display()
     val extendedColors = StashTheme.extendedColors
 
@@ -132,19 +154,35 @@ fun FailedDownloadsGroupCard(
                     Text("Retry ${group.rows.size} track${if (group.rows.size != 1) "s" else ""}")
                 }
                 Spacer(Modifier.height(4.dp))
-                group.rows.forEachIndexed { index, row ->
+                // Cap visible rows so a giant group (e.g. one user reported
+                // 2325 NETWORK rows after a cancelled sync) doesn't OOM
+                // the layout. The group-level retry button above still
+                // operates on every row, capped or not.
+                val visibleRows = group.rows.take(MAX_VISIBLE_ROWS_PER_GROUP)
+                visibleRows.forEachIndexed { index, row ->
                     FailedDownloadRowItem(
                         row = row,
                         onRetry = { onRetryRow(row.queueId) },
                         onBlock = { onBlockRow(row.trackId) },
                     )
-                    if (index < group.rows.lastIndex) {
+                    if (index < visibleRows.lastIndex) {
                         HorizontalDivider(
                             modifier = Modifier.padding(start = 72.dp, end = 14.dp),
                             thickness = 0.5.dp,
                             color = extendedColors.glassBorder,
                         )
                     }
+                }
+                if (group.rows.size > MAX_VISIBLE_ROWS_PER_GROUP) {
+                    Text(
+                        text = "+ ${group.rows.size - MAX_VISIBLE_ROWS_PER_GROUP} more (showing first $MAX_VISIBLE_ROWS_PER_GROUP)",
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(14.dp),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                    )
                 }
                 Spacer(Modifier.height(6.dp))
             }

@@ -304,6 +304,37 @@ interface DownloadQueueDao {
     suspend fun incrementRetryCount(id: Long)
 
     /**
+     * Used when a download attempt is interrupted by a transient cause
+     * (network drop, storage hiccup, mid-run auth expiry, etc.). Leaves the
+     * row at PENDING for the next sync to retry, but bumps retry_count and
+     * records the last error type/message for telemetry. Crucially: status
+     * is PENDING, NOT FAILED — the track itself isn't broken, the sync just
+     * couldn't finish it this time.
+     *
+     * Note: `failure_type` is populated for telemetry but the row stays at
+     * status=PENDING, which keeps it out of the Failed Downloads viewer's
+     * `getFailedDownloads()` query (that query gates on `status='FAILED'`).
+     *
+     * Callers should escalate to [markFailed] once retry_count reaches the
+     * `TRANSIENT_RETRY_LIMIT` defined at the worker layer, so persistently-
+     * stuck rows eventually surface to the user.
+     */
+    @Query("""
+        UPDATE download_queue
+           SET status = 'PENDING',
+               error_message = :lastErrorMessage,
+               failure_type = :lastFailureType,
+               retry_count = retry_count + 1,
+               completed_at = NULL
+         WHERE id = :queueId
+    """)
+    suspend fun revertToPendingAfterInterruption(
+        queueId: Long,
+        lastErrorMessage: String?,
+        lastFailureType: DownloadFailureType,
+    )
+
+    /**
      * Stamp a YouTube URL onto a pending queue row that doesn't have one
      * yet. Used by DiffWorker enrichment: when a YT Music sync deduplicates
      * a track snapshot against a Spotify-source row whose queue entry has

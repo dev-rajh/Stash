@@ -140,6 +140,43 @@ class DownloadQueueDaoFailedDownloadsTest {
         assertEquals(DownloadFailureType.AUTH_EXPIRED, row2.failureType)
     }
 
+    // ---- revertToPendingAfterInterruption -------------------------
+
+    @Test fun revertToPendingAfterInterruption_flips_FAILED_to_PENDING_and_increments_retry() = runTest {
+        // Setup: a row that was previously FAILED with retry_count=2.
+        seedTrack(id = 1, title = "Interrupted", artist = "X")
+        dao.insert(
+            DownloadQueueEntity(
+                id = 1,
+                trackId = 1,
+                status = DownloadStatus.FAILED,
+                syncId = null,
+                searchQuery = "q",
+                failureType = DownloadFailureType.NETWORK,
+                errorMessage = "prior error",
+                retryCount = 2,
+            )
+        )
+
+        dao.revertToPendingAfterInterruption(
+            queueId = 1,
+            lastErrorMessage = "socket timeout",
+            lastFailureType = DownloadFailureType.NETWORK,
+        )
+
+        val row = dao.getById(1)!!
+        // Status is PENDING so next sync re-attempts; viewer (gated on FAILED)
+        // does NOT pick it up.
+        assertEquals(DownloadStatus.PENDING, row.status)
+        // Telemetry retained.
+        assertEquals("socket timeout", row.errorMessage)
+        assertEquals(DownloadFailureType.NETWORK, row.failureType)
+        // Retry counter bumped so escalation eventually triggers.
+        assertEquals(3, row.retryCount)
+        // completed_at cleared (no longer terminal).
+        assertNull(row.completedAt)
+    }
+
     // ---- atomicallyClaimAllForRetry -------------------------------
 
     @Test fun atomicallyClaimAllForRetry_returns_all_non_match_failed_ids() = runTest {

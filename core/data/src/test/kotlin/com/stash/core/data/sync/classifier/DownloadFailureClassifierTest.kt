@@ -89,4 +89,41 @@ class DownloadFailureClassifierTest {
         ))
         assertEquals(DownloadFailureType.UNKNOWN, result)
     }
+
+    // ── isTerminal ─────────────────────────────────────────────────────
+    // Terminal == the track itself is broken (provider refused / ffmpeg
+    // refuses). Non-terminal == the sync got interrupted; the next sync
+    // will pick the row back up at PENDING.
+
+    @Test fun `isTerminal PROVIDER_UNAVAILABLE is true`() {
+        assertEquals(true, DownloadFailureClassifier.isTerminal(DownloadFailureType.PROVIDER_UNAVAILABLE))
+    }
+
+    @Test fun `isTerminal FFMPEG_ERROR is true`() {
+        assertEquals(true, DownloadFailureClassifier.isTerminal(DownloadFailureType.FFMPEG_ERROR))
+    }
+
+    @Test fun `isTerminal NETWORK is false`() {
+        assertEquals(false, DownloadFailureClassifier.isTerminal(DownloadFailureType.NETWORK))
+    }
+
+    @Test fun `isTerminal AUTH_EXPIRED is false`() {
+        assertEquals(false, DownloadFailureClassifier.isTerminal(DownloadFailureType.AUTH_EXPIRED))
+    }
+
+    @Test fun `isTerminal STORAGE_ERROR is false`() {
+        assertEquals(false, DownloadFailureClassifier.isTerminal(DownloadFailureType.STORAGE_ERROR))
+    }
+
+    @Test fun `isTerminal UNKNOWN is false`() {
+        assertEquals(false, DownloadFailureClassifier.isTerminal(DownloadFailureType.UNKNOWN))
+    }
+
+    @Test fun `isTerminal NO_MATCH is false (lane separation - owned by FailedMatchesScreen)`() {
+        assertEquals(false, DownloadFailureClassifier.isTerminal(DownloadFailureType.NO_MATCH))
+    }
+
+    @Test fun `isTerminal NONE is false`() {
+        assertEquals(false, DownloadFailureClassifier.isTerminal(DownloadFailureType.NONE))
+    }
 }
