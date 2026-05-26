@@ -27,7 +27,7 @@ import org.robolectric.annotation.Config
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(manifest = Config.NONE, sdk = [33])
-class StashDatabaseMigrationTest {
+class MigrationV28V29Test {
 
     private val DB_NAME = "migration-v28v29-test"
 
@@ -46,6 +46,15 @@ class StashDatabaseMigrationTest {
                 id = 1L,
                 failureType = "DOWNLOAD_ERROR",
             )
+            // Honest precondition: confirm the v28 seed actually stored
+            // 'DOWNLOAD_ERROR' before the migration touches it. Without
+            // this readback, a silently corrupted insert could still
+            // produce a post-migration 'UNKNOWN' for the wrong reason.
+            db.query("SELECT failure_type FROM download_queue WHERE id = 1").use { c ->
+                assertEquals(1, c.count)
+                assertTrue(c.moveToFirst())
+                assertEquals("DOWNLOAD_ERROR", c.getString(0))
+            }
         }
 
         val migrated = helper.runMigrationsAndValidate(
@@ -64,7 +73,13 @@ class StashDatabaseMigrationTest {
         helper.createDatabase(DB_NAME, 28).use { db ->
             db.insertDownloadQueueRow(id = 1L, failureType = "NONE")
             db.insertDownloadQueueRow(id = 2L, failureType = "DOWNLOAD_ERROR")
-            db.insertDownloadQueueRow(id = 3L, failureType = "RATE_LIMITED")
+            // NO_MATCH is a real pre-Task-1 enum constant that legitimately
+            // appears in user databases; the migration must leave it alone.
+            db.insertDownloadQueueRow(id = 3L, failureType = "NO_MATCH")
+            // A deliberate non-enum literal that *contains* 'DOWNLOAD_ERROR'
+            // as a substring. Asserts the WHERE clause is literal equality
+            // (`= 'DOWNLOAD_ERROR'`), not a LIKE/substring match.
+            db.insertDownloadQueueRow(id = 4L, failureType = "DOWNLOAD_ERROR_SUFFIX")
         }
 
         val migrated = helper.runMigrationsAndValidate(
@@ -74,7 +89,7 @@ class StashDatabaseMigrationTest {
         migrated.query(
             "SELECT id, failure_type FROM download_queue ORDER BY id",
         ).use { c ->
-            assertEquals(3, c.count)
+            assertEquals(4, c.count)
             assertTrue(c.moveToFirst())
             assertEquals(1L, c.getLong(0))
             assertEquals("NONE", c.getString(1))
@@ -83,7 +98,10 @@ class StashDatabaseMigrationTest {
             assertEquals("UNKNOWN", c.getString(1))
             assertTrue(c.moveToNext())
             assertEquals(3L, c.getLong(0))
-            assertEquals("RATE_LIMITED", c.getString(1))
+            assertEquals("NO_MATCH", c.getString(1))
+            assertTrue(c.moveToNext())
+            assertEquals(4L, c.getLong(0))
+            assertEquals("DOWNLOAD_ERROR_SUFFIX", c.getString(1))
         }
     }
 
