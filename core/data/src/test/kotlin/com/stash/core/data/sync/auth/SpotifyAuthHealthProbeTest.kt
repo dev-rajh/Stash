@@ -28,4 +28,10 @@ class SpotifyAuthHealthProbeTest {
         coEvery { api.getCurrentUserProfile() } throws RuntimeException("network down")
         assertFalse(probe.isExpired())
     }
+
+    @Test fun `propagates CancellationException for structured concurrency`() = runTest {
+        coEvery { api.getCurrentUserProfile() } throws kotlinx.coroutines.CancellationException("cancelled")
+        val thrown = runCatching { probe.isExpired() }.exceptionOrNull()
+        assertTrue(thrown is kotlinx.coroutines.CancellationException)
+    }
 }

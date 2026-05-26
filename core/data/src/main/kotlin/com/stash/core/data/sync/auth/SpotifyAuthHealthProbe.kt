@@ -13,8 +13,14 @@ class SpotifyAuthHealthProbe @Inject constructor(
 
     override suspend fun isExpired(): Boolean = try {
         api.getCurrentUserProfile() == null
+    } catch (ce: kotlinx.coroutines.CancellationException) {
+        throw ce
     } catch (e: Throwable) {
-        Log.w("SpotifyAuthProbe", "probe failed conservatively", e)
+        Log.w(TAG, "probe failed conservatively", e)
         false
+    }
+
+    private companion object {
+        const val TAG = "SpotifyAuthProbe"
     }
 }
