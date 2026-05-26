@@ -93,7 +93,8 @@ class FailedDownloadsViewModel @Inject constructor(
      */
     fun retry(queueId: Long) = viewModelScope.launch {
         val claimed = downloadQueueDao.atomicallyClaimForRetry(queueId)
-        if (claimed > 0) downloadEnqueuer.enqueue(queueId)
+        // SQL UPDATE matches at most one row by PK; claim returns 1 (won) or 0 (lost race / already advanced).
+        if (claimed == 1) downloadEnqueuer.enqueue(queueId)
     }
 
     /**
@@ -103,6 +104,8 @@ class FailedDownloadsViewModel @Inject constructor(
      */
     fun retryGroup(type: DownloadFailureType) = viewModelScope.launch {
         downloadQueueDao.atomicallyClaimGroupForRetry(type)
+            // Sequential enqueue is intentional: WorkManager handles concurrency post-enqueue,
+            // and the DataStore read inside enqueue() is cached after the first call.
             .forEach { downloadEnqueuer.enqueue(it) }
     }
 

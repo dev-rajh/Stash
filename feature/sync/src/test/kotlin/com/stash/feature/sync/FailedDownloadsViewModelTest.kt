@@ -3,17 +3,29 @@ package com.stash.feature.sync
 import com.stash.core.data.blocklist.BlockSource
 import com.stash.core.data.blocklist.BlocklistGuard
 import com.stash.core.data.db.dao.DownloadQueueDao
+import com.stash.core.data.db.dao.FailedDownloadRow
 import com.stash.core.data.db.dao.TrackDao
 import com.stash.core.data.db.entity.TrackEntity
 import com.stash.core.data.sync.SingleTrackDownloadEnqueuer
 import com.stash.core.model.DownloadFailureType
 import io.mockk.coEvery
 import io.mockk.coVerify
+import io.mockk.every
 import io.mockk.mockk
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.setMain
+import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Before
 import org.junit.Test
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class FailedDownloadsViewModelTest {
 
     private val dao: DownloadQueueDao = mockk(relaxed = true)
@@ -25,6 +37,17 @@ class FailedDownloadsViewModelTest {
         // Stub it before constructing the VM in each test so the stateIn pipeline has a source.
         coEvery { dao.getFailedDownloads() } returns flowOf(emptyList())
         FailedDownloadsViewModel(dao, trackDao, enqueuer, guard)
+    }
+
+    @Before fun setUp() {
+        // viewModelScope dispatches on Dispatchers.Main; the StateFlow upstream collection
+        // only runs once a subscriber attaches. UnconfinedTestDispatcher lets the
+        // grouping test's `uiState.first { ... }` see the mapped emission immediately.
+        Dispatchers.setMain(UnconfinedTestDispatcher())
+    }
+
+    @After fun tearDown() {
+        Dispatchers.resetMain()
     }
 
     @Test fun `retry only enqueues when atomic claim succeeds`() = runTest {
@@ -65,5 +88,31 @@ class FailedDownloadsViewModelTest {
         coEvery { trackDao.getById(99) } returns null
         vm.block(99)
         coVerify(exactly = 0) { guard.block(any(), any()) }
+    }
+
+    @Test fun `uiState groups rows by failure type in display order and skips empty groups`() = runTest {
+        val row1 = mockk<FailedDownloadRow>(relaxed = true).also {
+            every { it.failureType } returns DownloadFailureType.NETWORK
+        }
+        val row2 = mockk<FailedDownloadRow>(relaxed = true).also {
+            every { it.failureType } returns DownloadFailureType.AUTH_EXPIRED
+        }
+        val row3 = mockk<FailedDownloadRow>(relaxed = true).also {
+            every { it.failureType } returns DownloadFailureType.NETWORK
+        }
+        // Stub BEFORE constructing the VM: the VM grabs the Flow reference in its
+        // initializer, so we have to win the race against the lazy `vm` builder
+        // (which stubs with an empty list as the default).
+        coEvery { dao.getFailedDownloads() } returns flowOf(listOf(row1, row2, row3))
+        val localVm = FailedDownloadsViewModel(dao, trackDao, enqueuer, guard)
+
+        // Subscribe to the StateFlow until we see a non-loading state.
+        val state = localVm.uiState.first { !it.isLoading }
+        assertEquals(2, state.groups.size)
+        assertEquals(DownloadFailureType.AUTH_EXPIRED, state.groups[0].type)  // ordering
+        assertEquals(DownloadFailureType.NETWORK, state.groups[1].type)
+        assertEquals(1, state.groups[0].rows.size)
+        assertEquals(2, state.groups[1].rows.size)
+        assertEquals(3, state.totalCount)
     }
 }
