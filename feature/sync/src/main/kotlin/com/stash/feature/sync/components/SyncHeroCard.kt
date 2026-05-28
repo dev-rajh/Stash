@@ -132,21 +132,31 @@ fun SyncHeroCard(
                     onClick = { if (!streamingMode) onStreamingModeChange(true) },
                     shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
                     enabled = !isSyncing,
-                ) {
-                    Icon(Icons.Filled.CloudQueue, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text("Online")
-                }
+                    icon = {
+                        // Override M3's default selected-checkmark so our
+                        // mode glyph doesn't overlap with the label.
+                        Icon(
+                            imageVector = Icons.Filled.CloudQueue,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                        )
+                    },
+                    label = { Text("Online") },
+                )
                 SegmentedButton(
                     selected = !streamingMode,
                     onClick = { if (streamingMode) onStreamingModeChange(false) },
                     shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
                     enabled = !isSyncing,
-                ) {
-                    Icon(Icons.Filled.OfflinePin, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text("Offline")
-                }
+                    icon = {
+                        Icon(
+                            imageVector = Icons.Filled.OfflinePin,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                        )
+                    },
+                    label = { Text("Offline") },
+                )
             }
 
             Spacer(Modifier.height(12.dp))
