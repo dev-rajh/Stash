@@ -52,6 +52,7 @@ The Sync tab has a toggle right above the sync button so you can flip modes with
 ### Playback
 
 - 5-band equalizer with presets, bass boost, virtualizer
+- Synced lyrics, pulled from LRCLIB and scrolled with the track
 - High-res album art, embedded into the file so third-party players see it
 - Background playback that actually keeps playing when the phone is locked
 
