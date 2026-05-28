@@ -18,6 +18,8 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
@@ -798,7 +800,7 @@ class SpotifyApiClient @Inject constructor(
     /**
      * Parses the `libraryV3` GraphQL response into [SpotifyPlaylistItem] objects.
      */
-    private fun parseLibraryResponse(responseJson: JsonObject): List<SpotifyPlaylistItem> {
+    internal fun parseLibraryResponse(responseJson: JsonObject): List<SpotifyPlaylistItem> {
         return try {
             val items = responseJson["data"]
                 ?.jsonObject?.get("me")
@@ -816,68 +818,88 @@ class SpotifyApiClient @Inject constructor(
 
             Log.d(TAG, "parseLibraryResponse: found ${items.size} library items")
 
-            items.mapNotNull { element ->
+            val playlistsById = linkedMapOf<String, SpotifyPlaylistItem>()
+            items.forEach { element ->
                 try {
-                    val wrapper = element.jsonObject
-                    val item = wrapper["item"]?.jsonObject ?: return@mapNotNull null
-                    val typeName = item["__typename"]?.jsonPrimitive?.contentOrNull
-                    val data = item["data"]?.jsonObject ?: return@mapNotNull null
-
-                    val dataTypeName = data["__typename"]?.jsonPrimitive?.contentOrNull
-                    if (dataTypeName != "Playlist") {
-                        Log.d(TAG, "parseLibraryResponse: skipping item type: $typeName/$dataTypeName")
-                        return@mapNotNull null
-                    }
-
-                    val uri = data["uri"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
-                    if (!uri.startsWith("spotify:playlist:")) return@mapNotNull null
-
-                    val playlistId = uri.removePrefix("spotify:playlist:")
-                    val name = data["name"]?.jsonPrimitive?.contentOrNull ?: "Untitled"
-
-                    val ownerUsername = data["ownerV2"]
-                        ?.jsonObject?.get("data")
-                        ?.jsonObject?.get("username")
-                        ?.jsonPrimitive?.contentOrNull ?: ""
-
-                    val imageUrl = data["images"]
-                        ?.jsonObject?.get("items")
-                        ?.jsonArray?.firstOrNull()
-                        ?.jsonObject?.get("sources")
-                        ?.jsonArray?.firstOrNull()
-                        ?.jsonObject?.get("url")
-                        ?.jsonPrimitive?.contentOrNull
-
-                    val images = if (imageUrl != null) {
-                        listOf(SpotifyImage(url = imageUrl))
-                    } else {
-                        null
-                    }
-
-                    val totalCount = data["content"]
-                        ?.jsonObject?.get("totalCount")
-                        ?.jsonPrimitive?.intOrNull ?: 0
-
-                    SpotifyPlaylistItem(
-                        id = playlistId,
-                        name = name,
-                        owner = SpotifyOwner(id = ownerUsername),
-                        images = images,
-                        tracks = SpotifyTracksRef(total = totalCount),
-                    ).also {
-                        Log.d(TAG, "parseLibraryResponse: playlist '${it.name}' " +
-                            "(id=${it.id}, owner=${it.owner.id}, tracks=$totalCount)")
-                    }
+                    collectPlaylistsFromLibraryNode(element, playlistsById)
                 } catch (e: Exception) {
-                    Log.w(TAG, "parseLibraryResponse: failed to parse item", e)
-                    null
+                    Log.w(TAG, "parseLibraryResponse: failed to parse library node", e)
                 }
-            }.also { playlists ->
+            }
+            playlistsById.values.toList().also { playlists ->
                 Log.d(TAG, "parseLibraryResponse: parsed ${playlists.size} playlists total")
             }
         } catch (e: Exception) {
             Log.e(TAG, "parseLibraryResponse: failed to parse response", e)
             emptyList()
+        }
+    }
+
+    private fun collectPlaylistsFromLibraryNode(
+        element: JsonElement,
+        playlistsById: MutableMap<String, SpotifyPlaylistItem>,
+    ) {
+        when (element) {
+            is JsonObject -> {
+                extractPlaylistFromDataNode(element["data"]?.jsonObject)?.let { playlist ->
+                    playlistsById.putIfAbsent(playlist.id, playlist)
+                }
+                element.values.forEach { child ->
+                    collectPlaylistsFromLibraryNode(child, playlistsById)
+                }
+            }
+            is JsonArray -> element.forEach { child ->
+                collectPlaylistsFromLibraryNode(child, playlistsById)
+            }
+            else -> Unit
+        }
+    }
+
+    private fun extractPlaylistFromDataNode(data: JsonObject?): SpotifyPlaylistItem? {
+        if (data == null) return null
+
+        val dataTypeName = data["__typename"]?.jsonPrimitive?.contentOrNull
+        if (dataTypeName != "Playlist") return null
+
+        val uri = data["uri"]?.jsonPrimitive?.contentOrNull ?: return null
+        if (!uri.startsWith("spotify:playlist:")) return null
+
+        val playlistId = uri.removePrefix("spotify:playlist:")
+        val name = data["name"]?.jsonPrimitive?.contentOrNull ?: "Untitled"
+
+        val ownerData = data["ownerV2"]?.jsonObject?.get("data")?.jsonObject
+        val ownerId = ownerData?.get("username")?.jsonPrimitive?.contentOrNull
+            ?: ownerData?.get("id")?.jsonPrimitive?.contentOrNull
+            ?: ""
+        val ownerName = ownerData?.get("name")?.jsonPrimitive?.contentOrNull
+
+        val imageUrl = data["images"]
+            ?.jsonObject?.get("items")
+            ?.jsonArray?.firstOrNull()
+            ?.jsonObject?.get("sources")
+            ?.jsonArray?.firstOrNull()
+            ?.jsonObject?.get("url")
+            ?.jsonPrimitive?.contentOrNull
+
+        val images = if (imageUrl != null) {
+            listOf(SpotifyImage(url = imageUrl))
+        } else {
+            null
+        }
+
+        val totalCount = data["content"]
+            ?.jsonObject?.get("totalCount")
+            ?.jsonPrimitive?.intOrNull ?: 0
+
+        return SpotifyPlaylistItem(
+            id = playlistId,
+            name = name,
+            owner = SpotifyOwner(id = ownerId, display_name = ownerName),
+            images = images,
+            tracks = SpotifyTracksRef(total = totalCount),
+        ).also {
+            Log.d(TAG, "parseLibraryResponse: playlist '${it.name}' " +
+                "(id=${it.id}, owner=${it.owner.id}, tracks=$totalCount)")
         }
     }
 
