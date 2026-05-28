@@ -11,7 +11,6 @@ import com.yausername.ffmpeg.FFmpeg
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -45,7 +44,30 @@ class MetadataEmbeddingIntegrationTest {
         artFile = copyAssetToCache("sample_art.jpg")
     }
 
-    @Test fun embedsTagsButNotArtIntoOpus() = runBlocking {
+    @Test fun embedsTagsAndArtIntoOpus() = runBlocking {
+        // v0.9.38 (#95): Opus art is now embedded via METADATA_BLOCK_PICTURE
+        // (base64-encoded FLAC picture block in the Vorbis comment), replacing
+        // the prior attached_pic path that ffmpeg rejects for Ogg streams.
+        // MediaMetadataRetriever.embeddedPicture should now return non-null.
+        verifyRoundTrip("sample_opus.opus")
+    }
+
+    /**
+     * Issue #118: METADATA_BLOCK_PICTURE puts the base64-encoded FLAC Picture
+     * block into a single argv entry passed to ffmpeg. Linux MAX_ARG_STRLEN
+     * is ~128KB on most kernels, so realistic album-art sizes (300–500KB raw
+     * JPEG → 400–700KB base64) could in theory overflow if youtubedl-android's
+     * ffmpeg bridge does a plain exec().
+     *
+     * Stress test: use a 2.19MB synthetic noise JPEG (base64 ≈ 3MB) — well
+     * beyond anything Spotify or YouTube would actually ship as cover art —
+     * and confirm the embed still round-trips on a real device. If this test
+     * passes, the kernel/bridge handles oversized argv entries fine and the
+     * defensive ffmetadata-file fallback we sketched in the issue isn't
+     * needed in practice. If it fails, that fallback becomes mandatory.
+     */
+    @Test fun embedsTagsAndLargeArtIntoOpus() = runBlocking {
+        val largeArt = copyAssetToCache("sample_art_large.jpg")
         val source = copyAssetToCache("sample_opus.opus")
         val track = Track(
             id = 1, title = "Test Title", artist = "Test Artist",
@@ -53,17 +75,19 @@ class MetadataEmbeddingIntegrationTest {
             isrc = "USTEST0000001",
         )
 
-        val result = embedder.embedMetadata(source, track, artFile)
+        val result = embedder.embedMetadata(source, track, largeArt)
 
         MediaMetadataRetriever().apply {
             setDataSource(result.absolutePath)
             assertEquals("Test Title", extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE))
-            assertEquals("Test Artist", extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST))
-            assertEquals("Test Album", extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM))
-            assertEquals("Test AlbumArtist", extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUMARTIST))
-            // Opus skips attached_pic (spec open question — see MetadataEmbedder
-            // OPUS_OGG_EXTENSIONS guard). embeddedPicture is expected to be null.
-            assertNull("Opus should NOT carry an embedded picture in v0.9.35", embeddedPicture)
+            val art = embeddedPicture
+            assertNotNull(
+                "Issue #118: 2.19MB JPEG → base64 ≈ 3MB argv must still embed. " +
+                    "If this assertion is null, the kernel argv limit hit us — " +
+                    "implement the -i metadata.txt fallback.",
+                art,
+            )
+            assertTrue("Embedded picture should be non-empty", art!!.isNotEmpty())
             release()
         }
         Unit
