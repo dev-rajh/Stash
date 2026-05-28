@@ -41,6 +41,7 @@ fun StashScaffold(
     val navController = rememberNavController()
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = navBackStackEntry?.destination?.route
+    val isNowPlayingRoute = currentRoute == NowPlayingRoute::class.qualifiedName
 
     // Android 13+ runtime permission for notifications. One-shot per install.
     RequestNotificationPermissionOnce()
@@ -83,13 +84,15 @@ fun StashScaffold(
         // (https://x.com/tekno_deha1/status/...).
         bottomBar = {
             Column(modifier = Modifier.windowInsetsPadding(WindowInsets.navigationBars)) {
-                MiniPlayer(
-                    onExpand = {
-                        navController.navigate(NowPlayingRoute) {
-                            launchSingleTop = true
-                        }
-                    },
-                )
+                if (!isNowPlayingRoute) {
+                    MiniPlayer(
+                        onExpand = {
+                            navController.navigate(NowPlayingRoute) {
+                                launchSingleTop = true
+                            }
+                        },
+                    )
+                }
 
                 StashBottomBar(
                     currentRoute = currentRoute,

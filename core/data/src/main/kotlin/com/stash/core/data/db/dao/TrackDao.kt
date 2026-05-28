@@ -132,6 +132,18 @@ data class DownloadedFileRef(
 )
 
 /**
+ * Minimal projection for external-library rescan (B-06). Only includes
+ * fields needed to map a disk file back to an existing track row and
+ * restore its download state.
+ */
+data class ExternalRescanCandidate(
+    val id: Long,
+    val artist: String,
+    val album: String,
+    val title: String,
+)
+
+/**
  * Data-access object for [TrackEntity].
  *
  * Provides CRUD operations, various sorted/filtered queries, full-text
@@ -1533,6 +1545,21 @@ interface TrackDao {
         """
     )
     suspend fun getDownloadedFileRefs(): List<DownloadedFileRef>
+
+    /**
+     * Returns tracks currently marked as not downloaded. Used by the
+     * external-folder rescan to restore `is_downloaded` + `file_path`
+     * after reinstall/data-clear scenarios where files still exist on
+     * disk but DB download flags were lost.
+     */
+    @Query(
+        """
+        SELECT id, artist, album, title
+        FROM tracks
+        WHERE is_downloaded = 0
+        """
+    )
+    suspend fun getExternalRescanCandidates(): List<ExternalRescanCandidate>
 
     /**
      * Bulk-reset rows to undownloaded state. Companion to

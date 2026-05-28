@@ -5,12 +5,14 @@ import android.net.Uri
 import androidx.documentfile.provider.DocumentFile
 import com.stash.core.data.db.dao.AlbumSummary
 import com.stash.core.data.db.dao.ArtistSummary
+import com.stash.core.data.db.dao.ExternalRescanCandidate
 import com.stash.core.data.db.dao.PlaylistDao
 import com.stash.core.data.db.dao.SyncHistoryDao
 import com.stash.core.data.db.dao.TrackDao
 import com.stash.core.data.db.entity.SyncHistoryEntity
 import com.stash.core.data.mapper.toDomain
 import com.stash.core.data.mapper.toEntity
+import com.stash.core.data.prefs.StoragePreference
 import com.stash.core.model.Playlist
 import com.stash.core.model.Track
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -45,6 +47,7 @@ class MusicRepositoryImpl @Inject constructor(
     private val stashMixRecipeDao: com.stash.core.data.db.dao.StashMixRecipeDao,
     private val downloadNetworkPreference: com.stash.core.data.prefs.DownloadNetworkPreference,
     private val streamingPreference: com.stash.core.data.prefs.StreamingPreference,
+    private val storagePreference: StoragePreference,
 ) : MusicRepository {
 
     // ── Deletion event plumbing ─────────────────────────────────────────
@@ -139,6 +142,11 @@ class MusicRepositoryImpl @Inject constructor(
         // 2026-05-12: tracks with FLAC quality + album art + no audible
         // playback because the file was missing.
         reconcileMissingDownloadedFiles()
+        // B-06: reinstall/data-clear recovery. If the user keeps downloads
+        // in an external SAF folder, files can outlive app data. Re-scan
+        // that folder and re-link matching tracks so the library reflects
+        // already-present files instead of re-downloading everything.
+        rescanExternalDownloads()
 
         // Clean up orphaned mix tracks — downloaded tracks whose playlist was
         // refreshed and that no longer belong to any playlist. Deletes their
@@ -159,6 +167,109 @@ class MusicRepositoryImpl @Inject constructor(
             )
         }
     }
+
+    override suspend fun rescanExternalDownloads(): Int {
+        val pending = trackDao.getExternalRescanCandidates()
+        if (pending.isEmpty()) return 0
+
+        val treeUri = storagePreference.externalTreeUri.first() ?: return 0
+        val root = DocumentFile.fromTreeUri(context, treeUri) ?: run {
+            android.util.Log.w("StashMigrations", "external rescan skipped: cannot open tree $treeUri")
+            return 0
+        }
+
+        val index = buildExternalRescanIndex(pending)
+        if (index.isEmpty()) return 0
+
+        var scannedFiles = 0
+        var restored = 0
+        var unmatched = 0
+        val consumedTrackIds = HashSet<Long>()
+        val stack = ArrayDeque<Pair<DocumentFile, List<String>>>()
+        stack.addLast(root to emptyList())
+        while (stack.isNotEmpty()) {
+            val (node, pathSegments) = stack.removeLast()
+            if (node.isDirectory) {
+                node.listFiles().forEach { child ->
+                    val seg = child.name?.takeIf { it.isNotBlank() }
+                    val nextPath = if (seg == null || !child.isDirectory) pathSegments else pathSegments + seg
+                    stack.addLast(child to nextPath)
+                }
+                continue
+            }
+            if (!node.isFile) continue
+
+            val fileName = node.name ?: continue
+            val ext = fileName.substringAfterLast('.', "").lowercase()
+            if (ext !in RESCAN_AUDIO_EXTENSIONS) continue
+            scannedFiles++
+
+            val titleSlug = slugForRescan(fileName.substringBeforeLast('.', fileName))
+            val albumSlug = pathSegments.lastOrNull()?.let(::slugForRescan).orEmpty()
+            val artistSlug = pathSegments.getOrNull(pathSegments.size - 2)?.let(::slugForRescan).orEmpty()
+            if (titleSlug.isBlank() || albumSlug.isBlank() || artistSlug.isBlank()) {
+                unmatched++
+                continue
+            }
+            val key = "$artistSlug|$albumSlug|$titleSlug"
+            val queue = index[key]
+            val match = queue?.firstOrNull { it.id !in consumedTrackIds }
+            if (match == null) {
+                unmatched++
+                continue
+            }
+            runCatching {
+                trackDao.markAsDownloaded(
+                    trackId = match.id,
+                    filePath = node.uri.toString(),
+                    fileSizeBytes = node.length(),
+                )
+            }.onSuccess {
+                consumedTrackIds += match.id
+                restored++
+            }.onFailure {
+                android.util.Log.w("StashMigrations", "external rescan: failed to restore ${match.id}", it)
+            }
+        }
+
+        if (scannedFiles > 0) {
+            android.util.Log.i(
+                "StashMigrations",
+                "external rescan: scanned=$scannedFiles restored=$restored unmatched=$unmatched",
+            )
+        }
+        return restored
+    }
+
+    private fun buildExternalRescanIndex(
+        candidates: List<ExternalRescanCandidate>,
+    ): MutableMap<String, ArrayDeque<ExternalRescanCandidate>> {
+        val map = LinkedHashMap<String, ArrayDeque<ExternalRescanCandidate>>(candidates.size * 2)
+        candidates.forEach { row ->
+            val artistSlug = slugForRescan(row.artist)
+            val titleSlug = slugForRescan(row.title)
+            if (artistSlug.isBlank() || titleSlug.isBlank()) return@forEach
+
+            val albumSlug = slugForRescan(row.album).ifBlank { "singles" }
+            val primaryKey = "$artistSlug|$albumSlug|$titleSlug"
+            map.getOrPut(primaryKey) { ArrayDeque() }.addLast(row)
+
+            if (albumSlug != "singles") {
+                // Many legacy rows have blank album while files are under
+                // singles/, so index a fallback key too.
+                val singlesKey = "$artistSlug|singles|$titleSlug"
+                map.getOrPut(singlesKey) { ArrayDeque() }.addLast(row)
+            }
+        }
+        return map
+    }
+
+    private fun slugForRescan(value: String): String =
+        value.lowercase()
+            .replace(Regex("[^a-z0-9\\s-]"), "")
+            .replace(Regex("\\s+"), "-")
+            .trim('-')
+            .take(80)
 
     /**
      * Verifies every `is_downloaded=1` row's file is actually readable.
@@ -896,6 +1007,9 @@ class MusicRepositoryImpl @Inject constructor(
 
     companion object {
         private const val DOWNLOADS_MIX_SOURCE_ID = "stash_downloads_mix"
+        private val RESCAN_AUDIO_EXTENSIONS = setOf(
+            "m4a", "mp4", "aac", "opus", "ogg", "mp3", "flac", "wav", "alac", "ape", "tta", "wv", "aiff",
+        )
 
         /**
          * WorkManager unique-work names for the five Stash Mix workers. Used
