@@ -173,6 +173,13 @@ class SyncViewModel @Inject constructor(
      * have it stuck at 0 for thousands of rows.
      */
     private val librarySizeHolder: LibrarySizeHolder,
+    /**
+     * Online-vs-offline preference. Drives the Sync Now button label so
+     * users can tell whether tapping it will download tracks to disk
+     * (offline mode) or merely surface the library for streaming
+     * playback (online mode). See [streamingEnabled].
+     */
+    private val streamingPreference: com.stash.core.data.prefs.StreamingPreference,
 ) : ViewModel() {
 
     /**
@@ -215,6 +222,21 @@ class SyncViewModel @Inject constructor(
                 scope = viewModelScope,
                 started = SharingStarted.WhileSubscribed(5_000),
                 initialValue = AuthExpiryState(false, false),
+            )
+
+    /**
+     * Reactive online-streaming-mode flag. The Sync Now button reads
+     * this to pick its label: "Surface Library for Streaming" in Online
+     * mode, "Download Tracks to Device" in Offline mode. Initial value
+     * matches `StreamingPreference.enabled`'s default (false / Offline)
+     * so a not-yet-loaded flow displays the safer download-mode label.
+     */
+    val streamingEnabled: StateFlow<Boolean> =
+        streamingPreference.enabled
+            .stateIn(
+                scope = viewModelScope,
+                started = SharingStarted.WhileSubscribed(5_000),
+                initialValue = false,
             )
 
     private val _uiState = MutableStateFlow(SyncUiState())

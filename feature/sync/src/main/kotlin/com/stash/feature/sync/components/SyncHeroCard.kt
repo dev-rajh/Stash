@@ -24,6 +24,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.stash.core.ui.theme.StashTheme
 
@@ -39,6 +40,9 @@ import com.stash.core.ui.theme.StashTheme
  * @param healthLabel           "✓ healthy" / "! partial" / "× failed" — small status text.
  * @param healthColor           Tint for the health label (success / warning / error).
  * @param isSyncing             True while a sync is in progress.
+ * @param streamingMode         When true, the app is in Online (streaming) mode — the
+ *                              button label switches to "Surface Library for Streaming"
+ *                              so users understand this mode does NOT download tracks.
  * @param onSyncNow             Invoked when the Sync Now button is tapped.
  * @param progressContent       Slot shown when [isSyncing] is true, in place of the button.
  */
@@ -49,6 +53,7 @@ fun SyncHeroCard(
     healthLabel: String,
     healthColor: Color,
     isSyncing: Boolean,
+    streamingMode: Boolean,
     onSyncNow: () -> Unit,
     progressContent: @Composable () -> Unit,
     modifier: Modifier = Modifier,
@@ -120,9 +125,11 @@ fun SyncHeroCard(
                     )
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        text = "Sync Now",
+                        text = if (streamingMode) "Surface Library for Streaming" else "Download Tracks to Device",
                         style = MaterialTheme.typography.bodyLarge,
                         fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
             }
