@@ -125,7 +125,7 @@ class SwapCoordinator @Inject constructor(
                         title = title,
                         format = result.file.extension,
                     )
-                    trackDao.updateYoutubeId(trackId, newVideoId)
+                    trackDao.pinYoutubeVideoId(trackId, newVideoId)
                     trackDao.markAsDownloaded(trackId, committed.filePath, committed.sizeBytes)
                     Log.i(
                         TAG,

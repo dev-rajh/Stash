@@ -354,8 +354,8 @@ fun NowPlayingScreen(
             GlowingProgressBar(
                 progress = uiState.progressFraction,
                 accentColor = uiState.vibrantColor,
-                elapsedMs = uiState.currentPositionMs,
-                totalMs = uiState.durationMs,
+                elapsedMs = uiState.currentPositionMs.coerceAtLeast(0L),
+                totalMs = uiState.durationMs.coerceAtLeast(0L),
                 onSeek = viewModel::onSeekTo,
                 modifier = Modifier.fillMaxWidth(),
             )

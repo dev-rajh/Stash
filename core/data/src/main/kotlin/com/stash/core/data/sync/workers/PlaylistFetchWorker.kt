@@ -432,10 +432,21 @@ class PlaylistFetchWorker @AssistedInject constructor(
                 TAG,
                 "fetchSpotifyPlaylists: paged ${userPlaylists.size} playlists across $pagesFetched page(s)",
             )
-            // Filter out daily mixes (already handled above) and any Spotify-owned playlists
+            // Filter out personalized Spotify mixes already captured from the
+            // Home feed, but keep saved/public Spotify-owned playlists.
             val customPlaylists = userPlaylists.filter { playlist ->
-                !playlist.owner.id.equals("spotify", ignoreCase = true) &&
-                    !playlist.name.matches(Regex("""Daily Mix \d+"""))
+                val normalizedName = playlist.name.lowercase()
+                val isSpotifyOwned = playlist.owner.id.equals("spotify", ignoreCase = true)
+                val isHomeMixDuplicate = playlist.name.matches(Regex("""Daily Mix \d+""")) ||
+                    normalizedName in setOf(
+                        "discover weekly",
+                        "release radar",
+                        "on repeat",
+                        "repeat rewind",
+                        "time capsule",
+                        "daylist",
+                    )
+                !(isSpotifyOwned && isHomeMixDuplicate)
             }
             Log.d(TAG, "fetchSpotifyPlaylists: found ${customPlaylists.size} user playlists (filtered from ${userPlaylists.size})")
 

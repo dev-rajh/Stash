@@ -318,6 +318,12 @@ class SettingsViewModel @Inject constructor(
     fun setExternalStorageUri(uri: Uri?) {
         viewModelScope.launch {
             storagePreference.setExternalTreeUri(uri)
+            if (uri != null) {
+                // B-06: user may have just re-pointed Stash at an existing
+                // external library after reinstall/data-clear. Re-scan now
+                // so already-downloaded files are restored immediately.
+                musicRepository.rescanExternalDownloads()
+            }
         }
     }
 
