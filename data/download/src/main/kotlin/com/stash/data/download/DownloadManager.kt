@@ -474,6 +474,13 @@ class DownloadManager @Inject constructor(
      *         with the best rejected candidate's video ID if no match was accepted.
      */
     private suspend fun resolveUrl(track: Track): ResolveResult {
+        // If the user approved a manual match, use it exactly. This is
+        // intentionally checked before youtubeId so a future re-sync cannot
+        // silently replace the user's chosen video.
+        track.pinnedYoutubeVideoId?.takeIf { it.isNotBlank() }?.let { videoId ->
+            return ResolveResult(url = "https://www.youtube.com/watch?v=$videoId")
+        }
+
         // If we already have a YouTube ID, use it directly — except for
         // YT-library-sourced tracks, which get canonicalized: the imported
         // videoId may point at an OMV / UGC / PODCAST, and the canonicalizer

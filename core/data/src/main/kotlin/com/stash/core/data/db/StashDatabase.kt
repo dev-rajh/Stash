@@ -73,7 +73,7 @@ import com.stash.core.data.db.entity.TrackTagEntity
         TrackSkipEventEntity::class,
         LyricsEntity::class,
     ],
-    version = 28,
+    version = 29,
     exportSchema = true,
 )
 @TypeConverters(Converters::class)
@@ -769,6 +769,17 @@ abstract class StashDatabase : RoomDatabase() {
                     )
                 """.trimIndent())
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_lyrics_track_id ON lyrics(track_id)")
+            }
+        }
+
+        /**
+         * v28 -> v29: persist user-approved manual YouTube matches. A
+         * non-null value means the matcher must skip search and use that
+         * exact video ID on future sync/download attempts.
+         */
+        val MIGRATION_28_29 = object : Migration(28, 29) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE tracks ADD COLUMN pinned_youtube_video_id TEXT")
             }
         }
     }

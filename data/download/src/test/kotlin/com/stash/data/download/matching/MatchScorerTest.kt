@@ -12,8 +12,8 @@ import org.junit.Test
  * Contract tests for [MatchScorer].
  *
  * Locks in the Phase 3 scoring rules:
- *  - duration hard gate (±15s) — prevents the Smooth Criminal 9:25-vs-4:18 class
- *  - musicVideoType structural signal replaces title-keyword MV penalty
+ *  - duration hard gate (±8s) — prevents the Smooth Criminal 9:25-vs-4:18 class
+ *  - musicVideoType structural signal augments title-keyword MV penalty
  *  - UGC and PODCAST_EPISODE are effectively rejected
  *  - variant-title penalty expanded (sped up, nightcore, slowed, edit, extended)
  */
@@ -50,10 +50,16 @@ class MatchScorerTest {
     // ── Phase 3a: duration hard gate ─────────────────────────────────────
 
     @Test
-    fun `durationPassesHardGate accepts within 15s tolerance`() {
+    fun `durationPassesHardGate accepts within 8s tolerance`() {
         assertTrue(scorer.durationPassesHardGate(targetMs = 258_000, candidateDurationSec = 258))
-        assertTrue(scorer.durationPassesHardGate(targetMs = 258_000, candidateDurationSec = 270))
-        assertTrue(scorer.durationPassesHardGate(targetMs = 258_000, candidateDurationSec = 243))
+        assertTrue(scorer.durationPassesHardGate(targetMs = 258_000, candidateDurationSec = 266))
+        assertTrue(scorer.durationPassesHardGate(targetMs = 258_000, candidateDurationSec = 250))
+    }
+
+    @Test
+    fun `durationPassesHardGate rejects beyond 8s tolerance`() {
+        assertFalse(scorer.durationPassesHardGate(targetMs = 258_000, candidateDurationSec = 267))
+        assertFalse(scorer.durationPassesHardGate(targetMs = 258_000, candidateDurationSec = 249))
     }
 
     @Test
@@ -188,6 +194,64 @@ class MatchScorerTest {
             ),
         )
         assertEquals("original", results.first().videoId)
+    }
+
+    @Test
+    fun `official video title variant is penalized when structured video type is absent`() {
+        val results = scorer.scoreResults(
+            targetTitle = "Blinding Lights",
+            targetArtist = "The Weeknd",
+            targetDurationMs = 200_000,
+            results = listOf(
+                candidate(
+                    id = "video",
+                    title = "The Weeknd - Blinding Lights (Official Video)",
+                    artist = "The Weeknd",
+                    channel = "The Weeknd",
+                    durationSec = 200.0,
+                    viewCount = 900_000_000,
+                    musicVideoType = null,
+                ),
+                candidate(
+                    id = "audio",
+                    title = "Blinding Lights",
+                    artist = "The Weeknd",
+                    channel = "The Weeknd - Topic",
+                    durationSec = 200.0,
+                    viewCount = 50_000_000,
+                    musicVideoType = null,
+                ),
+            ),
+        )
+        assertEquals("audio", results.first().videoId)
+    }
+
+    @Test
+    fun `clean title variant is penalized against an unlabelled target`() {
+        val results = scorer.scoreResults(
+            targetTitle = "Some Song",
+            targetArtist = "Some Artist",
+            targetDurationMs = 180_000,
+            results = listOf(
+                candidate(
+                    id = "clean",
+                    title = "Some Song (Clean Version)",
+                    artist = "Some Artist",
+                    channel = "Some Artist - Topic",
+                    durationSec = 180.0,
+                    viewCount = 100_000,
+                ),
+                candidate(
+                    id = "album",
+                    title = "Some Song",
+                    artist = "Some Artist",
+                    channel = "Some Artist - Topic",
+                    durationSec = 180.0,
+                    viewCount = 100_000,
+                ),
+            ),
+        )
+        assertEquals("album", results.first().videoId)
     }
 
     // ── Phase 3c: explicit-vs-title demotion ─────────────────────────────

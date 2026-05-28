@@ -13,6 +13,7 @@ data class Track(
     val source: MusicSource = MusicSource.SPOTIFY,
     val spotifyUri: String? = null,
     val youtubeId: String? = null,
+    val pinnedYoutubeVideoId: String? = null,
     val albumArtUrl: String? = null,
     val albumArtPath: String? = null,
     val dateAdded: Long = System.currentTimeMillis(),
