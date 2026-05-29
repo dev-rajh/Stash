@@ -76,6 +76,11 @@ interface StashMixRecipeDao {
     @Query("DELETE FROM stash_mix_recipes WHERE is_builtin = 1")
     suspend fun deleteAllBuiltins(): Int
 
+    /** Deletes a USER recipe (never a builtin). Caller deletes the materialized
+     *  playlist separately (FK is SET_NULL, not CASCADE). */
+    @Query("DELETE FROM stash_mix_recipes WHERE id = :id AND is_builtin = 0")
+    suspend fun deleteCustom(id: Long)
+
     /**
      * v0.9.26 — flip `is_active` on every built-in mix recipe in one
      * shot. Used by the Stash-Mixes opt-out toggle: setting `active = 0`
