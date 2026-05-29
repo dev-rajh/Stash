@@ -57,6 +57,7 @@ import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Download
@@ -124,6 +125,7 @@ fun HomeScreen(
     onNavigateToPlaylist: (Long) -> Unit = {},
     onNavigateToLikedSongs: (String?) -> Unit = {},
     onNavigateToSettings: () -> Unit = {},
+    onNavigateToMixBuilder: (Long?) -> Unit = {},
     viewModel: HomeViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -432,22 +434,34 @@ fun HomeScreen(
         // v0.4.1: sits BELOW the sync-sourced Daily Mixes while the
         // feature is in beta. Once it graduates, this block can move
         // back up so user-generated mixes feel primary.
-        if (uiState.stashMixes.isNotEmpty()) {
-            item {
-                SectionHeader(title = "Stash Mixes  (Beta)")
-            }
-            item {
-                LazyRow(
-                    contentPadding = PaddingValues(horizontal = 16.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    items(uiState.stashMixes, key = { it.id }) { playlist ->
-                        DailyMixCard(
-                            playlist = playlist,
-                            onClick = { onNavigateToPlaylist(playlist.id) },
-                            onLongPress = { selectedPlaylist = playlist },
-                        )
-                    }
+        //
+        // The header + row render unconditionally (no `stashMixes.isNotEmpty`
+        // gate) so the trailing "Create mix" tile is ALWAYS reachable, even
+        // for a user with zero mixes. When mixes exist the layout is
+        // identical to before — they render first, Create tile last.
+        item {
+            SectionHeader(title = "Stash Mixes  (Beta)")
+        }
+        item {
+            LazyRow(
+                contentPadding = PaddingValues(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                items(uiState.stashMixes, key = { it.id }) { playlist ->
+                    DailyMixCard(
+                        playlist = playlist,
+                        onClick = {
+                            // Opening a stale custom mix transparently
+                            // refreshes it (fire-and-forget; no-ops for
+                            // builtins + non-stale mixes).
+                            viewModel.refreshMixIfStale(playlist.id)
+                            onNavigateToPlaylist(playlist.id)
+                        },
+                        onLongPress = { selectedPlaylist = playlist },
+                    )
+                }
+                item {
+                    CreateMixCard(onClick = { onNavigateToMixBuilder(null) })
                 }
             }
         }
@@ -648,6 +662,33 @@ fun HomeScreen(
                     label = "Refresh this mix",
                     onClick = {
                         viewModel.refreshMix(playlist.id)
+                        selectedPlaylist = null
+                    },
+                )
+            }
+
+            // Edit / Delete — only for user-built (non-builtin) Stash Mixes.
+            // Gated on customMixPlaylistIds so builtin recipe playlists (which
+            // can't be edited or deleted here) never surface these rows.
+            if (uiState.customMixPlaylistIds.contains(playlist.id)) {
+                HomeBottomSheetActionRow(
+                    icon = Icons.Default.Edit,
+                    label = "Edit mix",
+                    onClick = {
+                        // Resolve the recipe id async, then route to the
+                        // builder. Dismiss the sheet immediately.
+                        viewModel.editRecipeId(playlist.id) { recipeId ->
+                            onNavigateToMixBuilder(recipeId)
+                        }
+                        selectedPlaylist = null
+                    },
+                )
+                HomeBottomSheetActionRow(
+                    icon = Icons.Default.Delete,
+                    label = "Delete mix",
+                    tint = MaterialTheme.colorScheme.error,
+                    onClick = {
+                        viewModel.deleteCustomMix(playlist)
                         selectedPlaylist = null
                     },
                 )
@@ -1492,6 +1533,65 @@ private fun CreatePlaylistCard(
                 color = MaterialTheme.colorScheme.onSurface,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+// ── Create mix card ──────────────────────────────────────────────────────
+
+/**
+ * Trailing tile in the Stash Mixes row. Tapping it opens the Mix Builder
+ * to create a brand-new custom mix (recipeId = null). Sized to match
+ * [DailyMixCard] (180×120) so the row reads consistently, but styled with a
+ * dashed glass border to signal "add", mirroring the Playlists grid's
+ * [CreatePlaylistCard] affordance.
+ */
+@Composable
+private fun CreateMixCard(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val extendedColors = StashTheme.extendedColors
+    val accent = MaterialTheme.colorScheme.primary
+
+    Box(
+        modifier = modifier
+            .width(180.dp)
+            .height(120.dp)
+            .clip(RoundedCornerShape(16.dp))
+            .background(extendedColors.glassBackground)
+            .drawBehind {
+                val stroke = androidx.compose.ui.graphics.drawscope.Stroke(
+                    width = 1.dp.toPx(),
+                    pathEffect = androidx.compose.ui.graphics.PathEffect.dashPathEffect(
+                        floatArrayOf(8.dp.toPx(), 6.dp.toPx()),
+                        0f,
+                    ),
+                )
+                drawRoundRect(
+                    color = accent.copy(alpha = 0.5f),
+                    style = stroke,
+                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(16.dp.toPx()),
+                )
+            }
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Icon(
+                imageVector = Icons.Default.Add,
+                contentDescription = null,
+                tint = accent,
+                modifier = Modifier.size(22.dp),
+            )
+            Text(
+                text = "Create mix",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurface,
             )
         }
     }
