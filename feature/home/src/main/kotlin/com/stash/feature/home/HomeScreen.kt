@@ -447,6 +447,10 @@ fun HomeScreen(
                 contentPadding = PaddingValues(horizontal = 16.dp),
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
+                // Create tile leads the row (a compact "add" affordance).
+                item {
+                    CreateMixCard(onClick = { onNavigateToMixBuilder(null) })
+                }
                 items(uiState.stashMixes, key = { it.id }) { playlist ->
                     DailyMixCard(
                         playlist = playlist,
@@ -459,9 +463,6 @@ fun HomeScreen(
                         },
                         onLongPress = { selectedPlaylist = playlist },
                     )
-                }
-                item {
-                    CreateMixCard(onClick = { onNavigateToMixBuilder(null) })
                 }
             }
         }
@@ -1541,11 +1542,10 @@ private fun CreatePlaylistCard(
 // ── Create mix card ──────────────────────────────────────────────────────
 
 /**
- * Trailing tile in the Stash Mixes row. Tapping it opens the Mix Builder
- * to create a brand-new custom mix (recipeId = null). Sized to match
- * [DailyMixCard] (180×120) so the row reads consistently, but styled with a
- * dashed glass border to signal "add", mirroring the Playlists grid's
- * [CreatePlaylistCard] affordance.
+ * Leading tile in the Stash Mixes row. Tapping it opens the Mix Builder
+ * to create a brand-new custom mix (recipeId = null). Compact (104×120 — a
+ * narrow "add" affordance, not a full 180-wide mix card) with a dashed glass
+ * border, mirroring the Playlists grid's [CreatePlaylistCard] affordance.
  */
 @Composable
 private fun CreateMixCard(
@@ -1557,7 +1557,7 @@ private fun CreateMixCard(
 
     Box(
         modifier = modifier
-            .width(180.dp)
+            .width(104.dp)
             .height(120.dp)
             .clip(RoundedCornerShape(16.dp))
             .background(extendedColors.glassBackground)
@@ -1578,20 +1578,21 @@ private fun CreateMixCard(
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             Icon(
                 imageVector = Icons.Default.Add,
                 contentDescription = null,
                 tint = accent,
-                modifier = Modifier.size(22.dp),
+                modifier = Modifier.size(24.dp),
             )
             Text(
-                text = "Create mix",
-                style = MaterialTheme.typography.labelLarge,
+                text = "Create\nmix",
+                style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurface,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
             )
         }
     }
