@@ -29,10 +29,26 @@ class MixRecipeFormTest {
         val r = MixRecipeForm(name = "X", genreTags = setOf("rock")).toRecipe(existingId = 42L)
         assertEquals(42L, r.id)
     }
-    @Test fun `isValid requires a name and at least one genre or mood`() {
-        assertFalse(MixRecipeForm(name = "", genreTags = setOf("rock")).isValid)
+    @Test fun `isValid requires at least one genre or mood, name optional`() {
+        // Name is OPTIONAL now — a genre alone is enough.
+        assertTrue(MixRecipeForm(name = "", genreTags = setOf("rock")).isValid)
+        assertTrue(MixRecipeForm(name = "", moodKeys = setOf("chill")).isValid)
+        // But you still need at least one genre or mood.
         assertFalse(MixRecipeForm(name = "X").isValid)
-        assertTrue(MixRecipeForm(name = "X", genreTags = setOf("rock")).isValid)
-        assertTrue(MixRecipeForm(name = "X", moodKeys = setOf("chill")).isValid)
+        assertFalse(MixRecipeForm(name = "").isValid)
+    }
+
+    @Test fun `displayName auto-generates from picks when name blank`() {
+        val f = MixRecipeForm(name = "", genreTags = setOf("jazz", "soul"))
+        assertEquals("Jazz · Soul Mix", f.displayName)
+        // a mood-only blank-name mix still gets a name
+        assertEquals("Chill Mix", MixRecipeForm(name = "", moodKeys = setOf("chill")).displayName)
+        // explicit name always wins
+        assertEquals("My Mix", MixRecipeForm(name = "My Mix", genreTags = setOf("jazz")).displayName)
+    }
+
+    @Test fun `toRecipe uses auto-name when the form name is blank`() {
+        val r = MixRecipeForm(name = "  ", genreTags = setOf("jazz")).toRecipe(existingId = null)
+        assertEquals("Jazz Mix", r.name)
     }
 }

@@ -12,12 +12,26 @@ data class MixRecipeForm(
     val discoveryRatio: Float = 0.85f,
     val targetLength: Int = 40,
 ) {
+    /**
+     * A mix is saveable as soon as it has at least one genre or mood. The name
+     * is OPTIONAL — if left blank we auto-generate one from the picks (see
+     * [displayName]). This keeps "create from my preferences" friction-free.
+     */
     val isValid: Boolean
-        get() = name.isNotBlank() && (genreTags.isNotEmpty() || moodKeys.isNotEmpty())
+        get() = genreTags.isNotEmpty() || moodKeys.isNotEmpty()
+
+    /** The effective name: the user's trimmed input, or an auto-name from the picks. */
+    val displayName: String
+        get() = name.trim().ifBlank { autoName() }
+
+    private fun autoName(): String {
+        val parts = (genreTags + moodKeys).take(2).map { it.replaceFirstChar(Char::uppercase) }
+        return if (parts.isEmpty()) "New Mix" else parts.joinToString(" · ") + " Mix"
+    }
 
     fun toRecipe(existingId: Long?): StashMixRecipeEntity = StashMixRecipeEntity(
         id = existingId ?: 0L,
-        name = name.trim(),
+        name = displayName,
         includeTagsCsv = genreTags.joinToString(","),
         moodKeysCsv = moodKeys.joinToString(","),
         eraStartYear = eraStartYear,

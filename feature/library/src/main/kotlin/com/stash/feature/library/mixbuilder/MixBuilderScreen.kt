@@ -117,7 +117,7 @@ fun MixBuilderScreen(
                 onValueChange = viewModel::setName,
                 placeholder = {
                     Text(
-                        text = "Mix name",
+                        text = "Mix name (optional)",
                         style = MaterialTheme.typography.titleMedium,
                         color = StashTheme.extendedColors.textTertiary,
                     )
@@ -215,7 +215,7 @@ fun MixBuilderScreen(
             GlassCard {
                 Column(modifier = Modifier.fillMaxWidth()) {
                     Text(
-                        text = state.form.name.ifBlank { "Untitled mix" },
+                        text = if (state.form.isValid) state.form.displayName else "Untitled mix",
                         style = MaterialTheme.typography.titleMedium,
                         color = MaterialTheme.colorScheme.onSurface,
                         maxLines = 1,
