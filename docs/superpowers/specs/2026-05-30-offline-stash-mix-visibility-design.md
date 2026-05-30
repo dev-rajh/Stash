@@ -39,6 +39,11 @@ covers the DAO + the playlist **detail** screen, but **not** the Home screen's p
   "show all + per-tap toast").
 - Pushing queue-playability into `MusicRepository` (over-engineered for two call sites).
 - Changing any non-`STASH_MIX` playlist behavior.
+- The aggregate Home actions `playAllMixes` and `playLikedSongs` (they use the same inline
+  filter and will still collapse mixes to downloaded-only when offline). Scope is the
+  single-mix entry points `playPlaylist` + `addPlaylistToQueue`. If a user reports "play all
+  mixes" is empty offline, extending those two is a trivial follow-up using the same helper —
+  deliberately deferred to keep this change focused.
 - Fixing the pre-existing red `:core:data` DAO test unless this change touches it (confirm it
   pre-dates this on `master`; note, don't chase).
 
