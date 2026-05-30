@@ -81,12 +81,14 @@ class SpotifyApiClientTest {
             """.trimIndent(),
         ).let { it as kotlinx.serialization.json.JsonObject }
 
-        val playlists = client.parseLibraryResponse(response)
+        val page = client.parseLibraryResponse(response)
+        val playlists = page.playlists
 
         assertEquals(listOf("top-level", "child-one", "child-two"), playlists.map { it.id })
         assertEquals(listOf("Top Level", "Child One", "Child Two"), playlists.map { it.name })
         assertEquals("spotify", playlists.last().owner.id)
         assertEquals("Spotify", playlists.last().owner.display_name)
+        assertEquals(2, page.rawItemCount)
     }
 
     @Test
@@ -130,7 +132,7 @@ class SpotifyApiClientTest {
             """.trimIndent(),
         ).let { it as kotlinx.serialization.json.JsonObject }
 
-        val playlists = client.parseLibraryResponse(response)
+        val playlists = client.parseLibraryResponse(response).playlists
 
         assertEquals(1, playlists.size)
         assertEquals("dup", playlists.single().id)
@@ -162,7 +164,7 @@ class SpotifyApiClientTest {
             """.trimIndent(),
         ).let { it as kotlinx.serialization.json.JsonObject }
 
-        val playlists = client.parseLibraryResponse(response)
+        val playlists = client.parseLibraryResponse(response).playlists
 
         assertEquals(emptyList<String>(), playlists.map { it.id })
         assertNull(playlists.firstOrNull())

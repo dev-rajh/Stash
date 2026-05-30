@@ -3,6 +3,7 @@ package com.stash.feature.sync
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.foundation.layout.Arrangement
@@ -23,6 +24,7 @@ import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
@@ -37,6 +39,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -209,6 +212,7 @@ fun SyncScreen(
                             uiState = uiState,
                             onSyncModeChanged = viewModel::onSpotifySyncModeChanged,
                             onPlaylistToggled = viewModel::onTogglePlaylistSync,
+                            onRefreshPlaylists = viewModel::onSyncNow,
                         )
                     },
                 )
@@ -245,6 +249,7 @@ fun SyncScreen(
                             onSyncModeChanged = viewModel::onYoutubeSyncModeChanged,
                             onStudioOnlyChanged = viewModel::onYoutubeLikedStudioOnlyChanged,
                             onPlaylistToggled = viewModel::onTogglePlaylistSync,
+                            onRefreshPlaylists = viewModel::onSyncNow,
                         )
                     },
                 )
@@ -706,6 +711,7 @@ private fun SpotifyExpandedContent(
     uiState: SyncUiState,
     onSyncModeChanged: (SyncMode) -> Unit,
     onPlaylistToggled: (Long, Boolean) -> Unit,
+    onRefreshPlaylists: () -> Unit,
 ) {
     val purple = MaterialTheme.colorScheme.primary
     if (uiState.spotifyPlaylists.isEmpty()) {
@@ -722,6 +728,12 @@ private fun SpotifyExpandedContent(
             mode = uiState.spotifySyncMode,
             onChange = onSyncModeChanged,
             accent = purple,
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        RefreshPlaylistsRow(
+            label = "Refresh Spotify playlists",
+            accent = purple,
+            onClick = onRefreshPlaylists,
         )
         Spacer(modifier = Modifier.height(8.dp))
 
@@ -829,6 +841,7 @@ private fun <T> SearchablePlaylistList(
     onPlaylistToggled: (Long, Boolean) -> Unit,
 ) {
     var query by remember { mutableStateOf("") }
+    var sort by remember { mutableStateOf(PlaylistListSort.NAME) }
     OutlinedTextField(
         value = query,
         onValueChange = { query = it },
@@ -855,12 +868,34 @@ private fun <T> SearchablePlaylistList(
             }
         } else null,
     )
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+            .padding(top = 4.dp, bottom = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        PlaylistListSort.entries.forEach { option ->
+            FilterChip(
+                selected = sort == option,
+                onClick = { sort = option },
+                label = { Text(option.label) },
+            )
+        }
+    }
     val filtered = if (query.isBlank()) {
         items
     } else {
         items.filter { name(it).contains(query.trim(), ignoreCase = true) }
     }
-    if (filtered.isEmpty()) {
+    val ordered = when (sort) {
+        PlaylistListSort.NAME -> filtered.sortedBy { name(it).lowercase() }
+        PlaylistListSort.TRACKS -> filtered.sortedByDescending { trackCount(it) }
+        PlaylistListSort.ENABLED -> filtered.sortedWith(
+            compareByDescending<T> { enabled(it) }.thenBy { name(it).lowercase() },
+        )
+    }
+    if (ordered.isEmpty()) {
         Text(
             text = "No playlists matching \u201C${query.trim()}\u201D",
             style = MaterialTheme.typography.bodySmall,
@@ -868,7 +903,7 @@ private fun <T> SearchablePlaylistList(
             modifier = Modifier.padding(vertical = 8.dp),
         )
     } else {
-        filtered.forEach { playlist ->
+        ordered.forEach { playlist ->
             SpotifySyncToggleRow(
                 name = name(playlist),
                 trackCount = trackCount(playlist),
@@ -923,6 +958,7 @@ private fun YouTubeExpandedContent(
     onSyncModeChanged: (SyncMode) -> Unit,
     onStudioOnlyChanged: (Boolean) -> Unit,
     onPlaylistToggled: (Long, Boolean) -> Unit,
+    onRefreshPlaylists: () -> Unit,
 ) {
     val accent = MaterialTheme.colorScheme.primary
     val hasPlaylists = uiState.youTubePlaylists.isNotEmpty()
@@ -947,6 +983,12 @@ private fun YouTubeExpandedContent(
             enabled = uiState.youtubeLikedStudioOnly,
             onChange = onStudioOnlyChanged,
             accent = accent,
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        RefreshPlaylistsRow(
+            label = "Refresh YouTube playlists",
+            accent = accent,
+            onClick = onRefreshPlaylists,
         )
         Spacer(modifier = Modifier.height(8.dp))
 
@@ -1004,6 +1046,53 @@ private fun YouTubeExpandedContent(
                 enabled = { it.syncEnabled },
                 id = { it.id },
                 onPlaylistToggled = onPlaylistToggled,
+            )
+        }
+    }
+}
+
+private enum class PlaylistListSort(val label: String) {
+    NAME("A-Z"),
+    TRACKS("Tracks"),
+    ENABLED("Enabled"),
+}
+
+@Composable
+private fun RefreshPlaylistsRow(
+    label: String,
+    accent: Color,
+    onClick: () -> Unit,
+) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick),
+        color = Color.Transparent,
+        shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(1.dp, accent.copy(alpha = 0.25f)),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Icon(
+                imageVector = Icons.Filled.Sync,
+                contentDescription = null,
+                tint = accent,
+            )
+            Text(
+                text = label,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.weight(1f),
+            )
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
     }

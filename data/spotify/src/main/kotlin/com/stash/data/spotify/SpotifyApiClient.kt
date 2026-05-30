@@ -103,6 +103,11 @@ class SpotifyApiClient @Inject constructor(
         )
     }
 
+    data class LibraryPlaylistsPage(
+        val playlists: List<SpotifyPlaylistItem>,
+        val rawItemCount: Int,
+    )
+
     // ── Client Credentials Token Cache ──────────────────────────────────
 
     /**
@@ -181,10 +186,10 @@ class SpotifyApiClient @Inject constructor(
      * The previous Web API endpoint (/v1/users/{id}/playlists) was removed
      * by Spotify in February 2026.
      */
-    suspend fun getUserPlaylists(
+    suspend fun getUserPlaylistsPage(
         limit: Int = DEFAULT_LIMIT,
         offset: Int = 0,
-    ): List<SpotifyPlaylistItem> = withContext(Dispatchers.IO) {
+    ): LibraryPlaylistsPage = withContext(Dispatchers.IO) {
         Log.d(TAG, "getUserPlaylists: limit=$limit, offset=$offset (via GraphQL libraryV3)")
 
         try {
@@ -204,16 +209,19 @@ class SpotifyApiClient @Inject constructor(
             )
 
             if (responseJson != null) {
-                val playlists = parseLibraryResponse(responseJson)
-                Log.d(TAG, "getUserPlaylists: parsed ${playlists.size} playlists from libraryV3")
-                playlists
+                val page = parseLibraryResponse(responseJson)
+                Log.d(
+                    TAG,
+                    "getUserPlaylists: parsed ${page.playlists.size} playlists from ${page.rawItemCount} raw library item(s)",
+                )
+                page
             } else {
                 Log.w(TAG, "getUserPlaylists: GraphQL returned null")
-                emptyList()
+                LibraryPlaylistsPage(emptyList(), 0)
             }
         } catch (e: Exception) {
             Log.e(TAG, "getUserPlaylists: GraphQL libraryV3 failed", e)
-            emptyList()
+            LibraryPlaylistsPage(emptyList(), 0)
         }
     }
 
@@ -502,7 +510,7 @@ class SpotifyApiClient @Inject constructor(
                     val refreshedToken = getClientCredentialsToken() ?: return null
                     Log.d(TAG, "tryGetPlaylistTracksViaWebApi: retrying with refreshed token")
                     val retryRequest = Request.Builder()
-                        .url(url!!)
+                        .url(url)
                         .get()
                         .header("Authorization", "Bearer $refreshedToken")
                         .header("Accept", "application/json")
@@ -800,7 +808,7 @@ class SpotifyApiClient @Inject constructor(
     /**
      * Parses the `libraryV3` GraphQL response into [SpotifyPlaylistItem] objects.
      */
-    internal fun parseLibraryResponse(responseJson: JsonObject): List<SpotifyPlaylistItem> {
+    internal fun parseLibraryResponse(responseJson: JsonObject): LibraryPlaylistsPage {
         return try {
             val items = responseJson["data"]
                 ?.jsonObject?.get("me")
@@ -813,7 +821,7 @@ class SpotifyApiClient @Inject constructor(
                 Log.d(TAG, "parseLibraryResponse: top-level keys: ${responseJson.keys}")
                 val dataKeys = responseJson["data"]?.jsonObject?.keys
                 Log.d(TAG, "parseLibraryResponse: data keys: $dataKeys")
-                return emptyList()
+                return LibraryPlaylistsPage(emptyList(), 0)
             }
 
             Log.d(TAG, "parseLibraryResponse: found ${items.size} library items")
@@ -826,12 +834,18 @@ class SpotifyApiClient @Inject constructor(
                     Log.w(TAG, "parseLibraryResponse: failed to parse library node", e)
                 }
             }
-            playlistsById.values.toList().also { playlists ->
-                Log.d(TAG, "parseLibraryResponse: parsed ${playlists.size} playlists total")
+            LibraryPlaylistsPage(
+                playlists = playlistsById.values.toList(),
+                rawItemCount = items.size,
+            ).also { page ->
+                Log.d(
+                    TAG,
+                    "parseLibraryResponse: parsed ${page.playlists.size} playlists total from ${page.rawItemCount} raw item(s)",
+                )
             }
         } catch (e: Exception) {
             Log.e(TAG, "parseLibraryResponse: failed to parse response", e)
-            emptyList()
+            LibraryPlaylistsPage(emptyList(), 0)
         }
     }
 
