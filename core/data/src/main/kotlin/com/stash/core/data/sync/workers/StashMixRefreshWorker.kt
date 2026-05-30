@@ -34,6 +34,7 @@ import com.stash.core.data.mix.MixSeedStrategy
 import com.stash.core.data.mix.RecipeTagResolver
 import com.stash.core.data.mix.StashMixDefaults
 import com.stash.core.data.mix.TagPoolBuilder
+import com.stash.core.data.prefs.DownloadNetworkPreference
 import com.stash.core.data.sync.TrackMatcher
 import com.stash.core.model.MusicSource
 import com.stash.core.model.PlaylistType
@@ -88,6 +89,7 @@ class StashMixRefreshWorker @AssistedInject constructor(
     private val trackSkipEventDao: TrackSkipEventDao,
     private val tagPoolBuilder: TagPoolBuilder,
     private val trackMatcher: TrackMatcher,
+    private val downloadNetworkPreference: DownloadNetworkPreference,
 ) : CoroutineWorker(appContext, params) {
 
     companion object {
@@ -335,6 +337,21 @@ class StashMixRefreshWorker @AssistedInject constructor(
         // initialised in a unit-test JVM throws IllegalStateException).
         runCatching { ArtBackfillWorker.enqueueFromMixRefresh(applicationContext) }
             .onFailure { Log.w(TAG, "art-backfill enqueue failed; refresh still succeeded", it) }
+
+        // Drain the discovery_queue we just FILLED. queueDiscoveryForRecipe
+        // above only enqueues PENDING candidate rows — it does not turn them
+        // into stream-only stubs; StashDiscoveryWorker does. Without this kick
+        // a freshly-created/refreshed mix sits empty ("Building your mix…")
+        // until the once-daily periodic sweep happens to run, because the
+        // only other drain trigger — the parallel kick in MixBuilderViewModel
+        // .save() — races this fill and usually runs before the PENDING rows
+        // exist (the Last.fm tag queries here take seconds). Kicking the drain
+        // at the END of the fill closes that race for every refresh path
+        // (create, manual "Refresh this mix", periodic). Guarded + REPLACE:
+        // a test-JVM WorkManager throws, and rapid double-fills coalesce.
+        runCatching {
+            StashDiscoveryWorker.enqueueOneTime(applicationContext, downloadNetworkPreference.current())
+        }.onFailure { Log.w(TAG, "discovery drain enqueue failed; refresh still succeeded", it) }
 
         return Result.success()
     }
