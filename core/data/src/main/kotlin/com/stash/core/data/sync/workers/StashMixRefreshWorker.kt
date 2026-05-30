@@ -524,12 +524,18 @@ class StashMixRefreshWorker @AssistedInject constructor(
         }
         val totalCount = tracks.size + discoveryTrackIds.size
 
-        // v0.4.1: single-image cover instead of the 2-tile mosaic used in
-        // older builds. Still rotates every refresh — the top track's
-        // album art becomes the mix cover.
-        val coverUrl = tracks.mapNotNull { it.albumArtUrl }.firstOrNull()
-        if (coverUrl != null) {
-            playlistDao.updateArtUrl(playlistId, coverUrl)
+        // v0.9.40: build an album mosaic from the FULL linked track set
+        // (library slice + stream-only discovery survivors), not just the
+        // library `tracks` — otherwise 100%-discovery mixes (every custom mix
+        // and First Listen) get a blank cover even though their stream-only
+        // tracks carry album art. Up to 4 distinct arts, "|"-joined: the mix
+        // card renders a tile mosaic, and single-image call sites take the
+        // first (PlaylistMapper). Recomputed every refresh, so the mosaic
+        // fills in once stub art is backfilled. Query runs AFTER the cross-refs
+        // above so it sees the full membership.
+        val coverArtUrls = playlistDao.getCoverArtUrlsForPlaylist(playlistId, limit = 4)
+        if (coverArtUrls.isNotEmpty()) {
+            playlistDao.updateArtUrl(playlistId, coverArtUrls.joinToString("|"))
         }
         playlistDao.updateTrackCount(playlistId, totalCount)
         return MaterializeResult(playlistId, discoveryTrackIds)
