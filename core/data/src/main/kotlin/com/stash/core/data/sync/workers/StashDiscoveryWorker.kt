@@ -223,6 +223,9 @@ class StashDiscoveryWorker @AssistedInject constructor(
                 discoveryQueueDao.getPendingForRecipe(rid, perRecipeQuota)
             }
         }
+        // Count stream-only stubs created/reused this run so we can trigger a
+        // (network-only) re-materialize afterwards — see the post-loop kick.
+        var newlyMaterialized = 0
         if (pending.isEmpty()) {
             Log.d(TAG, "no pending discoveries")
             // Don't return early — fall through to the chain. download_queue
@@ -259,6 +262,7 @@ class StashDiscoveryWorker @AssistedInject constructor(
                 val result = handle(entry, now)
                 if (result.trackId != null) {
                     recipeBudget[entry.recipeId] = used + 1
+                    newlyMaterialized++
                 }
                 discoveryQueueDao.updateStatus(
                     id = entry.id,
@@ -268,6 +272,22 @@ class StashDiscoveryWorker @AssistedInject constructor(
                     errorMessage = result.error,
                 )
             }
+        }
+
+        // Stream-only stubs need no download — only a materialize pass to link
+        // them into the recipe playlists. That pass runs in StashMixRefreshWorker,
+        // which the DiscoveryDownloadWorker chain below also re-kicks — but that
+        // worker is battery-not-low gated (it downloads files), so on a low
+        // battery the freshly-drained stubs would never surface and the mix sits
+        // on "Building…" indefinitely (root cause: device at 4%, stubs DONE,
+        // playlist empty). Kick the network-only refresh directly so stream-only
+        // mixes materialize regardless of battery. Same unique work as the
+        // chain's kick (REPLACE) → the two coalesce when both fire. Guarded, and
+        // only when we actually produced stubs so an idle run doesn't spin the
+        // refresh⇄drain loop.
+        if (newlyMaterialized > 0) {
+            runCatching { StashMixRefreshWorker.enqueueOneTime(applicationContext) }
+                .onFailure { Log.w(TAG, "post-drain re-materialize enqueue failed; stubs surface on next refresh", it) }
         }
 
         // v0.9.20: after queueing/processing discoveries, kick the downloader
