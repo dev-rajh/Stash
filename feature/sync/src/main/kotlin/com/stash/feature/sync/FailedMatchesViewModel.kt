@@ -279,6 +279,18 @@ class FailedMatchesViewModel @Inject constructor(
 
             _isResyncing.value = false
 
+            // #143: a resync that surfaces no candidates is otherwise
+            // indistinguishable from a button that did nothing. Always report
+            // the outcome so the user knows the pass actually ran.
+            val found = _resyncCandidates.value.size
+            _userMessages.tryEmit(
+                when (found) {
+                    0 -> "No new matches found."
+                    1 -> "Found 1 replacement."
+                    else -> "Found $found replacements."
+                },
+            )
+
             // Pre-extract stream URLs for instant audio previews
             preExtractStreamUrls(_resyncCandidates.value)
         }
