@@ -42,6 +42,7 @@ class LastFmApiClient @Inject constructor(
     private val okHttpClient: OkHttpClient,
     private val credentials: LastFmCredentials,
     private val rateLimitGate: LastFmRateLimitGate,
+    private val cacheDao: com.stash.core.data.db.dao.LastFmCacheDao,
 ) {
     /** Step 1 of web-auth: request a token. User then authorises in browser. */
     suspend fun getAuthToken(): Result<String> = runCatching {
@@ -116,7 +117,7 @@ class LastFmApiClient @Inject constructor(
             "track" to track,
             "autocorrect" to "1",
         )
-        val response = unsignedGet(params)
+        val response = unsignedGet(params, cacheable = true)
         parseTopTags(response["toptags"]?.jsonObject)
     }
 
@@ -128,7 +129,7 @@ class LastFmApiClient @Inject constructor(
             "artist" to artist,
             "autocorrect" to "1",
         )
-        val response = unsignedGet(params)
+        val response = unsignedGet(params, cacheable = true)
         parseTopTags(response["toptags"]?.jsonObject)
     }
 
@@ -149,7 +150,7 @@ class LastFmApiClient @Inject constructor(
             "autocorrect" to "1",
             "limit" to limit.toString(),
         )
-        val response = unsignedGet(params)
+        val response = unsignedGet(params, cacheable = true)
         parseSimilarArtists(response["similarartists"]?.jsonObject)
     }
 
@@ -172,7 +173,7 @@ class LastFmApiClient @Inject constructor(
             "limit" to limit.toString(),
             "autocorrect" to "1",
         )
-        val response = unsignedGet(params)
+        val response = unsignedGet(params, cacheable = true)
         parseSimilarTracks(response["similartracks"]?.jsonObject)
     }
 
@@ -188,7 +189,7 @@ class LastFmApiClient @Inject constructor(
             "autocorrect" to "1",
             "limit" to limit.toString(),
         )
-        val response = unsignedGet(params)
+        val response = unsignedGet(params, cacheable = true)
         parseTopTracks(response["toptracks"]?.jsonObject)
     }
 
@@ -257,7 +258,7 @@ class LastFmApiClient @Inject constructor(
             "tag" to tag,
             "limit" to limit.toString(),
         )
-        val response = unsignedGet(params)
+        val response = unsignedGet(params, cacheable = true)
         parseTopArtists(response["topartists"]?.jsonObject)
     }
 
@@ -275,7 +276,7 @@ class LastFmApiClient @Inject constructor(
             "tag" to tag,
             "limit" to limit.toString(),
         )
-        val response = unsignedGet(params)
+        val response = unsignedGet(params, cacheable = true)
         parseTopTracks(response["tracks"]?.jsonObject)
     }
 
@@ -303,7 +304,9 @@ class LastFmApiClient @Inject constructor(
             "autocorrect" to "1",
         )
         if (!username.isNullOrBlank()) params["username"] = username
-        val response = unsignedGet(params)
+        // Cacheable only without a username — with one, the response carries
+        // that user's personal playcount/loved flags and must stay per-user.
+        val response = unsignedGet(params, cacheable = username.isNullOrBlank())
         LastFmTrackInfo.parse(response)
     }
 
@@ -385,8 +388,25 @@ class LastFmApiClient @Inject constructor(
      * key, no signature, just an API key. Returns the parsed root JSON
      * object (callers drill into the response-specific subtree).
      */
-    private suspend fun unsignedGet(params: Map<String, String>): JsonObject =
+    private suspend fun unsignedGet(
+        params: Map<String, String>,
+        cacheable: Boolean = false,
+    ): JsonObject =
         withContext(Dispatchers.IO) {
+            val cacheKey = if (cacheable) lastFmCacheKey(params) else null
+
+            // Cache hit comes BEFORE the breaker on purpose: cached generic
+            // lookups keep custom mixes working even while the shared key is
+            // throttled. Only fresh (within-TTL) entries are served.
+            if (cacheKey != null) {
+                val cached = cacheDao.get(cacheKey)
+                if (cached != null &&
+                    System.currentTimeMillis() - cached.fetchedAt < CACHE_TTL_MS
+                ) {
+                    return@withContext json.parseToJsonElement(cached.json).jsonObject
+                }
+            }
+
             // Circuit breaker: if the shared key is currently throttled, fail
             // fast without touching the network. Continuing to fire requests
             // at a rate-limited key only prolongs the block (Last.fm error 29).
@@ -425,6 +445,18 @@ class LastFmApiClient @Inject constructor(
 
             // A clean response means the key isn't throttled — close the breaker.
             rateLimitGate.recordSuccess()
+
+            // Cache only successful (non-error) bodies, keyed independently of
+            // api_key so the entry is shared across key rotation/pooling.
+            if (cacheKey != null) {
+                cacheDao.upsert(
+                    com.stash.core.data.db.entity.LastFmCacheEntity(
+                        cacheKey = cacheKey,
+                        json = bodyStr,
+                        fetchedAt = System.currentTimeMillis(),
+                    ),
+                )
+            }
             root
         }
 
@@ -515,6 +547,13 @@ class LastFmApiClient @Inject constructor(
     companion object {
         private const val API_URL = "https://ws.audioscrobbler.com/2.0/"
         private val json = Json { ignoreUnknownKeys = true }
+
+        /**
+         * TTL for cached generic lookups (tag→tracks, artist→similar, …).
+         * These change slowly, so a week keeps mixes fresh while collapsing
+         * the repeated cross-user traffic that throttled the shared key.
+         */
+        private const val CACHE_TTL_MS = 7L * 24 * 60 * 60 * 1000
     }
 }
 
