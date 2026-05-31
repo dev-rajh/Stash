@@ -276,6 +276,14 @@ interface MusicRepository {
      */
     suspend fun cleanOrphanedMixTracks(): Int
 
+    /**
+     * Re-scan the configured external download folder and restore download
+     * state for matching tracks whose files already exist on disk.
+     *
+     * Returns the number of rows restored.
+     */
+    suspend fun rescanExternalDownloads(): Int
+
     // ── Download queue cleanup ────────────────────────────────────────────
 
     /** Cancel pending downloads when a service is disconnected. */

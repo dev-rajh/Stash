@@ -57,7 +57,7 @@ class MatchScorer @Inject constructor(
          * target when title + artist + topic piled up enough score; the
          * gate neutralises that at the pipeline level.
          */
-        const val DURATION_HARD_GATE_SEC = 15
+        const val DURATION_HARD_GATE_SEC = 8
 
         /** Adjustments keyed off InnerTube's authoritative musicVideoType enum. */
         const val VIDEO_TYPE_ATV_BONUS = 0.20f
@@ -382,10 +382,10 @@ class MatchScorer @Inject constructor(
      * instrumental, sped-up / nightcore / slowed / edit / extended) when the
      * target title does not contain the same keyword.
      *
-     * "music video" / "official video" used to live here too. They were
-     * removed in Phase 3: [computeVideoTypeAdjustment] now handles those
-     * cases via InnerTube's structured `musicVideoType` enum, which is
-     * more reliable than string-matching titles.
+     * "music video" / "official video" are still penalized here because
+     * yt-dlp fallback results do not expose InnerTube's structured
+     * `musicVideoType` enum. When the enum is present,
+     * [computeVideoTypeAdjustment] adds the stronger structured signal.
      */
     private fun computePenalty(targetTitle: String, candidateTitle: String): Float {
         val targetLower = targetTitle.lowercase()
@@ -398,6 +398,27 @@ class MatchScorer @Inject constructor(
         val isLikelyLive = liveIndicators.any { it in candidateLower } &&
             liveIndicators.none { it in targetLower }
 
+        val videoVersionIndicators = listOf(
+            "music video",
+            "official video",
+            "official mv",
+            "video version",
+            "full video",
+        )
+        val isLikelyVideoVersion = videoVersionIndicators.any { it in candidateLower } &&
+            videoVersionIndicators.none { it in targetLower }
+
+        val cleanOrEditIndicators = listOf(
+            "(clean",
+            "[clean",
+            "clean version",
+            "clean edit",
+            "radio edit",
+            "intro version",
+        )
+        val isCleanOrEditVariant = cleanOrEditIndicators.any { it in candidateLower } &&
+            cleanOrEditIndicators.none { it in targetLower }
+
         // Tempo/pitch edits commonly uploaded to YT that masquerade as the
         // real track — penalise whenever the target title doesn't explicitly
         // request the variant. "slowed" covers both "Slowed" and "Slowed Down";
@@ -408,6 +429,8 @@ class MatchScorer @Inject constructor(
             tempoVariants.none { it in targetLower }
 
         return when {
+            isLikelyVideoVersion -> 0.4f
+            isCleanOrEditVariant -> 0.35f
             "karaoke" in candidateLower -> 0.4f
             "cover" in candidateLower && "cover" !in targetLower -> 0.25f
             "remix" in candidateLower && "remix" !in targetLower -> 0.25f
