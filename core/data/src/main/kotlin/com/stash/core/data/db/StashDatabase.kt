@@ -73,7 +73,7 @@ import com.stash.core.data.db.entity.TrackTagEntity
         TrackSkipEventEntity::class,
         LyricsEntity::class,
     ],
-    version = 29,
+    version = 30,
     exportSchema = true,
 )
 @TypeConverters(Converters::class)
@@ -780,6 +780,13 @@ abstract class StashDatabase : RoomDatabase() {
         val MIGRATION_28_29 = object : Migration(28, 29) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE tracks ADD COLUMN pinned_youtube_video_id TEXT")
+            }
+        }
+
+        val MIGRATION_29_30 = object : Migration(29, 30) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE stash_mix_recipes ADD COLUMN mood_keys_csv TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE stash_mix_recipes ADD COLUMN tag_sample_depth INTEGER NOT NULL DEFAULT 0")
             }
         }
     }

@@ -57,12 +57,14 @@ import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.DownloadDone
 import androidx.compose.material.icons.filled.RemoveCircleOutline
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
@@ -98,6 +100,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.stash.core.data.mix.MixBuildState
 import com.stash.core.model.MusicSource
 import com.stash.core.model.Playlist
 import com.stash.core.model.PlaylistType
@@ -124,6 +127,7 @@ fun HomeScreen(
     onNavigateToPlaylist: (Long) -> Unit = {},
     onNavigateToLikedSongs: (String?) -> Unit = {},
     onNavigateToSettings: () -> Unit = {},
+    onNavigateToMixBuilder: (Long?) -> Unit = {},
     viewModel: HomeViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -432,22 +436,41 @@ fun HomeScreen(
         // v0.4.1: sits BELOW the sync-sourced Daily Mixes while the
         // feature is in beta. Once it graduates, this block can move
         // back up so user-generated mixes feel primary.
-        if (uiState.stashMixes.isNotEmpty()) {
-            item {
-                SectionHeader(title = "Stash Mixes  (Beta)")
-            }
-            item {
-                LazyRow(
-                    contentPadding = PaddingValues(horizontal = 16.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    items(uiState.stashMixes, key = { it.id }) { playlist ->
-                        DailyMixCard(
-                            playlist = playlist,
-                            onClick = { onNavigateToPlaylist(playlist.id) },
-                            onLongPress = { selectedPlaylist = playlist },
-                        )
+        //
+        // The header + row render unconditionally (no `stashMixes.isNotEmpty`
+        // gate) so the trailing "Create mix" tile is ALWAYS reachable, even
+        // for a user with zero mixes. When mixes exist the layout is
+        // identical to before — they render first, Create tile last.
+        item {
+            SectionHeader(title = "Stash Mixes  (Beta)")
+        }
+        item {
+            LazyRow(
+                contentPadding = PaddingValues(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                // Create tile leads the row (a compact "add" affordance).
+                item {
+                    CreateMixCard(onClick = { onNavigateToMixBuilder(null) })
+                }
+                items(uiState.stashMixes, key = { it.id }) { playlist ->
+                    val buildState = when {
+                        uiState.buildingMixIds.contains(playlist.id) -> MixBuildState.BUILDING
+                        uiState.emptyMixIds.contains(playlist.id) -> MixBuildState.EMPTY
+                        else -> MixBuildState.READY
                     }
+                    DailyMixCard(
+                        playlist = playlist,
+                        buildState = buildState,
+                        onClick = {
+                            // Opening a stale custom mix transparently
+                            // refreshes it (fire-and-forget; no-ops for
+                            // builtins + non-stale mixes).
+                            viewModel.refreshMixIfStale(playlist.id)
+                            onNavigateToPlaylist(playlist.id)
+                        },
+                        onLongPress = { selectedPlaylist = playlist },
+                    )
                 }
             }
         }
@@ -652,6 +675,33 @@ fun HomeScreen(
                     },
                 )
             }
+
+            // Edit / Delete — only for user-built (non-builtin) Stash Mixes.
+            // Gated on customMixPlaylistIds so builtin recipe playlists (which
+            // can't be edited or deleted here) never surface these rows.
+            if (uiState.customMixPlaylistIds.contains(playlist.id)) {
+                HomeBottomSheetActionRow(
+                    icon = Icons.Default.Edit,
+                    label = "Edit mix",
+                    onClick = {
+                        // Resolve the recipe id async, then route to the
+                        // builder. Dismiss the sheet immediately.
+                        viewModel.editRecipeId(playlist.id) { recipeId ->
+                            onNavigateToMixBuilder(recipeId)
+                        }
+                        selectedPlaylist = null
+                    },
+                )
+                HomeBottomSheetActionRow(
+                    icon = Icons.Default.Delete,
+                    label = "Delete mix",
+                    tint = MaterialTheme.colorScheme.error,
+                    onClick = {
+                        viewModel.deleteCustomMix(playlist)
+                        selectedPlaylist = null
+                    },
+                )
+            }
             HomeBottomSheetActionRow(
                 icon = Icons.Default.PlayArrow,
                 label = "Play All",
@@ -786,6 +836,7 @@ private fun DailyMixCard(
     onClick: () -> Unit,
     onLongPress: () -> Unit,
     modifier: Modifier = Modifier,
+    buildState: MixBuildState = MixBuildState.READY,
 ) {
     val extendedColors = StashTheme.extendedColors
     val gradientColors = if (playlist.source == MusicSource.SPOTIFY) {
@@ -853,11 +904,33 @@ private fun DailyMixCard(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    Text(
-                        text = "${playlist.trackCount} tracks",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = Color.White.copy(alpha = 0.75f),
-                    )
+                    when (buildState) {
+                        MixBuildState.BUILDING -> Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(11.dp),
+                                color = Color.White.copy(alpha = 0.85f),
+                                strokeWidth = 1.5.dp,
+                            )
+                            Text(
+                                text = "Building…",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color.White.copy(alpha = 0.75f),
+                            )
+                        }
+                        MixBuildState.EMPTY -> Text(
+                            text = "No tracks found",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color.White.copy(alpha = 0.75f),
+                        )
+                        MixBuildState.READY -> Text(
+                            text = "${playlist.trackCount} tracks",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color.White.copy(alpha = 0.75f),
+                        )
+                    }
                 }
             }
         }
@@ -1492,6 +1565,65 @@ private fun CreatePlaylistCard(
                 color = MaterialTheme.colorScheme.onSurface,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+// ── Create mix card ──────────────────────────────────────────────────────
+
+/**
+ * Leading tile in the Stash Mixes row. Tapping it opens the Mix Builder
+ * to create a brand-new custom mix (recipeId = null). Compact (104×120 — a
+ * narrow "add" affordance, not a full 180-wide mix card) with a dashed glass
+ * border, mirroring the Playlists grid's [CreatePlaylistCard] affordance.
+ */
+@Composable
+private fun CreateMixCard(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val extendedColors = StashTheme.extendedColors
+    val accent = MaterialTheme.colorScheme.primary
+
+    Box(
+        modifier = modifier
+            .width(104.dp)
+            .height(120.dp)
+            .clip(RoundedCornerShape(16.dp))
+            .background(extendedColors.glassBackground)
+            .drawBehind {
+                val stroke = androidx.compose.ui.graphics.drawscope.Stroke(
+                    width = 1.dp.toPx(),
+                    pathEffect = androidx.compose.ui.graphics.PathEffect.dashPathEffect(
+                        floatArrayOf(8.dp.toPx(), 6.dp.toPx()),
+                        0f,
+                    ),
+                )
+                drawRoundRect(
+                    color = accent.copy(alpha = 0.5f),
+                    style = stroke,
+                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(16.dp.toPx()),
+                )
+            }
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Icon(
+                imageVector = Icons.Default.Add,
+                contentDescription = null,
+                tint = accent,
+                modifier = Modifier.size(24.dp),
+            )
+            Text(
+                text = "Create\nmix",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
             )
         }
     }

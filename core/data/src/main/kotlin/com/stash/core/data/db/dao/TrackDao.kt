@@ -272,6 +272,15 @@ interface TrackDao {
      * Checked-but-unavailable rows (checked_at != null AND is_streamable = 0)
      * are always excluded; unchecked rows (checked_at IS NULL) are also
      * excluded so they don't pop in/out as the worker drains.
+     *
+     * STASH_MIX exemption — Stash Mixes are an inherently online discovery
+     * surface (recipe-driven, Last.fm-seeded, stream-only by design; see the
+     * v0.9.37 stream-only design doc). Their streamable tracks stay visible
+     * even when [includeStreamable] is false (Offline mode), so the full mix
+     * renders instead of collapsing to the handful of manually-downloaded
+     * tracks. The per-tap connectivity guard in PlaylistDetailViewModel still
+     * governs whether a stream-only track can actually play. Other playlist
+     * types remain downloaded-only in Offline mode (Library = your saved music).
      */
     @Query(
         """
@@ -285,7 +294,11 @@ interface TrackDao {
         WHERE pt.playlist_id = :playlistId
           AND pt.removed_at IS NULL
           AND bl.canonical_key IS NULL
-          AND (t.is_downloaded = 1 OR :includeStreamable)
+          AND (
+              t.is_downloaded = 1
+              OR :includeStreamable
+              OR (p.type = 'STASH_MIX' AND t.is_streamable = 1)
+          )
         ORDER BY
             CASE WHEN p.type = 'DAILY_MIX' THEN pt.added_at END DESC,
             pt.position ASC

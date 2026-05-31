@@ -14,6 +14,7 @@ import com.stash.feature.library.ArtistDetailScreen
 import com.stash.feature.library.LibraryScreen
 import com.stash.feature.library.LikedSongsDetailScreen
 import com.stash.feature.library.PlaylistDetailScreen
+import com.stash.feature.library.mixbuilder.MixBuilderScreen
 import com.stash.feature.nowplaying.NowPlayingScreen
 import com.stash.feature.search.AlbumDiscoveryScreen
 import com.stash.feature.search.ArtistProfileScreen
@@ -59,7 +60,13 @@ fun StashNavHost(
                         launchSingleTop = true
                     }
                 },
+                onNavigateToMixBuilder = { recipeId ->
+                    navController.navigate(MixBuilderRoute(recipeId))
+                },
             )
+        }
+        composable<MixBuilderRoute> {
+            MixBuilderScreen(onBack = { navController.popBackStack() })
         }
         composable<LibraryRoute> {
             LibraryScreen(
