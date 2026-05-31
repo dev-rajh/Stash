@@ -85,58 +85,102 @@ class SwapCoordinator @Inject constructor(
         newVideoId: String,
     ) {
         scope.launch {
-            // v0.9.15: Reject blocklisted identities. A swap on a blocked
-            // track would re-mark it downloaded and resurrect the file.
-            if (blocklistGuard.isBlocked(
-                    artist = artist, title = title,
-                    spotifyUri = null, youtubeId = newVideoId,
-                )) {
-                Log.d(TAG, "Refused swap of blocked: $artist - $title")
-                return@launch
-            }
+            performSwap(trackId, oldFilePath, artist, title, newVideoId)
+        }
+    }
 
-            oldFilePath?.let { oldPath ->
-                try {
-                    val deleted = File(oldPath).delete()
-                    Log.d(TAG, "swap: old file delete path=$oldPath deleted=$deleted")
-                } catch (e: Exception) {
-                    Log.w(TAG, "swap: old file delete threw", e)
-                }
-            }
+    /**
+     * The actual swap body, exposed as a suspend function so it can be
+     * unit-tested directly without racing the fire-and-forget [scope].
+     */
+    internal suspend fun performSwap(
+        trackId: Long,
+        oldFilePath: String?,
+        artist: String,
+        title: String,
+        newVideoId: String,
+    ) {
+        // v0.9.15: Reject blocklisted identities. A swap on a blocked
+        // track would re-mark it downloaded and resurrect the file.
+        if (blocklistGuard.isBlocked(
+                artist = artist, title = title,
+                spotifyUri = null, youtubeId = newVideoId,
+            )) {
+            Log.d(TAG, "Refused swap of blocked: $artist - $title")
+            return
+        }
 
-            try {
-                val url = "https://www.youtube.com/watch?v=$newVideoId"
-                val qualityArgs = qualityPrefs.qualityTier.first().toYtDlpArgs()
-                val tempDir = fileOrganizer.getTempDir()
-                val tempFilename = "swap_$newVideoId"
+        try {
+            val url = "https://www.youtube.com/watch?v=$newVideoId"
+            val qualityArgs = qualityPrefs.qualityTier.first().toYtDlpArgs()
+            val tempDir = fileOrganizer.getTempDir()
+            val tempFilename = "swap_$newVideoId"
 
-                val result = downloadExecutor.download(
-                    url = url,
-                    outputDir = tempDir,
-                    filename = tempFilename,
-                    qualityArgs = qualityArgs,
+            // #36: download + commit the replacement BEFORE touching the old
+            // file. The previous order deleted the user's existing audio up
+            // front, so a failed download left them with nothing AND a row
+            // silently gone (the flag was already cleared in the VM).
+            val result = downloadExecutor.download(
+                url = url,
+                outputDir = tempDir,
+                filename = tempFilename,
+                qualityArgs = qualityArgs,
+            )
+
+            if (result is DownloadResult.Success) {
+                val committed = fileOrganizer.commitDownload(
+                    tempFile = result.file,
+                    artist = artist,
+                    album = null,
+                    title = title,
+                    format = result.file.extension,
                 )
+                trackDao.updateYoutubeId(trackId, newVideoId)
+                trackDao.markAsDownloaded(trackId, committed.filePath, committed.sizeBytes)
 
-                if (result is DownloadResult.Success) {
-                    val committed = fileOrganizer.commitDownload(
-                        tempFile = result.file,
-                        artist = artist,
-                        album = null,
-                        title = title,
-                        format = result.file.extension,
-                    )
-                    trackDao.pinYoutubeVideoId(trackId, newVideoId)
-                    trackDao.markAsDownloaded(trackId, committed.filePath, committed.sizeBytes)
-                    Log.i(
-                        TAG,
-                        "swap: completed trackId=$trackId → videoId=$newVideoId path=${committed.filePath}",
-                    )
-                } else {
-                    Log.w(TAG, "swap: download failed for videoId=$newVideoId: $result")
+                // Only now is it safe to remove the old file — and only if it
+                // isn't the very path we just wrote (same artist/title can
+                // resolve to the same canonical file). A stray leftover is
+                // fine; the orphan cleanup pass eventually catches it.
+                oldFilePath?.let { oldPath ->
+                    if (oldPath != committed.filePath) {
+                        try {
+                            val deleted = File(oldPath).delete()
+                            Log.d(TAG, "swap: old file delete path=$oldPath deleted=$deleted")
+                        } catch (e: Exception) {
+                            Log.w(TAG, "swap: old file delete threw", e)
+                        }
+                    }
                 }
-            } catch (e: Exception) {
-                Log.w(TAG, "swap: unexpected error for videoId=$newVideoId", e)
+
+                Log.i(
+                    TAG,
+                    "swap: completed trackId=$trackId → videoId=$newVideoId path=${committed.filePath}",
+                )
+            } else {
+                // Download failed: the optimistic flag-clear in the VM made the
+                // row disappear. Re-flag so it reappears in Failed Matches and
+                // the user knows the swap didn't take, instead of silently
+                // losing the track (#36). The old file is untouched.
+                Log.w(TAG, "swap: download failed for videoId=$newVideoId: $result")
+                reFlagAfterFailure(trackId)
             }
+        } catch (e: Exception) {
+            Log.w(TAG, "swap: unexpected error for videoId=$newVideoId", e)
+            reFlagAfterFailure(trackId)
+        }
+    }
+
+    /**
+     * Restores the wrong-match flag after a failed swap so the row returns to
+     * the Failed Matches screen. Best-effort: a failure to re-flag is logged
+     * but not propagated (the swap already failed; nothing more to do here).
+     */
+    private suspend fun reFlagAfterFailure(trackId: Long) {
+        try {
+            trackDao.updateMatchFlagged(trackId, true)
+        } catch (e: Exception) {
+            Log.w(TAG, "swap: failed to re-flag trackId=$trackId after failure", e)
         }
     }
 }

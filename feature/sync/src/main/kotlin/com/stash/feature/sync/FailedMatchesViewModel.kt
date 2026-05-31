@@ -237,7 +237,12 @@ class FailedMatchesViewModel @Inject constructor(
             // Each row becomes a (trackId, searchQuery, rejectedVideoId?)
             // triple so the same semaphored search loop handles both kinds.
             val unmatched = uiState.value.tracks.map {
-                Triple(it.trackId, it.searchQuery, it.rejectedVideoId)
+                // Auto-requeued tracks (TrackDownloadWorker) get a blank
+                // download_queue.search_query. Fall back to "artist - title"
+                // — which we already have on the row — so resync can actually
+                // search instead of firing a blank query that finds nothing.
+                val query = it.searchQuery.ifBlank { "${it.artist} - ${it.title}" }
+                Triple(it.trackId, query, it.rejectedVideoId)
             }
             val flagged = uiState.value.flaggedTracks.map {
                 Triple(it.trackId, it.searchQuery, it.currentYoutubeId)
@@ -257,21 +262,26 @@ class FailedMatchesViewModel @Inject constructor(
                         // For flagged tracks, skip the currently-associated
                         // (wrong) video — surfacing it as the candidate would
                         // just swap the track with itself.
-                        val filtered = results.filter { excludeVideoId == null || it.id != excludeVideoId }
-                            .ifEmpty { results }
-                        val scored = if (track != null) {
-                            matchScorer.scoreResults(
-                                targetTitle = track.title,
-                                targetArtist = track.artist,
-                                targetDurationMs = track.durationMs,
-                                results = filtered,
-                                targetAlbum = track.album,
-                                targetExplicit = track.explicit,
-                            )
-                        } else {
-                            emptyList()
+                        var best = results.firstOrNull { excludeVideoId == null || it.id != excludeVideoId }
+
+                        // #19/#143: search() is InnerTube-first and only falls
+                        // back to yt-dlp when YT Music returns *zero* results.
+                        // When YT Music returns results but none are usable —
+                        // it's empty, or only the rejected/wrong video came back
+                        // — broaden to a full-YouTube yt-dlp search, which
+                        // surfaces tracks that exist on YouTube but not YouTube
+                        // Music (and genuine alternatives to a wrong match).
+                        if (best == null) {
+                            val direct = searchExecutor.searchYtDlpDirect(query, maxResults = 5)
+                            best = direct.firstOrNull { excludeVideoId == null || it.id != excludeVideoId }
                         }
-                        val best = matchScorer.bestMatch(scored)
+
+                        // Last resort: surface the top result even if it's the
+                        // excluded one, so an unmatched track still gets *a*
+                        // candidate to preview rather than nothing.
+                        if (best == null) {
+                            best = results.firstOrNull()
+                        }
                         if (best != null) {
                             _resyncCandidates.update { current ->
                                 current + (trackId to ResyncCandidate(
@@ -294,6 +304,18 @@ class FailedMatchesViewModel @Inject constructor(
             }.joinAll()
 
             _isResyncing.value = false
+
+            // #143: a resync that surfaces no candidates is otherwise
+            // indistinguishable from a button that did nothing. Always report
+            // the outcome so the user knows the pass actually ran.
+            val found = _resyncCandidates.value.size
+            _userMessages.tryEmit(
+                when (found) {
+                    0 -> "No new matches found."
+                    1 -> "Found 1 replacement."
+                    else -> "Found $found replacements."
+                },
+            )
 
             // Pre-extract stream URLs for instant audio previews
             preExtractStreamUrls(_resyncCandidates.value)
