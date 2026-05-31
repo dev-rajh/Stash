@@ -70,6 +70,11 @@ val lastFmApiSecret: String =
 // primary key above. Empty by default.
 val lastFmExtraApiKeys: String =
     localProperties.getProperty("lastfm.extraApiKeys") ?: System.getenv("LASTFM_EXTRA_API_KEYS").orEmpty()
+// Optional Stash Last.fm proxy Worker base URL. When set, generic read lookups
+// route through it (the Worker holds the server key + shared cache), decoupling
+// Last.fm load from user count. Empty = app talks to Last.fm directly.
+val lastFmProxyUrl: String =
+    localProperties.getProperty("lastfm.proxyUrl") ?: System.getenv("LASTFM_PROXY_URL").orEmpty()
 
 android {
     namespace = "com.stash.app"
@@ -88,6 +93,7 @@ android {
         buildConfigField("String", "LASTFM_API_KEY", "\"$lastFmApiKey\"")
         buildConfigField("String", "LASTFM_API_SECRET", "\"$lastFmApiSecret\"")
         buildConfigField("String", "LASTFM_EXTRA_API_KEYS", "\"$lastFmExtraApiKeys\"")
+        buildConfigField("String", "LASTFM_PROXY_URL", "\"$lastFmProxyUrl\"")
         // v0.9.13: TipJarRepository fetches the public supporters JSON from
         // this URL on Home foreground (cache-aware, ~15 min refresh). Edit
         // the JSON and push to update the supporter list without an APK

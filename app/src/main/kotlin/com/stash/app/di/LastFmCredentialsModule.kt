@@ -32,5 +32,7 @@ object LastFmCredentialsModule {
             .split(",")
             .map { it.trim() }
             .filter { it.isNotBlank() },
+        // Optional Worker proxy base URL; blank = direct to Last.fm.
+        proxyUrl = BuildConfig.LASTFM_PROXY_URL.trim().ifBlank { null },
     )
 }
