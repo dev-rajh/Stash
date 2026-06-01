@@ -136,8 +136,7 @@ fun DiagnosticsPreviewScreen(
                         color = MaterialTheme.colorScheme.onSurface,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .verticalScroll(rememberScrollState())
-                            .padding(12.dp),
+                            .verticalScroll(rememberScrollState()),
                     )
                 }
 
