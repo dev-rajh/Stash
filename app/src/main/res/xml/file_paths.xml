@@ -7,4 +7,5 @@
 -->
 <paths xmlns:android="http://schemas.android.com/apk/res/android">
     <cache-path name="crashes" path="crashes/" />
+    <cache-path name="diagnostics" path="diagnostics/" />
 </paths>
