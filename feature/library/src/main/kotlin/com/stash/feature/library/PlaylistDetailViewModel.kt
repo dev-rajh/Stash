@@ -505,6 +505,17 @@ class PlaylistDetailViewModel @Inject constructor(
         }
     }
 
+    /** Create a new playlist and add the whole batch of [trackIds] to it. */
+    fun createPlaylistAndAddTracks(name: String, trackIds: List<Long>) {
+        viewModelScope.launch {
+            val playlistId = musicRepository.createPlaylist(name)
+            trackIds.forEach { id ->
+                runCatching { musicRepository.addTrackToPlaylist(id, playlistId) }
+                    .onFailure { e -> if (e is CancellationException) throw e }
+            }
+        }
+    }
+
     // ── Playlist cover image ───────────────────────────────────────────
 
     /**
