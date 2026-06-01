@@ -17,6 +17,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavGraph.Companion.findStartDestination
@@ -41,6 +44,19 @@ fun StashScaffold(
     val navController = rememberNavController()
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = navBackStackEntry?.destination?.route
+
+    // Whether a detail screen is currently in multi-select mode. Detail screens
+    // signal this via `onSelectionModeChanged`; we hide the mini-player while it
+    // is true so the screen's bottom selection action bar doesn't stack on top
+    // of it.
+    var selectionActive by remember { mutableStateOf(false) }
+
+    // Safeguard: a selection-capable screen normally clears its selection on
+    // every exit path (✕ / Back / last-deselect), which fires
+    // `onSelectionModeChanged(false)` before it leaves composition. Resetting on
+    // route change as well guarantees the mini-player can never stay hidden if a
+    // screen leaves the stack without that signal landing.
+    LaunchedEffect(currentRoute) { selectionActive = false }
 
     // Android 13+ runtime permission for notifications. One-shot per install.
     RequestNotificationPermissionOnce()
@@ -83,13 +99,17 @@ fun StashScaffold(
         // (https://x.com/tekno_deha1/status/...).
         bottomBar = {
             Column(modifier = Modifier.windowInsetsPadding(WindowInsets.navigationBars)) {
-                MiniPlayer(
-                    onExpand = {
-                        navController.navigate(NowPlayingRoute) {
-                            launchSingleTop = true
-                        }
-                    },
-                )
+                // Hide the mini-player while a screen is selecting so its bottom
+                // selection action bar takes this slot instead of stacking.
+                if (!selectionActive) {
+                    MiniPlayer(
+                        onExpand = {
+                            navController.navigate(NowPlayingRoute) {
+                                launchSingleTop = true
+                            }
+                        },
+                    )
+                }
 
                 StashBottomBar(
                     currentRoute = currentRoute,
@@ -111,6 +131,7 @@ fun StashScaffold(
                 .fillMaxSize()
                 .padding(innerPadding)
                 .consumeWindowInsets(innerPadding),
+            onSelectionModeChanged = { selectionActive = it },
         )
     }
 }
