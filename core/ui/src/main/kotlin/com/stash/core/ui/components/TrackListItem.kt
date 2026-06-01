@@ -189,8 +189,8 @@ fun TrackListItem(
         // -- Source indicator dot + label --
         SourceIndicator(source = track.source, showLabel = true)
 
-        // -- Overflow menu --
-        if (onMoreClick != null) {
+        // -- Overflow menu (only when not selecting) --
+        if (!selectionActive && onMoreClick != null) {
             IconButton(onClick = onMoreClick, modifier = Modifier.size(32.dp)) {
                 Icon(
                     imageVector = Icons.Default.MoreVert,

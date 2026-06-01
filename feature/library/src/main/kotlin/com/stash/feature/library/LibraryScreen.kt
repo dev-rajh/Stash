@@ -1172,9 +1172,7 @@ private fun TracksTab(
                 onLongPress = { if (!selection.isActive) selection.enter(track.id) },
                 selectionActive = selection.isActive,
                 selected = selection.isSelected(track.id),
-                // TrackListItem (unlike DetailTrackRow) does NOT auto-hide its
-                // ⋮ during selection, so null it out ourselves while selecting.
-                onMoreClick = if (selection.isActive) null else { { selectedTrack = track } },
+                onMoreClick = { selectedTrack = track },
             )
         }
     }

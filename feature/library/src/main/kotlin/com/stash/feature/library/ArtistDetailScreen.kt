@@ -216,9 +216,6 @@ fun ArtistDetailScreen(
         // Artist detail has exactly four actions (no Delete) — all fit inline,
         // so none collapse into the ⋮ overflow.
         val selectionActions = listOf(
-            SelectionAction("play_next", "Play next", Icons.Default.PlaylistPlay) {
-                viewModel.playSelectedNext(selectedTracks); selection.clear()
-            },
             SelectionAction("add_queue", "Add to queue", Icons.Default.PlaylistAdd) {
                 viewModel.addSelectedToQueue(selectedTracks); selection.clear()
             },
@@ -233,6 +230,9 @@ fun ArtistDetailScreen(
                 SelectionAction("download", "Download", Icons.Default.Download) {
                     viewModel.downloadSelected(selectedIds); selection.clear()
                 }
+            },
+            SelectionAction("play_next", "Play next", Icons.Default.PlaylistPlay) {
+                viewModel.playSelectedNext(selectedTracks); selection.clear()
             },
         )
 

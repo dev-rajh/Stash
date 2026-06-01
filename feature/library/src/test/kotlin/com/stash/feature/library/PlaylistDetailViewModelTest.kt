@@ -200,6 +200,32 @@ class PlaylistDetailViewModelTest {
         assertEquals(listOf("Queued 2 songs for download."), messages)
     }
 
+    @Test
+    fun downloadSelected_rethrows_cancellation_and_aborts_batch() = runTest {
+        val musicRepo = musicRepoMock()
+        // The FIRST item's repo call is cancelled. The batch methods re-throw
+        // CancellationException (instead of swallowing it as a per-item failure),
+        // so the loop must abort: later items are never attempted and no roll-up
+        // is emitted. A swallowed cancellation would continue the loop and emit
+        // "Queued N songs for download." — this test pins the re-throw branch.
+        whenever(musicRepo.queueDownload(eq(1L)))
+            .thenThrow(kotlinx.coroutines.CancellationException("cancelled"))
+        val vm = buildVm(musicRepository = musicRepo)
+        val ids = listOf(1L, 2L, 3L)
+
+        val messages = collectMessages(vm)
+        vm.downloadSelected(ids)
+        runCurrent()
+
+        // First item was attempted (and cancelled); the later items were NOT,
+        // proving cancellation propagated rather than being absorbed.
+        verify(musicRepo).queueDownload(1L)
+        verify(musicRepo, org.mockito.kotlin.never()).queueDownload(2L)
+        verify(musicRepo, org.mockito.kotlin.never()).queueDownload(3L)
+        // No roll-up message: the batch aborted before any emit.
+        assertEquals(emptyList<String>(), messages)
+    }
+
     // ------------------------------------------------------------------
     // Helpers
     // ------------------------------------------------------------------
