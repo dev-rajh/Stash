@@ -115,6 +115,23 @@ class PlaylistDetailViewModelTest {
     }
 
     @Test
+    fun createPlaylistAndAddTracks_creates_once_then_adds_each_to_new_id() = runTest {
+        val musicRepo = musicRepoMock()
+        val newPlaylistId = 99L
+        whenever(musicRepo.createPlaylist(eq("My Mix"))).thenReturn(newPlaylistId)
+        val vm = buildVm(musicRepository = musicRepo)
+        val ids = listOf(1L, 2L, 3L)
+
+        vm.createPlaylistAndAddTracks("My Mix", ids)
+        runCurrent()
+
+        // The playlist is created exactly once with the given name…
+        verify(musicRepo).createPlaylist("My Mix")
+        // …and every selected track is added to the freshly-created playlist id.
+        ids.forEach { id -> verify(musicRepo).addTrackToPlaylist(id, newPlaylistId) }
+    }
+
+    @Test
     fun deleteSelected_removes_each_from_playlist_and_emits_rollup() = runTest {
         val musicRepo = musicRepoMock()
         val vm = buildVm(musicRepository = musicRepo)

@@ -1,7 +1,6 @@
 package com.stash.feature.library
 
 import androidx.activity.compose.BackHandler
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -26,11 +25,11 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.DownloadDone
-import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PlaylistAdd
+import androidx.compose.material.icons.filled.PlaylistAddCheck
 import androidx.compose.material.icons.filled.PlaylistPlay
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Shuffle
@@ -81,8 +80,7 @@ import com.stash.core.ui.components.SearchFilterBar
 import com.stash.core.ui.components.SourceIndicator
 import com.stash.core.ui.components.TrackOptionsSheet
 import com.stash.core.ui.selection.SelectionAction
-import com.stash.core.ui.selection.SelectionBottomBar
-import com.stash.core.ui.selection.SelectionTopBar
+import com.stash.core.ui.selection.SelectionScaffoldOverlay
 import com.stash.core.ui.selection.rememberSelectionState
 import com.stash.core.ui.theme.StashTheme
 import com.stash.core.ui.util.formatTotalDuration
@@ -159,7 +157,10 @@ fun PlaylistDetailScreen(
         } else {
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(bottom = 120.dp),
+                // Task 7 hides the mini-player while selecting, but the bottom
+                // selection bar (~100dp + nav insets) then takes its place. Pad
+                // enough that the last row clears it in either state.
+                contentPadding = PaddingValues(bottom = if (selection.isActive) 140.dp else 120.dp),
             ) {
                 // ── Header section ──────────────────────────────────────
                 item(key = "header") {
@@ -295,57 +296,44 @@ fun PlaylistDetailScreen(
         }
 
         // ── Selection chrome (overlaid contextual top + bottom bars) ────────
-        val allIds = state.tracks.map { it.id }
         val selectedTracks = state.tracks.filter { it.id in selection.selectedIds }
         val selectedIds = selection.selectedIds.toList()
 
-        AnimatedVisibility(
-            visible = selection.isActive,
-            modifier = Modifier.align(Alignment.TopCenter),
-        ) {
-            SelectionTopBar(
-                count = selection.count,
-                onClose = { selection.clear() },
-                onSelectAll = {
-                    if (selection.count == allIds.size) selection.clear()
-                    else selection.selectAll(allIds)
-                },
-            )
-        }
+        // Aggregate download state: if every selected track is already on disk,
+        // offer Remove download; otherwise offer Download.
+        val allDownloaded = selectedTracks.isNotEmpty() && selectedTracks.all { it.isDownloaded }
 
-        AnimatedVisibility(
-            visible = selection.isActive,
-            modifier = Modifier.align(Alignment.BottomCenter),
-        ) {
-            // Aggregate download state: if every selected track is already on
-            // disk, offer Remove download; otherwise offer Download.
-            val allDownloaded = selectedTracks.isNotEmpty() && selectedTracks.all { it.isDownloaded }
-            SelectionBottomBar(
-                actions = listOf(
-                    SelectionAction("play_next", "Play next", Icons.Default.PlaylistPlay) {
-                        viewModel.playSelectedNext(selectedTracks); selection.clear()
-                    },
-                    SelectionAction("add_queue", "Add to queue", Icons.Default.PlaylistAdd) {
-                        viewModel.addSelectedToQueue(selectedTracks); selection.clear()
-                    },
-                    SelectionAction("add_playlist", "Add to playlist", Icons.Default.FavoriteBorder) {
-                        showBatchSave = true
-                    },
-                    if (allDownloaded) {
-                        SelectionAction("remove_download", "Remove download", Icons.Default.DownloadDone) {
-                            viewModel.removeDownloadsForSelected(selectedIds); selection.clear()
-                        }
-                    } else {
-                        SelectionAction("download", "Download", Icons.Default.Download) {
-                            viewModel.downloadSelected(selectedIds); selection.clear()
-                        }
-                    },
-                    SelectionAction("delete", "Delete", Icons.Default.Delete) {
-                        showBatchDelete = true
-                    },
-                ),
-            )
-        }
+        // Action order: Delete must stay within the first four (visible) and
+        // Play next collapses into the ⋮ overflow as the least-used action.
+        val selectionActions = listOf(
+            SelectionAction("add_queue", "Add to queue", Icons.Default.PlaylistAdd) {
+                viewModel.addSelectedToQueue(selectedTracks); selection.clear()
+            },
+            SelectionAction("add_playlist", "Add to playlist", Icons.Default.PlaylistAddCheck) {
+                showBatchSave = true
+            },
+            if (allDownloaded) {
+                SelectionAction("remove_download", "Remove download", Icons.Default.DownloadDone) {
+                    viewModel.removeDownloadsForSelected(selectedIds); selection.clear()
+                }
+            } else {
+                SelectionAction("download", "Download", Icons.Default.Download) {
+                    viewModel.downloadSelected(selectedIds); selection.clear()
+                }
+            },
+            SelectionAction("delete", "Delete", Icons.Default.Delete) {
+                showBatchDelete = true
+            },
+            SelectionAction("play_next", "Play next", Icons.Default.PlaylistPlay) {
+                viewModel.playSelectedNext(selectedTracks); selection.clear()
+            },
+        )
+
+        SelectionScaffoldOverlay(
+            selection = selection,
+            allIds = state.tracks.map { it.id },
+            actions = selectionActions,
+        )
     }
 
     // ── Track options bottom sheet ───────────────────────────────────────
