@@ -181,12 +181,14 @@ fun StashNavHost(
         composable<ArtistDetailRoute> {
             ArtistDetailScreen(
                 onBack = { navController.popBackStack() },
+                onSelectionModeChanged = onSelectionModeChanged,
             )
         }
 
         composable<AlbumDetailRoute> {
             AlbumDetailScreen(
                 onBack = { navController.popBackStack() },
+                onSelectionModeChanged = onSelectionModeChanged,
             )
         }
 
