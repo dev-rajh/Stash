@@ -46,6 +46,15 @@ class DiagnosticsBundleBuilderTest {
         assertTrue(text.contains("Blocklist: 3"))
     }
 
+    @Test fun `secrets in captured logs are redacted in the final bundle`() = runTest {
+        io.mockk.every { logcatCapture.recentLogs(any()) } returns
+            "12:00 I OkHttp: Cookie: sp_dc=TOPSECRETVALUE; user=alice@example.com"
+        val text = builder().buildText()
+        assertTrue(text.contains("[REDACTED")) // redaction fired
+        org.junit.Assert.assertFalse(text.contains("TOPSECRETVALUE"))
+        org.junit.Assert.assertFalse(text.contains("alice@example.com"))
+    }
+
     @Test fun `a failing data source degrades to an unavailable note, not a crash`() = runTest {
         coEvery { downloadQueueDao.getStatusCounts() } throws RuntimeException("db locked")
         val text = builder().buildText()

@@ -31,6 +31,13 @@ class DiagnosticsRedactorTest {
         assertTrue(out.contains("[REDACTED_EMAIL]"))
     }
 
+    @Test fun `strips unrecognized cookies via generic header fallback`() {
+        val out = DiagnosticsRedactor.redact("Cookie: VISITOR_INFO1_LIVE=abcSECRET; YSC=defSECRET")
+        assertFalse(out.contains("abcSECRET"))
+        assertFalse(out.contains("defSECRET"))
+        assertTrue(out.contains("[REDACTED]"))
+    }
+
     @Test fun `leaves ordinary text and stack traces intact`() {
         val text = "java.lang.NoSuchMethodError at FFmpegBridge.kt:98\nrefreshing 13 Stash Mix(es)"
         assertTrue(DiagnosticsRedactor.redact(text) == text)

@@ -11,6 +11,11 @@ object DiagnosticsRedactor {
         // Spotify sp_dc + Google/YT auth cookies: keep the key, redact the value.
         Regex("""(?i)\b(sp_dc|SAPISID|APISID|HSID|SSID|SIDCC|SID|__Secure-[\w-]+|LOGIN_INFO)=[^;\s"']+""")
             to "$1=[REDACTED]",
+        // Generic fallback: any Cookie:/Set-Cookie: header line whose value the named
+        // pattern above didn't already scrub — redact the whole value to EOL. The
+        // negative lookahead skips lines already containing [REDACTED] so we don't
+        // collapse (and lose) the precise named-cookie redactions made just above.
+        Regex("""(?i)\b(set-cookie|cookie):(?![^\n]*\[REDACTED])\s*.*""") to "$1: [REDACTED]",
         // Authorization / Bearer headers. Bearer first so its long token value is
         // scrubbed before the header catch-all collapses "Authorization: Bearer".
         Regex("""(?i)\bbearer\s+[A-Za-z0-9._\-]+""") to "Bearer [REDACTED]",
