@@ -1,5 +1,6 @@
 package com.stash.core.ui.selection
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -64,6 +65,7 @@ fun SelectionTopBar(
     Surface(
         modifier = modifier.fillMaxWidth(),
         color = extendedColors.glassBackground,
+        border = BorderStroke(1.dp, extendedColors.glassBorder),
     ) {
         Row(
             modifier = Modifier
@@ -125,6 +127,7 @@ fun SelectionBottomBar(
     Surface(
         modifier = modifier.fillMaxWidth(),
         color = extendedColors.glassBackground,
+        border = BorderStroke(1.dp, extendedColors.glassBorder),
     ) {
         Row(
             modifier = Modifier
