@@ -72,6 +72,12 @@ class DiagnosticsRedactorTest {
         }
     }
 
+    @Test fun `strips email addresses`() {
+        val out = DiagnosticsRedactor.redact("account: jane.doe+test@gmail.com synced")
+        assertFalse(out.contains("jane.doe+test@gmail.com"))
+        assertTrue(out.contains("[REDACTED_EMAIL]"))
+    }
+
     @Test fun `leaves ordinary text and stack traces intact`() {
         val text = "java.lang.NoSuchMethodError at FFmpegBridge.kt:98\nrefreshing 13 Stash Mix(es)"
         assertTrue(DiagnosticsRedactor.redact(text) == text)
@@ -106,6 +112,8 @@ object DiagnosticsRedactor {
         // Named token / key fields: token=... | "token": "..." | token: ...
         Regex("""(?i)\b(access_token|refresh_token|id_token|api_key|apikey|client_secret)["']?\s*[:=]\s*["']?[A-Za-z0-9._\-]+["']?""")
             to "$1=[REDACTED]",
+        // Email addresses — account PII that can surface in errors/logs/source rows.
+        Regex("""(?i)\b[\w.%+-]+@[\w.-]+\.[A-Za-z]{2,}\b""") to "[REDACTED_EMAIL]",
     )
 
     fun redact(text: String): String =
@@ -116,7 +124,7 @@ object DiagnosticsRedactor {
 - [ ] **Step 4: Run to verify it passes**
 
 Run: `./gradlew :core:data:testDebugUnitTest --tests "com.stash.core.data.diagnostics.DiagnosticsRedactorTest"`
-Expected: PASS (4 tests). If a capture-group replacement (`$1`) misbehaves, confirm the regex group indices.
+Expected: PASS (5 tests). If a capture-group replacement (`$1`) misbehaves, confirm the regex group indices.
 
 - [ ] **Step 5: Commit**
 
@@ -415,7 +423,7 @@ Expected: FAIL — unresolved.
 - `data class DiagnosticsBundle(val text: String, val file: java.io.File, val contentUri: android.net.Uri)`.
 - `internal suspend fun buildText(): String` — assembles, in order: header (`crashFileStore.deviceMetadataBlock()`), Connection/auth, Recent sync history (decode `diagnostics` JSON → `List<SyncStepResult>`, render service·step·status·httpCode), Download state (`getStatusCounts()` + `getFailedDownloads().first()` capped ~20 + `getUnmatchedCount().first()`), Misc counts (`trackBlocklistDao.observeCount().first()` → "Blocklist: N"), Recent crash reports (`crashFileStore.allCrashFiles().take(2)` → file text), Recent logs (`logcatCapture.recentLogs(1500)`). **Wrap each section in `runCatching { … }.getOrElse { "[<section> unavailable: ${it.message}]" }`** and append. Finally `return DiagnosticsRedactor.redact(assembled)`.
 - `suspend fun build(): DiagnosticsBundle` — `val text = buildText()`; write to `File(context.cacheDir, "diagnostics").apply{mkdirs()}` as `stash-diagnostics-<ts>.txt` (delete older bundle files, keep newest); `val uri = crashFileStore.shareUriFor(file)`; return the bundle. (Reusing `shareUriFor` keeps a single FileProvider authority.)
-- For the auth section: render per service — Spotify/YouTube `Connected`/`Not connected` from `tokenManager.*AuthState.value` (match on `AuthState.Connected`), plus `connected_at`/`last_sync_at` from `sourceAccountDao.getAll().first()`. **No token/cookie/userId values.** If probes were injected, add `expired=<isExpired()>`.
+- For the auth section: render per service — Spotify/YouTube `Connected`/`Not connected` from `tokenManager.*AuthState.value` (match on `AuthState.Connected`), plus `connected_at`/`last_sync_at` from `sourceAccountDao.getAll().first()`. **Read ONLY `isConnected`/`connectedAt`/`lastSyncAt` from those rows — do NOT emit `email`, `displayName`, or `avatarUrl` (account PII; the email-redaction pattern is only a backstop).** **No token/cookie/userId values.** If probes were injected, add `expired=<isExpired()>`.
 
 - [ ] **Step 4: Run to verify it passes**
 
