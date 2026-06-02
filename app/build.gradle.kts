@@ -61,9 +61,11 @@ val localProperties = Properties().apply {
     }
 }
 val lastFmApiKey: String =
-    localProperties.getProperty("lastfm.apiKey") ?: System.getenv("LASTFM_API_KEY").orEmpty()
+//    localProperties.getProperty("lastfm.apiKey") ?: System.getenv("LASTFM_API_KEY").orEmpty()
+    localProperties.getProperty("LASTFM_API_KEY") ?: ""
 val lastFmApiSecret: String =
-    localProperties.getProperty("lastfm.apiSecret") ?: System.getenv("LASTFM_API_SECRET").orEmpty()
+    localProperties.getProperty("LASTFM_API_SECRET") ?: ""
+//    localProperties.getProperty("lastfm.apiSecret") ?: System.getenv("LASTFM_API_SECRET").orEmpty()
 // Optional comma-separated pool of EXTRA api keys used only for unsigned read
 // endpoints (tag/similar/etc.) to spread load and raise the shared-key rate
 // ceiling. No secret needed — reads are unsigned. Auth/scrobble always use the

@@ -285,11 +285,11 @@ class FailedMatchesViewModel @Inject constructor(
                         if (best != null) {
                             _resyncCandidates.update { current ->
                                 current + (trackId to ResyncCandidate(
-                                    videoId = best.videoId,
+                                    videoId = best.id,
                                     title = best.title,
                                     artist = best.uploader,
-                                    thumbnailUrl = best.thumbnailUrl,
-                                    durationSeconds = best.durationSeconds.toDouble(),
+                                    thumbnailUrl = best.thumbnail,
+                                    durationSeconds = best.duration,
                                 ))
                             }
                         }
