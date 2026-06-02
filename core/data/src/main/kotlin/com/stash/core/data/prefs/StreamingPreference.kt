@@ -47,6 +47,7 @@ class StreamingPreference @Inject constructor(
     private val enabledKey = booleanPreferencesKey("streaming_enabled")
     private val cellularKey = booleanPreferencesKey("streaming_on_cellular")
     private val qualityKey = stringPreferencesKey("streaming_quality_tier")
+    private val forceYouTubeFallbackKey = booleanPreferencesKey("force_youtube_fallback")
 
     val enabled: Flow<Boolean> = context.streamingDataStore.data.map { prefs ->
         prefs[enabledKey] ?: false
@@ -61,7 +62,19 @@ class StreamingPreference @Inject constructor(
             .getOrDefault(StreamQualityTier.LOSSLESS)
     }
 
+    /**
+     * Test-only toggle. When `true`, [StreamSourceRegistry] skips Kennyy
+     * and Squid and resolves every streaming track via the YouTube
+     * fallback resolver only — used to reproduce the lossless-down path
+     * on demand. Default `false` (normal use).
+     */
+    val forceYouTubeFallback: Flow<Boolean> = context.streamingDataStore.data.map { prefs ->
+        prefs[forceYouTubeFallbackKey] ?: false
+    }
+
     suspend fun current(): Boolean = enabled.first()
+
+    suspend fun isForceYouTubeFallback(): Boolean = forceYouTubeFallback.first()
 
     suspend fun setEnabled(value: Boolean) {
         context.streamingDataStore.edit { it[enabledKey] = value }
@@ -69,6 +82,10 @@ class StreamingPreference @Inject constructor(
 
     suspend fun setStreamOnCellular(value: Boolean) {
         context.streamingDataStore.edit { it[cellularKey] = value }
+    }
+
+    suspend fun setForceYouTubeFallback(value: Boolean) {
+        context.streamingDataStore.edit { it[forceYouTubeFallbackKey] = value }
     }
 
     suspend fun setStreamQuality(tier: StreamQualityTier) {

@@ -2,6 +2,7 @@ package com.stash.core.media.streaming
 
 import android.util.Log
 import com.stash.core.data.db.entity.TrackEntity
+import com.stash.core.data.prefs.StreamingPreference
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -32,12 +33,18 @@ import javax.inject.Singleton
  * on the player side and stores the first source's success keyed by track
  * id. Subsequent plays of the same track hit the cache and bypass the
  * registry entirely until the URL's `etsp` expires.
+ *
+ * Test toggle: when [StreamingPreference.isForceYouTubeFallback] is on,
+ * [resolve] skips Kennyy and Squid entirely and routes every track through
+ * the YouTube resolver only — used to reproduce the lossless-down fallback
+ * path on demand. Off for normal use.
  */
 @Singleton
 class StreamSourceRegistry @Inject constructor(
     private val kennyy: KennyyStreamResolver,
     private val qobuz: QobuzStreamResolver,
     private val youtube: YouTubeStreamResolver,
+    private val streamingPreference: StreamingPreference,
 ) {
 
     /**
@@ -53,10 +60,19 @@ class StreamSourceRegistry @Inject constructor(
      *   track) calls leave this true.
      */
     suspend fun resolve(track: TrackEntity, allowYouTube: Boolean = true): StreamUrl? {
+        val forceYt = streamingPreference.isForceYouTubeFallback()
         val resolvers = buildList<Pair<String, suspend (TrackEntity) -> StreamUrl?>> {
-            add("kennyy" to kennyy::resolve)
-            add("squid" to qobuz::resolve)
-            if (allowYouTube) add("youtube" to youtube::resolve)
+            if (forceYt) {
+                // Test toggle: skip the lossless sources, forcing the
+                // YouTube fallback path. Still gated by allowYouTube so the
+                // background-fill keeps resolving nothing (matching a genuine
+                // both-sources-down outage).
+                if (allowYouTube) add("youtube" to youtube::resolve)
+            } else {
+                add("kennyy" to kennyy::resolve)
+                add("squid" to qobuz::resolve)
+                if (allowYouTube) add("youtube" to youtube::resolve)
+            }
         }
         for ((name, fn) in resolvers) {
             val result = runCatching { fn(track) }
