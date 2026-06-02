@@ -136,11 +136,15 @@ class SpotifyAuthManager @Inject constructor(
                 version
             } else {
                 Log.w(TAG, "Could not scrape client version, using fallback")
-                SpotifyAuthConfig.CLIENT_VERSION_FALLBACK
+                SpotifyAuthConfig.CLIENT_VERSION_FALLBACK.also {
+                    cachedClientVersion = it
+                }
             }
         } catch (e: Exception) {
             Log.w(TAG, "Failed to scrape client version: ${e.message}")
-            SpotifyAuthConfig.CLIENT_VERSION_FALLBACK
+            SpotifyAuthConfig.CLIENT_VERSION_FALLBACK.also {
+                cachedClientVersion = it
+            }
         }
     }
 

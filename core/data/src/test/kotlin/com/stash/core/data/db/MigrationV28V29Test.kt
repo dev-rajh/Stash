@@ -14,16 +14,8 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 /**
- * v0.9.38 / library-health-phase1: verifies migration v28 -> v29
- * rewrites every legacy `download_queue.failure_type = 'DOWNLOAD_ERROR'`
- * row to `'UNKNOWN'`.
- *
- * Why: Phase 1 deletes the `DOWNLOAD_ERROR` enum constant from
- * [com.stash.core.model.download.DownloadFailureType]. Without this
- * migration, `Converters.fromFailureType`'s `valueOf(it)` call would
- * crash with `IllegalArgumentException` the first time Room reads a
- * legacy row. Room runs migrations before any DAO read by contract,
- * so once this migration ships the converter is safe.
+ * v29 stores user-approved manual YouTube matches separately from the
+ * mutable youtube_id field so future syncs can honor the user's choice.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(manifest = Config.NONE, sdk = [33])
@@ -40,92 +32,68 @@ class MigrationV28V29Test {
     )
 
     @Test
-    fun `migration v28 to v29 rewrites DOWNLOAD_ERROR rows to UNKNOWN`() {
+    fun `migration v28 to v29 adds nullable pinned_youtube_video_id`() {
         helper.createDatabase(DB_NAME, 28).use { db ->
-            db.insertDownloadQueueRow(
-                id = 1L,
-                failureType = "DOWNLOAD_ERROR",
-            )
-            // Honest precondition: confirm the v28 seed actually stored
-            // 'DOWNLOAD_ERROR' before the migration touches it. Without
-            // this readback, a silently corrupted insert could still
-            // produce a post-migration 'UNKNOWN' for the wrong reason.
-            db.query("SELECT failure_type FROM download_queue WHERE id = 1").use { c ->
-                assertEquals(1, c.count)
-                assertTrue(c.moveToFirst())
-                assertEquals("DOWNLOAD_ERROR", c.getString(0))
-            }
+            db.insertTrackV28(id = 1L, youtubeId = "old-video")
         }
 
         val migrated = helper.runMigrationsAndValidate(
             DB_NAME, 29, true, StashDatabase.MIGRATION_28_29,
         )
 
-        migrated.query("SELECT failure_type FROM download_queue WHERE id = 1").use { c ->
-            assertEquals(1, c.count)
+        migrated.query("SELECT youtube_id, pinned_youtube_video_id FROM tracks WHERE id = 1").use { c ->
             assertTrue(c.moveToFirst())
-            assertEquals("UNKNOWN", c.getString(0))
+            assertEquals("old-video", c.getString(0))
+            assertTrue("legacy rows should not become pinned automatically", c.isNull(1))
         }
     }
 
     @Test
-    fun `migration v28 to v29 leaves non-DOWNLOAD_ERROR failure_types untouched`() {
-        helper.createDatabase(DB_NAME, 28).use { db ->
-            db.insertDownloadQueueRow(id = 1L, failureType = "NONE")
-            db.insertDownloadQueueRow(id = 2L, failureType = "DOWNLOAD_ERROR")
-            // NO_MATCH is a real pre-Task-1 enum constant that legitimately
-            // appears in user databases; the migration must leave it alone.
-            db.insertDownloadQueueRow(id = 3L, failureType = "NO_MATCH")
-            // A deliberate non-enum literal that *contains* 'DOWNLOAD_ERROR'
-            // as a substring. Asserts the WHERE clause is literal equality
-            // (`= 'DOWNLOAD_ERROR'`), not a LIKE/substring match.
-            db.insertDownloadQueueRow(id = 4L, failureType = "DOWNLOAD_ERROR_SUFFIX")
-        }
+    fun `pinned_youtube_video_id round-trips after migration`() {
+        helper.createDatabase(DB_NAME, 28).use { db -> db.insertTrackV28(id = 1L) }
 
         val migrated = helper.runMigrationsAndValidate(
             DB_NAME, 29, true, StashDatabase.MIGRATION_28_29,
         )
 
-        migrated.query(
-            "SELECT id, failure_type FROM download_queue ORDER BY id",
-        ).use { c ->
-            assertEquals(4, c.count)
+        val cv = ContentValues().apply { put("pinned_youtube_video_id", "manual-video") }
+        migrated.update("tracks", SQLiteDatabase.CONFLICT_REPLACE, cv, "id = 1", null)
+
+        migrated.query("SELECT pinned_youtube_video_id FROM tracks WHERE id = 1").use { c ->
             assertTrue(c.moveToFirst())
-            assertEquals(1L, c.getLong(0))
-            assertEquals("NONE", c.getString(1))
-            assertTrue(c.moveToNext())
-            assertEquals(2L, c.getLong(0))
-            assertEquals("UNKNOWN", c.getString(1))
-            assertTrue(c.moveToNext())
-            assertEquals(3L, c.getLong(0))
-            assertEquals("NO_MATCH", c.getString(1))
-            assertTrue(c.moveToNext())
-            assertEquals(4L, c.getLong(0))
-            assertEquals("DOWNLOAD_ERROR_SUFFIX", c.getString(1))
+            assertEquals("manual-video", c.getString(0))
         }
     }
 
-    /**
-     * Insert a download_queue row at v28 schema. The download_queue
-     * table has a FK to `tracks(id)` ON DELETE CASCADE; FK enforcement
-     * is off by default on a fresh test DB so the missing parent row
-     * doesn't reject the insert. NOT NULL columns per 28.json:
-     * id, track_id, status, search_query, retry_count, failure_type,
-     * created_at.
-     */
-    private fun androidx.sqlite.db.SupportSQLiteDatabase.insertDownloadQueueRow(
+    private fun androidx.sqlite.db.SupportSQLiteDatabase.insertTrackV28(
         id: Long,
-        failureType: String,
+        youtubeId: String? = null,
     ) {
         val cv = ContentValues().apply {
             put("id", id)
-            put("track_id", id)
-            put("status", "FAILED")
-            put("search_query", "")
-            put("retry_count", 0)
-            put("failure_type", failureType)
-            put("created_at", 1_716_000_000_000L)
+            put("title", "Test Track $id")
+            put("artist", "Test Artist")
+            put("album", "")
+            put("album_artist", "")
+            put("duration_ms", 0L)
+            put("file_format", "opus")
+            put("quality_kbps", 0)
+            put("file_size_bytes", 0L)
+            put("source", "SPOTIFY")
+            put("youtube_id", youtubeId)
+            put("date_added", 0L)
+            put("play_count", 0)
+            put("is_downloaded", 0)
+            put("canonical_title", "test track $id")
+            put("canonical_artist", "test artist")
+            put("match_confidence", 0f)
+            put("match_dismissed", 0)
+            put("match_flagged", 0)
+            put("lastfm_user_loved", 0)
+            put("is_streamable", 0)
+            putNull("metadata_embedded_at")
+            putNull("lyrics_fetched_at")
         }
-        insert("download_queue", SQLiteDatabase.CONFLICT_REPLACE, cv)
+        insert("tracks", SQLiteDatabase.CONFLICT_REPLACE, cv)
     }
 }

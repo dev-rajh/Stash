@@ -15,6 +15,7 @@ import com.stash.data.download.DownloadResult
 import com.stash.data.download.files.FileOrganizer
 import com.stash.data.download.files.SwapCoordinator
 import com.stash.data.download.matching.HybridSearchExecutor
+import com.stash.data.download.matching.MatchScorer
 import com.stash.data.download.prefs.QualityPreferencesManager
 import com.stash.data.download.prefs.toYtDlpArgs
 import com.stash.data.download.preview.PreviewUrlExtractor
@@ -118,6 +119,7 @@ class FailedMatchesViewModel @Inject constructor(
     private val previewPlayer: PreviewPlayer,
     private val previewUrlExtractor: PreviewUrlExtractor,
     private val searchExecutor: HybridSearchExecutor,
+    private val matchScorer: MatchScorer,
     private val downloadExecutor: DownloadExecutor,
     private val fileOrganizer: FileOrganizer,
     private val qualityPrefs: QualityPreferencesManager,
@@ -255,7 +257,8 @@ class FailedMatchesViewModel @Inject constructor(
                 launch {
                     semaphore.acquire()
                     try {
-                        val results = searchExecutor.search(query, maxResults = 5)
+                        val track = trackDao.getById(trackId)
+                        val results = searchExecutor.search(query, maxResults = 10)
                         // For flagged tracks, skip the currently-associated
                         // (wrong) video — surfacing it as the candidate would
                         // just swap the track with itself.
@@ -384,7 +387,7 @@ class FailedMatchesViewModel @Inject constructor(
 
             try {
                 // Immediately mark as completed — row disappears from reactive Flow
-                trackDao.updateYoutubeId(trackId, candidate.videoId)
+                trackDao.pinYoutubeVideoId(trackId, candidate.videoId)
                 downloadQueueDao.updateStatus(
                     id = queueEntryId,
                     status = DownloadStatus.COMPLETED,

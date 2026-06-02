@@ -44,6 +44,7 @@ fun StashScaffold(
     val navController = rememberNavController()
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = navBackStackEntry?.destination?.route
+    val isNowPlayingRoute = currentRoute == NowPlayingRoute::class.qualifiedName
 
     // Whether a detail screen is currently in multi-select mode. Detail screens
     // signal this via `onSelectionModeChanged`; while it is true we hide the
@@ -99,12 +100,8 @@ fun StashScaffold(
         // 15+ where edge-to-edge is enforced. Reported via Twitter
         // (https://x.com/tekno_deha1/status/...).
         bottomBar = {
-            // While a screen is selecting, render no bottom chrome at all — the
-            // screen's own selection action bar (which handles its own nav insets)
-            // takes the bottom edge. This drops innerPadding.bottom to 0 so the
-            // content extends full-height behind that action bar.
-            if (!selectionActive) {
-                Column(modifier = Modifier.windowInsetsPadding(WindowInsets.navigationBars)) {
+            Column(modifier = Modifier.windowInsetsPadding(WindowInsets.navigationBars)) {
+                if (!isNowPlayingRoute) {
                     MiniPlayer(
                         onExpand = {
                             navController.navigate(NowPlayingRoute) {
@@ -112,6 +109,7 @@ fun StashScaffold(
                             }
                         },
                     )
+                }
 
                     StashBottomBar(
                         currentRoute = currentRoute,

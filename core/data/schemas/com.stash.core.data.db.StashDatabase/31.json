@@ -2,11 +2,11 @@
   "formatVersion": 1,
   "database": {
     "version": 31,
-    "identityHash": "db872c79fcff68f9c3a796f8bdabb315",
+    "identityHash": "3baf08d6d68573badf34151c730ba1f1",
     "entities": [
       {
         "tableName": "tracks",
-        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `title` TEXT NOT NULL, `artist` TEXT NOT NULL, `album` TEXT NOT NULL, `album_artist` TEXT NOT NULL DEFAULT '', `duration_ms` INTEGER NOT NULL, `file_path` TEXT, `file_format` TEXT NOT NULL, `quality_kbps` INTEGER NOT NULL, `file_size_bytes` INTEGER NOT NULL, `source` TEXT NOT NULL, `spotify_uri` TEXT, `youtube_id` TEXT, `album_art_url` TEXT, `album_art_path` TEXT, `date_added` INTEGER NOT NULL, `last_played` INTEGER, `play_count` INTEGER NOT NULL, `is_downloaded` INTEGER NOT NULL, `canonical_title` TEXT NOT NULL, `canonical_artist` TEXT NOT NULL, `match_confidence` REAL NOT NULL, `match_dismissed` INTEGER NOT NULL, `match_flagged` INTEGER NOT NULL DEFAULT 0, `isrc` TEXT, `explicit` INTEGER, `music_video_type` TEXT, `yt_canonical_video_id` TEXT, `bits_per_sample` INTEGER, `sample_rate_hz` INTEGER, `spotify_saved_at` INTEGER, `ytmusic_saved_at` INTEGER, `stash_liked_at` INTEGER, `mbid` TEXT, `lastfm_user_playcount` INTEGER, `lastfm_listeners` INTEGER, `lastfm_user_loved` INTEGER NOT NULL DEFAULT 0, `loudness_lufs` REAL, `true_peak_dbfs` REAL, `loudness_measured_at` INTEGER, `is_streamable` INTEGER NOT NULL DEFAULT 0, `is_streamable_checked_at` INTEGER, `metadata_embedded_at` INTEGER, `lyrics_fetched_at` INTEGER)",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `title` TEXT NOT NULL, `artist` TEXT NOT NULL, `album` TEXT NOT NULL, `album_artist` TEXT NOT NULL DEFAULT '', `duration_ms` INTEGER NOT NULL, `file_path` TEXT, `file_format` TEXT NOT NULL, `quality_kbps` INTEGER NOT NULL, `file_size_bytes` INTEGER NOT NULL, `source` TEXT NOT NULL, `spotify_uri` TEXT, `youtube_id` TEXT, `pinned_youtube_video_id` TEXT, `album_art_url` TEXT, `album_art_path` TEXT, `date_added` INTEGER NOT NULL, `last_played` INTEGER, `play_count` INTEGER NOT NULL, `is_downloaded` INTEGER NOT NULL, `canonical_title` TEXT NOT NULL, `canonical_artist` TEXT NOT NULL, `match_confidence` REAL NOT NULL, `match_dismissed` INTEGER NOT NULL, `match_flagged` INTEGER NOT NULL DEFAULT 0, `isrc` TEXT, `explicit` INTEGER, `music_video_type` TEXT, `yt_canonical_video_id` TEXT, `bits_per_sample` INTEGER, `sample_rate_hz` INTEGER, `spotify_saved_at` INTEGER, `ytmusic_saved_at` INTEGER, `stash_liked_at` INTEGER, `mbid` TEXT, `lastfm_user_playcount` INTEGER, `lastfm_listeners` INTEGER, `lastfm_user_loved` INTEGER NOT NULL DEFAULT 0, `loudness_lufs` REAL, `true_peak_dbfs` REAL, `loudness_measured_at` INTEGER, `is_streamable` INTEGER NOT NULL DEFAULT 0, `is_streamable_checked_at` INTEGER, `metadata_embedded_at` INTEGER, `lyrics_fetched_at` INTEGER)",
         "fields": [
           {
             "fieldPath": "id",
@@ -82,6 +82,11 @@
           {
             "fieldPath": "youtubeId",
             "columnName": "youtube_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "pinnedYoutubeVideoId",
+            "columnName": "pinned_youtube_video_id",
             "affinity": "TEXT"
           },
           {
@@ -1782,7 +1787,7 @@
     ],
     "setupQueries": [
       "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
-      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'db872c79fcff68f9c3a796f8bdabb315')"
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '3baf08d6d68573badf34151c730ba1f1')"
     ]
   }
 }
