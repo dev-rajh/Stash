@@ -162,7 +162,7 @@ class PlayerRepositoryImpl @Inject constructor(
             playerState
                 .map { it.currentIndex }
                 .distinctUntilChanged()
-                .collect { idx -> Log.d(TAG, "AUTODIAG prefetch trigger idx=$idx"); prefetchNextTrack(idx) }
+                .collect { idx -> prefetchNextTrack(idx) }
         }
     }
 
@@ -387,7 +387,7 @@ class PlayerRepositoryImpl @Inject constructor(
             try {
                 fillQueueAppend(controller, forward, semaphore, streamingOn, allowYouTube = false)
                 fillQueuePrepend(controller, backward, semaphore, streamingOn, allowYouTube = false)
-                Log.i(TAG, "setQueue: background fill complete (${tracks.size} tracks); AUTODIAG timeline=${controller.mediaItemCount} hasNext=${controller.hasNextMediaItem()} queueTracks=${currentQueueTracks.size}")
+                Log.i(TAG, "setQueue: background fill complete (${tracks.size} tracks)")
                 // Kick the next-up prefetch for the FIRST track explicitly. The
                 // reactive watcher (playerState.currentIndex.distinctUntilChanged)
                 // suppresses the initial idx=0 emission for a freshly-started
@@ -546,10 +546,7 @@ class PlayerRepositoryImpl @Inject constructor(
         val swapped = refreshControllerMediaItem(controller, next, resolved)
         if (!swapped) {
             val item = (buildMediaItemForTrack(entity, allowYouTube = true) as? StreamRoutingResult.Item)?.mediaItem
-            Log.d(TAG, "AUTODIAG prefetch resolved id=${next.id} not in timeline -> insert (built=${item != null})")
             if (item != null) insertNextMediaItem(controller, next.id, item)
-        } else {
-            Log.d(TAG, "AUTODIAG prefetch resolved id=${next.id} swapped existing slot")
         }
     }
 
@@ -596,7 +593,6 @@ class PlayerRepositoryImpl @Inject constructor(
         }
         val insertAt = (controller.currentMediaItemIndex + 1).coerceIn(0, count)
         controller.addMediaItem(insertAt, item)
-        Log.i(TAG, "AUTODIAG inserted next id=$trackId at index=$insertAt; timeline ${count}->${controller.mediaItemCount} hasNext=${controller.hasNextMediaItem()}")
     }
 
     /**
@@ -1127,11 +1123,6 @@ class PlayerRepositoryImpl @Inject constructor(
         }
 
         override fun onPlaybackStateChanged(playbackState: Int) {
-            if (playbackState == Player.STATE_ENDED) {
-                controllerDeferred?.let {
-                    Log.w(TAG, "AUTODIAG STATE_ENDED idx=${it.currentMediaItemIndex} count=${it.mediaItemCount} hasNext=${it.hasNextMediaItem()}")
-                }
-            }
             controllerDeferred?.let { updateState(it) }
         }
 
