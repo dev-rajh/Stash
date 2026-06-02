@@ -148,6 +148,24 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
+    /**
+     * Test-only "Force YouTube fallback" toggle. When on,
+     * [StreamSourceRegistry] skips Kennyy/Squid and streams every track
+     * via YouTube — surfaced as a switch in the Diagnostics card so the
+     * lossless-down fallback path can be reproduced on demand.
+     */
+    val forceYouTubeFallback: kotlinx.coroutines.flow.StateFlow<Boolean> =
+        streamingPreference.forceYouTubeFallback.stateIn(
+            scope = viewModelScope,
+            started = kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5_000),
+            initialValue = false,
+        )
+
+    /** Persist the force-YouTube-fallback test toggle flip. */
+    fun setForceYouTubeFallback(v: Boolean) = viewModelScope.launch {
+        streamingPreference.setForceYouTubeFallback(v)
+    }
+
     /** Internal mutable UI state that is combined with token-manager flows. */
     private val _localState = MutableStateFlow(LocalState())
 
