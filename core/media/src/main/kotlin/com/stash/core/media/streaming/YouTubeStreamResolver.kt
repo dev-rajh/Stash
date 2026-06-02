@@ -126,7 +126,33 @@ class YouTubeStreamResolver @Inject constructor(
      * Spotify track.
      */
     private suspend fun searchYouTubeForVideoId(track: TrackEntity): String? {
-        val query = "${track.artist} ${track.title}".trim()
+        val artist = track.artist.trim()
+        val title = track.title.trim()
+        if (artist.isBlank() && title.isBlank()) return null
+
+        // Primary: the songs-FILTERED canonical matcher the download path uses.
+        // It returns a single predictable Songs shelf, is title-agnostic, and
+        // prefers Topic/official audio (ATV/OMV) — so it finds a videoId for
+        // catalog tracks (older / compilation, e.g. "Demis Roussos - Forever
+        // and Ever") that the legacy unfiltered searchAll mislabels and drops
+        // as "0 sections". That drop silently broke YouTube-fallback playback:
+        // no videoId -> no stream URL -> nothing to play or auto-advance to.
+        val canonical = withTimeoutOrNull(YT_SEARCH_TIMEOUT_MS) {
+            runCatching { ytMusicApiClient.searchCanonicalVideoId(artist, title) }
+                .onFailure { t ->
+                    if (t is CancellationException) throw t
+                    Log.d(TAG, "canonical search failed for '$artist $title': ${t.message}")
+                }
+                .getOrNull()
+        }
+        if (!canonical.isNullOrBlank()) {
+            Log.d(TAG, "canonical search hit '$artist $title' -> $canonical")
+            return canonical
+        }
+
+        // Backstop: the legacy tabbed searchAll — covers anything the canonical
+        // (ATV/OMV-preferring) matcher skips, e.g. UGC-only uploads.
+        val query = "$artist $title".trim()
         if (query.isBlank()) return null
         return withTimeoutOrNull(YT_SEARCH_TIMEOUT_MS) {
             val results = runCatching { ytMusicApiClient.searchAll(query) }

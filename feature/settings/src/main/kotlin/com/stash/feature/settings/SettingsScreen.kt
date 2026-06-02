@@ -265,6 +265,8 @@ fun SettingsScreen(
         onStreamingToggle = viewModel::onStreamingToggle,
         streamOnCellular = viewModel.streamOnCellular.collectAsStateWithLifecycle().value,
         onStreamOnCellularToggle = viewModel::onStreamOnCellularToggle,
+        forceYouTubeFallback = viewModel.forceYouTubeFallback.collectAsStateWithLifecycle().value,
+        onToggleForceYouTubeFallback = viewModel::setForceYouTubeFallback,
         treePicker = treePicker,
         onSetPickerIntent = { pendingPickerIntent = it },
         modifier = modifier,
@@ -342,6 +344,10 @@ private fun SettingsContent(
     streamOnCellular: Boolean,
     /** Routed to [SettingsViewModel.onStreamOnCellularToggle] in the host. */
     onStreamOnCellularToggle: (Boolean) -> Unit,
+    /** Live "force YouTube fallback" test pref — see [SettingsViewModel.forceYouTubeFallback]. */
+    forceYouTubeFallback: Boolean,
+    /** Routed to [SettingsViewModel.setForceYouTubeFallback] in the host. */
+    onToggleForceYouTubeFallback: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val extendedColors = StashTheme.extendedColors
@@ -1488,6 +1494,34 @@ private fun SettingsContent(
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.primary),
                 ) {
                     Text("Share diagnostics")
+                }
+
+                // Test tool: force the YouTube streaming-fallback path so the
+                // lossless-down scenario can be reproduced on demand without
+                // waiting for Squid/Kennyy to actually go down.
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Force YouTube fallback",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                        Text(
+                            text = "Skip Squid/Kennyy and stream everything via YouTube — for reproducing fallback issues. Leave off for normal use.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    Switch(
+                        checked = forceYouTubeFallback,
+                        onCheckedChange = onToggleForceYouTubeFallback,
+                    )
                 }
             }
         }
