@@ -355,6 +355,14 @@ interface PlaylistDao {
     @Query("UPDATE playlists SET name = :name WHERE id = :playlistId")
     suspend fun updateName(playlistId: Long, name: String)
 
+    /**
+     * Backfills/refreshes the playlist owner id (Spotify user id/username, or
+     * `"spotify"`). Called from the DiffWorker so playlists created before the
+     * v32 owner-filter migration pick up their owner on the next sync.
+     */
+    @Query("UPDATE playlists SET owner_id = :ownerId WHERE id = :playlistId")
+    suspend fun updateOwnerId(playlistId: Long, ownerId: String?)
+
     /** All Spotify playlists ordered by type (liked first, then mixes, then custom) and name. */
     @Query("""
         SELECT * FROM playlists

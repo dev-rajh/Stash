@@ -22,6 +22,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Sync
@@ -213,6 +214,7 @@ fun SyncScreen(
                             onSyncModeChanged = viewModel::onSpotifySyncModeChanged,
                             onPlaylistToggled = viewModel::onTogglePlaylistSync,
                             onRefreshPlaylists = viewModel::onSyncNow,
+                            onDownloadPlaylist = viewModel::onDownloadSinglePlaylist,
                         )
                     },
                 )
@@ -606,6 +608,7 @@ private fun SpotifySyncToggleRow(
     trackCount: Int,
     enabled: Boolean,
     onToggle: (Boolean) -> Unit,
+    onDownload: (() -> Unit)? = null,
 ) {
     Row(
         modifier = Modifier
@@ -627,6 +630,19 @@ private fun SpotifySyncToggleRow(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+        }
+        // Per-playlist "download now" affordance. Enables sync for just this
+        // playlist and kicks off an immediate (force) download — see
+        // SyncViewModel.onDownloadSinglePlaylist. Only shown when a handler
+        // is provided (Spotify custom playlists).
+        if (onDownload != null) {
+            IconButton(onClick = onDownload) {
+                Icon(
+                    imageVector = Icons.Filled.Download,
+                    contentDescription = "Download “$name” now",
+                    tint = MaterialTheme.colorScheme.primary,
+                )
+            }
         }
         Switch(
             checked = enabled,
@@ -712,6 +728,7 @@ private fun SpotifyExpandedContent(
     onSyncModeChanged: (SyncMode) -> Unit,
     onPlaylistToggled: (Long, Boolean) -> Unit,
     onRefreshPlaylists: () -> Unit,
+    onDownloadPlaylist: (Long) -> Unit,
 ) {
     val purple = MaterialTheme.colorScheme.primary
     if (uiState.spotifyPlaylists.isEmpty()) {
@@ -808,14 +825,85 @@ private fun SpotifyExpandedContent(
                 color = purple,
                 fontWeight = FontWeight.SemiBold,
             )
+
+            var ownerFilter by remember { mutableStateOf(SpotifyOwnerFilter.ALL) }
+            // Only show the owner filter when there's actually a mix of
+            // owners — a single-owner library doesn't benefit from chips.
+            val distinctOwnerClasses = custom
+                .map { ownerClass(it.ownerId, uiState.currentSpotifyUserId) }
+                .distinct()
+            if (distinctOwnerClasses.size > 1) {
+                OwnerFilterChipRow(
+                    selected = ownerFilter,
+                    onSelect = { ownerFilter = it },
+                    accent = purple,
+                )
+            }
+            val ownerFiltered = if (ownerFilter == SpotifyOwnerFilter.ALL) {
+                custom
+            } else {
+                custom.filter {
+                    ownerClass(it.ownerId, uiState.currentSpotifyUserId) == ownerFilter
+                }
+            }
+
             SearchablePlaylistList(
-                items = custom,
+                items = ownerFiltered,
                 accent = purple,
                 name = { it.name },
                 trackCount = { it.trackCount },
                 enabled = { it.syncEnabled },
                 id = { it.id },
                 onPlaylistToggled = onPlaylistToggled,
+                onDownload = onDownloadPlaylist,
+            )
+        }
+    }
+}
+
+/**
+ * Owner buckets for the Spotify "Your Playlists" filter. [ALL] is the
+ * unfiltered default; the rest partition playlists by [ownerClass].
+ */
+private enum class SpotifyOwnerFilter(val label: String) {
+    ALL("All"),
+    MINE("Mine"),
+    OTHERS("Others"),
+    SPOTIFY("Spotify"),
+}
+
+/**
+ * Classify a playlist's owner relative to the signed-in user. Spotify-owned
+ * playlists report owner id `"spotify"`; everything matching the current
+ * user's id/username is "Mine"; the rest are "Others". A null/blank owner
+ * (e.g. rows synced before the v32 migration) falls into "Others" so it
+ * stays visible under any non-Mine filter rather than vanishing.
+ */
+private fun ownerClass(ownerId: String?, currentUserId: String?): SpotifyOwnerFilter = when {
+    ownerId.equals("spotify", ignoreCase = true) -> SpotifyOwnerFilter.SPOTIFY
+    ownerId != null && currentUserId != null && ownerId.equals(currentUserId, ignoreCase = true) ->
+        SpotifyOwnerFilter.MINE
+    else -> SpotifyOwnerFilter.OTHERS
+}
+
+@Composable
+private fun OwnerFilterChipRow(
+    selected: SpotifyOwnerFilter,
+    onSelect: (SpotifyOwnerFilter) -> Unit,
+    accent: Color,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+            .padding(top = 4.dp, bottom = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        SpotifyOwnerFilter.entries.forEach { option ->
+            FilterChip(
+                selected = selected == option,
+                onClick = { onSelect(option) },
+                label = { Text(option.label) },
             )
         }
     }
@@ -839,6 +927,7 @@ private fun <T> SearchablePlaylistList(
     enabled: (T) -> Boolean,
     id: (T) -> Long,
     onPlaylistToggled: (Long, Boolean) -> Unit,
+    onDownload: ((Long) -> Unit)? = null,
 ) {
     var query by remember { mutableStateOf("") }
     var sort by remember { mutableStateOf(PlaylistListSort.NAME) }
@@ -909,6 +998,7 @@ private fun <T> SearchablePlaylistList(
                 trackCount = trackCount(playlist),
                 enabled = enabled(playlist),
                 onToggle = { onPlaylistToggled(id(playlist), it) },
+                onDownload = onDownload?.let { handler -> { handler(id(playlist)) } },
             )
         }
     }

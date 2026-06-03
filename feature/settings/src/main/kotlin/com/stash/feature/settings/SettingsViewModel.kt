@@ -346,6 +346,19 @@ class SettingsViewModel @Inject constructor(
     }
 
     /**
+     * Manually re-scan the configured external download folder and re-link
+     * any files already on disk to their (undownloaded) library rows, so
+     * songs downloaded before a reinstall/data-clear aren't fetched again.
+     *
+     * Runs automatically on startup too, but the manual entry point lets the
+     * user trigger it AFTER a fresh re-sync has repopulated the track rows
+     * (the startup pass runs before that and finds nothing to match).
+     *
+     * Returns the number of tracks restored.
+     */
+    suspend fun scanExistingSongs(): Int = musicRepository.rescanExternalDownloads()
+
+    /**
      * Counts how many downloaded tracks still live in internal storage —
      * used by the Settings UI to decide whether to surface the "Move
      * library" action.

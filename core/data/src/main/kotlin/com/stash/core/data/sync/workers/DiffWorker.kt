@@ -240,7 +240,13 @@ class DiffWorker @AssistedInject constructor(
             if (!existing.isActive) {
                 playlistDao.reactivateById(existing.id)
             }
+            // Backfill/refresh owner so rows created before the v32 owner
+            // filter pick it up, and ownership changes are reflected.
+            if (snapshot.ownerId != null && snapshot.ownerId != existing.ownerId) {
+                playlistDao.updateOwnerId(existing.id, snapshot.ownerId)
+            }
             return existing.copy(
+                ownerId = snapshot.ownerId ?: existing.ownerId,
                 artUrl = if (rotatesArt) snapshot.artUrl ?: existing.artUrl else existing.artUrl,
                 name = snapshot.playlistName.ifBlank { existing.name },
                 isActive = true,
@@ -255,6 +261,7 @@ class DiffWorker @AssistedInject constructor(
             mixNumber = snapshot.mixNumber,
             artUrl = snapshot.artUrl,
             trackCount = snapshot.trackCount,
+            ownerId = snapshot.ownerId,
             // Opt-in by default for every source. The first Sync Now is
             // effectively a discovery pass — it populates playlist rows
             // but queues nothing for download until the user picks what

@@ -101,6 +101,11 @@ fun StashScaffold(
         // (https://x.com/tekno_deha1/status/...).
         bottomBar = {
             Column(modifier = Modifier.windowInsetsPadding(WindowInsets.navigationBars)) {
+                // The mini-player is redundant on the full-screen Now Playing
+                // route (the expanded player already shows the current track),
+                // so hide it there. The navigation bar, however, stays visible
+                // everywhere — including Now Playing — so the user can always
+                // jump to another tab without first dismissing the player.
                 if (!isNowPlayingRoute) {
                     MiniPlayer(
                         onExpand = {
@@ -111,18 +116,17 @@ fun StashScaffold(
                     )
                 }
 
-                    StashBottomBar(
-                        currentRoute = currentRoute,
-                        onNavigate = { dest ->
-                            navController.navigate(dest.route) {
-                                popUpTo(navController.graph.findStartDestination().id) {
-                                    inclusive = false
-                                }
-                                launchSingleTop = true
+                StashBottomBar(
+                    currentRoute = currentRoute,
+                    onNavigate = { dest ->
+                        navController.navigate(dest.route) {
+                            popUpTo(navController.graph.findStartDestination().id) {
+                                inclusive = false
                             }
-                        },
-                    )
-                }
+                            launchSingleTop = true
+                        }
+                    },
+                )
             }
         },
     ) { innerPadding ->

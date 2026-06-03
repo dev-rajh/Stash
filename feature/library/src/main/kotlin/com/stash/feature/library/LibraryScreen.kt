@@ -36,6 +36,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material3.IconButton
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Album
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.DownloadDone
@@ -68,6 +69,7 @@ import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -75,6 +77,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -392,24 +396,17 @@ private fun LibraryContent(
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // -- Shuffle Library CTA (v0.9.14) --
-        // Pre-existing per-playlist queues only ever held ~30-50 tracks, so
-        // shuffle "felt like the same songs" once libraries grew past a few
-        // hundred. This entry point seeds the queue from EVERY downloaded
-        // track and arms an auto-grow watcher in PlayerRepository so the
-        // queue refills as the user nears the tail. Sized to read as the
-        // primary action on the tab without crowding the search bar below.
-        ShuffleLibraryCard(
-            onClick = onShuffleLibrary,
-            modifier = Modifier.padding(horizontal = 20.dp),
-        )
-
-        Spacer(modifier = Modifier.height(12.dp))
-
-        // -- Glassmorphic search bar --
-        GlassSearchBar(
+        // -- Shuffle pill + expandable search (v0.9.44) --
+        // Compact rounded "Shuffle" pill on the leading edge plus a search
+        // affordance that starts as an icon and expands inline into a field
+        // on tap (collapsing back when closed). Replaces the previous stacked
+        // full-width shuffle card + always-open search bar, which read as
+        // "clumsy". Shuffle still seeds the queue from EVERY downloaded track
+        // (auto-grow watcher in PlayerRepository); search state is unchanged.
+        ShuffleAndSearchRow(
             query = state.searchQuery,
             onQueryChange = onSearchQueryChanged,
+            onShuffle = onShuffleLibrary,
             modifier = Modifier.padding(horizontal = 20.dp),
         )
 
@@ -502,36 +499,71 @@ private fun LibraryContent(
  * chrome instead of competing with it.
  */
 @Composable
-private fun ShuffleLibraryCard(
-    onClick: () -> Unit,
+private fun ShuffleAndSearchRow(
+    query: String,
+    onQueryChange: (String) -> Unit,
+    onShuffle: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    // Keep the field open if a query is already present (e.g. after a config
+    // change / returning to the tab) so the user's filter doesn't silently
+    // collapse out from under them.
+    var searchExpanded by remember { mutableStateOf(query.isNotEmpty()) }
+    val focusRequester = remember { FocusRequester() }
+
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        ShufflePill(onClick = onShuffle)
+
+        if (searchExpanded) {
+            ExpandableSearchField(
+                query = query,
+                onQueryChange = onQueryChange,
+                focusRequester = focusRequester,
+                onClose = {
+                    onQueryChange("")
+                    searchExpanded = false
+                },
+                modifier = Modifier.weight(1f),
+            )
+            // Auto-focus the field the moment it expands so the keyboard
+            // appears without a second tap.
+            LaunchedEffect(Unit) { focusRequester.requestFocus() }
+        } else {
+            Spacer(modifier = Modifier.weight(1f))
+            SearchIconButton(onClick = { searchExpanded = true })
+        }
+    }
+}
+
+@Composable
+private fun ShufflePill(onClick: () -> Unit) {
     val extendedColors = StashTheme.extendedColors
     Surface(
-        modifier = modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(16.dp))
+        modifier = Modifier
+            .clip(RoundedCornerShape(percent = 50))
             .clickable(onClick = onClick),
         color = extendedColors.glassBackground,
-        shape = RoundedCornerShape(16.dp),
+        shape = RoundedCornerShape(percent = 50),
         border = BorderStroke(1.dp, extendedColors.glassBorder),
     ) {
         Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 12.dp),
+            modifier = Modifier.padding(horizontal = 18.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Icon(
                 imageVector = Icons.Filled.Shuffle,
                 contentDescription = null,
                 tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(20.dp),
+                modifier = Modifier.size(18.dp),
             )
             Text(
-                text = "Shuffle Library",
-                style = MaterialTheme.typography.titleSmall,
+                text = "Shuffle",
+                style = MaterialTheme.typography.labelLarge,
                 fontWeight = FontWeight.Medium,
                 color = MaterialTheme.colorScheme.onBackground,
             )
@@ -539,22 +571,43 @@ private fun ShuffleLibraryCard(
     }
 }
 
-// ── Search bar ───────────────────────────────────────────────────────────────
+@Composable
+private fun SearchIconButton(onClick: () -> Unit) {
+    val extendedColors = StashTheme.extendedColors
+    Surface(
+        modifier = Modifier
+            .size(48.dp)
+            .clip(CircleShape)
+            .clickable(onClick = onClick),
+        color = extendedColors.glassBackground,
+        shape = CircleShape,
+        border = BorderStroke(1.dp, extendedColors.glassBorder),
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            Icon(
+                imageVector = Icons.Default.Search,
+                contentDescription = "Search library",
+                tint = extendedColors.textTertiary,
+                modifier = Modifier.size(20.dp),
+            )
+        }
+    }
+}
 
 @Composable
-private fun GlassSearchBar(
+private fun ExpandableSearchField(
     query: String,
     onQueryChange: (String) -> Unit,
+    focusRequester: FocusRequester,
+    onClose: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val extendedColors = StashTheme.extendedColors
 
     Surface(
-        modifier = modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(16.dp)),
+        modifier = modifier.clip(RoundedCornerShape(percent = 50)),
         color = extendedColors.glassBackground,
-        shape = RoundedCornerShape(16.dp),
+        shape = RoundedCornerShape(percent = 50),
         border = BorderStroke(1.dp, extendedColors.glassBorder),
     ) {
         TextField(
@@ -573,6 +626,15 @@ private fun GlassSearchBar(
                     tint = extendedColors.textTertiary,
                 )
             },
+            trailingIcon = {
+                IconButton(onClick = onClose) {
+                    Icon(
+                        imageVector = Icons.Filled.Close,
+                        contentDescription = "Close search",
+                        tint = extendedColors.textTertiary,
+                    )
+                }
+            },
             singleLine = true,
             colors = TextFieldDefaults.colors(
                 focusedContainerColor = Color.Transparent,
@@ -583,7 +645,9 @@ private fun GlassSearchBar(
                 focusedTextColor = MaterialTheme.colorScheme.onBackground,
                 unfocusedTextColor = MaterialTheme.colorScheme.onBackground,
             ),
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .focusRequester(focusRequester),
         )
     }
 }

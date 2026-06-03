@@ -84,4 +84,15 @@ data class RemotePlaylistSnapshotEntity(
      */
     @ColumnInfo(name = "expected_count")
     val expectedCount: Int? = null,
+
+    /**
+     * Owner identity reported by the source — the Spotify user id /
+     * username, or `"spotify"` for Spotify-generated playlists. Carried
+     * through to [PlaylistEntity.ownerId] by the DiffWorker so the Sync
+     * tab can filter by Mine / Others / Spotify. Null when the source
+     * doesn't report an owner (e.g. YouTube Music). Defaults to null for
+     * back-compat with rows written before v32.
+     */
+    @ColumnInfo(name = "owner_id")
+    val ownerId: String? = null,
 )
