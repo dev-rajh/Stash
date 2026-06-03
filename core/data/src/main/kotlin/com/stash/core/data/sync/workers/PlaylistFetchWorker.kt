@@ -463,6 +463,9 @@ class PlaylistFetchWorker @AssistedInject constructor(
                             artUrl = com.stash.core.common.ArtUrlUpgrader.upgrade(
                                 playlist.images?.firstOrNull()?.url,
                             ),
+                            // Carry the Spotify owner id/username through so the
+                            // Sync tab can filter by Mine / Others / Spotify.
+                            ownerId = playlist.owner.id.ifBlank { null },
                         )
                     )
 

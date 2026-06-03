@@ -16,6 +16,7 @@ import com.stash.core.data.prefs.StoragePreference
 import com.stash.core.model.Playlist
 import com.stash.core.model.Track
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -26,6 +27,7 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.retryWhen
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 import androidx.core.net.toUri
 
@@ -168,18 +170,23 @@ class MusicRepositoryImpl @Inject constructor(
         }
     }
 
-    override suspend fun rescanExternalDownloads(): Int {
+    // SAF DocumentFile traversal is blocking I/O (each listFiles() is a
+    // ContentResolver round-trip). Run off the main thread so a manual
+    // "Scan for existing songs" tap — launched from a Compose
+    // rememberCoroutineScope, which dispatches on Main — can't freeze the
+    // UI and trip an input-dispatch ANR on large libraries.
+    override suspend fun rescanExternalDownloads(): Int = withContext(Dispatchers.IO) {
         val pending = trackDao.getExternalRescanCandidates()
-        if (pending.isEmpty()) return 0
+        if (pending.isEmpty()) return@withContext 0
 
-        val treeUri = storagePreference.externalTreeUri.first() ?: return 0
+        val treeUri = storagePreference.externalTreeUri.first() ?: return@withContext 0
         val root = DocumentFile.fromTreeUri(context, treeUri) ?: run {
             android.util.Log.w("StashMigrations", "external rescan skipped: cannot open tree $treeUri")
-            return 0
+            return@withContext 0
         }
 
         val index = buildExternalRescanIndex(pending)
-        if (index.isEmpty()) return 0
+        if (index.isEmpty()) return@withContext 0
 
         var scannedFiles = 0
         var restored = 0
@@ -238,7 +245,7 @@ class MusicRepositoryImpl @Inject constructor(
                 "external rescan: scanned=$scannedFiles restored=$restored unmatched=$unmatched",
             )
         }
-        return restored
+        restored
     }
 
     private fun buildExternalRescanIndex(

@@ -70,6 +70,7 @@ import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.unit.dp
 import android.net.Uri
 import android.widget.Toast
+import kotlinx.coroutines.launch
 import com.stash.core.data.sync.workers.UpdateCheckWorker
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -226,6 +227,7 @@ fun SettingsScreen(
         onCancelMoveLibrary = viewModel::cancelMoveLibrary,
         onDismissMoveLibrary = viewModel::dismissMoveLibrary,
         countMovableTracks = viewModel::countMovableTracks,
+        scanExistingSongs = viewModel::scanExistingSongs,
         onConnectLastFm = viewModel::onConnectLastFm,
         onFinishLastFmAuth = viewModel::onFinishLastFmAuth,
         onDisconnectLastFm = viewModel::onDisconnectLastFm,
@@ -294,6 +296,7 @@ private fun SettingsContent(
     onCancelMoveLibrary: () -> Unit,
     onDismissMoveLibrary: () -> Unit,
     countMovableTracks: suspend () -> Int,
+    scanExistingSongs: suspend () -> Int,
     onConnectLastFm: ((String) -> Unit) -> Unit,
     onFinishLastFmAuth: () -> Unit,
     onDisconnectLastFm: () -> Unit,
@@ -1082,6 +1085,10 @@ private fun SettingsContent(
 
         val storageContext = LocalContext.current
         val contentResolver = storageContext.contentResolver
+        val storageScope = androidx.compose.runtime.rememberCoroutineScope()
+        // True while a manual "Scan for existing songs" pass is running, so
+        // the button can show progress and stay disabled against double-taps.
+        var scanningExisting by remember { mutableStateOf(false) }
         // Tracks what action the user intended when they tapped the folder
         // picker. "SetOnly" = just pick a destination for new downloads.
         // "SetAndMove" = pick destination AND auto-start the library move
@@ -1354,6 +1361,48 @@ private fun SettingsContent(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+
+                // Scan for existing songs — re-link files already in the
+                // external folder (e.g. survived a reinstall) to their
+                // library rows so they aren't downloaded again. Only useful
+                // with an external folder; internal-storage files are wiped
+                // on uninstall and can't be recovered. Tap AFTER a sync has
+                // repopulated the track list.
+                if (externalTree != null) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = {
+                            if (scanningExisting) return@OutlinedButton
+                            scanningExisting = true
+                            storageScope.launch {
+                                val restored = runCatching { scanExistingSongs() }.getOrDefault(0)
+                                scanningExisting = false
+                                Toast.makeText(
+                                    storageContext,
+                                    if (restored > 0) {
+                                        "Linked $restored existing song${if (restored == 1) "" else "s"} — they won't be downloaded again"
+                                    } else {
+                                        "No new matching files found. Sync first, then scan."
+                                    },
+                                    Toast.LENGTH_LONG,
+                                ).show()
+                            }
+                        },
+                        enabled = !scanningExisting,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            contentColor = MaterialTheme.colorScheme.primary,
+                        ),
+                    ) {
+                        Text(if (scanningExisting) "Scanning…" else "Scan for existing songs")
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "Finds songs already in this folder (e.g. after reinstalling) and marks them downloaded so they aren't fetched again.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
 
                 // Move library — rendered only when there's work to do. We
                 // refresh the count reactively after each move (state

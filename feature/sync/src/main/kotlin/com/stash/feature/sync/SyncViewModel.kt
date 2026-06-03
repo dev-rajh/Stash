@@ -65,6 +65,12 @@ data class SpotifySyncPlaylist(
     val type: com.stash.core.model.PlaylistType,
     val syncEnabled: Boolean,
     val artUrl: String? = null,
+    /**
+     * Spotify owner id/username for this playlist (`"spotify"` for
+     * Spotify-generated ones). Drives the Sync tab owner filter; null for
+     * rows synced before the v32 migration until the next sync repopulates.
+     */
+    val ownerId: String? = null,
 )
 
 /**
@@ -92,6 +98,12 @@ data class SyncUiState(
     val isSyncing: Boolean = false,
     /** Spotify playlists available for sync preference toggles. */
     val spotifyPlaylists: List<SpotifySyncPlaylist> = emptyList(),
+    /**
+     * Current Spotify account's id/username, used to classify playlists as
+     * "Mine" vs "Others" in the Sync tab owner filter. Null until the
+     * profile resolves (or when not connected).
+     */
+    val currentSpotifyUserId: String? = null,
     /** YouTube Music playlists available for sync preference toggles. */
     val youTubePlaylists: List<YouTubeSyncPlaylist> = emptyList(),
     /**
@@ -262,6 +274,7 @@ class SyncViewModel @Inject constructor(
         observeLastSync()
         observeSpotifyPlaylists()
         observeYouTubePlaylists()
+        loadCurrentSpotifyUserId()
         observeUnmatchedCount()
         observeFlaggedCount()
         observeSyncStatusCard()
@@ -283,6 +296,35 @@ class SyncViewModel @Inject constructor(
      */
     fun onStopSync() {
         syncScheduler.cancelSync()
+    }
+
+    /**
+     * Resolve the connected Spotify account's id/username once so the owner
+     * filter can tell "Mine" from "Others". Re-runs whenever auth state
+     * flips to Connected (handled by [observeAuthStates] re-triggering is
+     * unnecessary — this one-shot covers the common already-authed case;
+     * the value also lands via the next sync's owner data regardless).
+     */
+    private fun loadCurrentSpotifyUserId() {
+        viewModelScope.launch {
+            val username = runCatching { tokenManager.getSpotifyUsername() }.getOrNull()
+            if (username != null) {
+                _uiState.update { it.copy(currentSpotifyUserId = username) }
+            }
+        }
+    }
+
+    /**
+     * Enable sync for a single Spotify playlist and kick off an immediate
+     * sync so only that playlist's tracks download now. Already-downloaded
+     * tracks are skipped by the download worker's early-exit, so this is
+     * cheap to re-tap.
+     */
+    fun onDownloadSinglePlaylist(playlistId: Long) {
+        viewModelScope.launch {
+            playlistDao.updateSyncEnabled(playlistId, true)
+            syncScheduler.triggerManualSync(forceDownload = true)
+        }
     }
 
     /** Toggle sync_enabled for a specific Spotify playlist. */
@@ -523,6 +565,7 @@ class SyncViewModel @Inject constructor(
                                 type = e.type,
                                 syncEnabled = e.syncEnabled,
                                 artUrl = e.artUrl,
+                                ownerId = e.ownerId,
                             )
                         }
                     )

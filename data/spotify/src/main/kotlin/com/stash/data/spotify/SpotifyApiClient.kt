@@ -827,12 +827,29 @@ class SpotifyApiClient @Inject constructor(
             Log.d(TAG, "parseLibraryResponse: found ${items.size} library items")
 
             val playlistsById = linkedMapOf<String, SpotifyPlaylistItem>()
+            // Folder diagnostics: the recursion below is shape-agnostic and
+            // will pick up Playlist nodes at any nesting depth, so playlists
+            // filed inside folders are recognized AS LONG AS the libraryV3
+            // response actually inlines them. If folder-nested playlists go
+            // missing in the field, this counter being > 0 while child counts
+            // stay flat points at the query (folder contents not expanded)
+            // rather than the parser. See test "extracts playlists nested
+            // inside folders".
+            var folderNodeCount = 0
             items.forEach { element ->
                 try {
+                    folderNodeCount += countFolderNodes(element)
                     collectPlaylistsFromLibraryNode(element, playlistsById)
                 } catch (e: Exception) {
                     Log.w(TAG, "parseLibraryResponse: failed to parse library node", e)
                 }
+            }
+            if (folderNodeCount > 0) {
+                Log.i(
+                    TAG,
+                    "parseLibraryResponse: saw $folderNodeCount folder node(s); " +
+                        "${playlistsById.size} playlists collected (incl. any folder-nested)",
+                )
             }
             LibraryPlaylistsPage(
                 playlists = playlistsById.values.toList(),
@@ -867,6 +884,21 @@ class SpotifyApiClient @Inject constructor(
             }
             else -> Unit
         }
+    }
+
+    /**
+     * Counts `__typename == "Folder"` nodes anywhere in a library item's
+     * subtree. Diagnostic only — drives the folder-vs-query log in
+     * [parseLibraryResponse].
+     */
+    private fun countFolderNodes(element: JsonElement): Int = when (element) {
+        is JsonObject -> {
+            val isFolder = element["data"]?.jsonObject
+                ?.get("__typename")?.jsonPrimitive?.contentOrNull == "Folder"
+            (if (isFolder) 1 else 0) + element.values.sumOf { countFolderNodes(it) }
+        }
+        is JsonArray -> element.sumOf { countFolderNodes(it) }
+        else -> 0
     }
 
     private fun extractPlaylistFromDataNode(data: JsonObject?): SpotifyPlaylistItem? {

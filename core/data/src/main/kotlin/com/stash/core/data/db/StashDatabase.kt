@@ -76,7 +76,7 @@ import com.stash.core.data.db.entity.TrackTagEntity
         LyricsEntity::class,
         LastFmCacheEntity::class,
     ],
-    version = 31,
+    version = 32,
     exportSchema = true,
 )
 @TypeConverters(Converters::class)
@@ -807,6 +807,19 @@ abstract class StashDatabase : RoomDatabase() {
                     )
                     """.trimIndent()
                 )
+            }
+        }
+
+        /**
+         * v31 → v32: add owner_id to playlists so the Sync tab can filter
+         * Spotify playlists by owner (Mine / Others / Spotify). Nullable —
+         * existing rows backfill to NULL and are re-populated on the next
+         * sync from the Spotify owner data.
+         */
+        val MIGRATION_31_32 = object : Migration(31, 32) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE playlists ADD COLUMN owner_id TEXT DEFAULT NULL")
+                db.execSQL("ALTER TABLE remote_playlist_snapshots ADD COLUMN owner_id TEXT DEFAULT NULL")
             }
         }
     }

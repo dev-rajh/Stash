@@ -182,11 +182,25 @@ class DownloadManager @Inject constructor(
             if (preResolvedUrl == null && !forceLossless &&
                 !losslessPrefs.youtubeFallbackEnabledNow()
             ) {
-                Log.i(
+                // Strict-FLAC normally defers when no lossless match is found.
+                // But if EVERY lossless source is currently down/unconfigured
+                // (nothing reachable), deferring would strand the track until
+                // the user notices — so fall through to YouTube as an outage
+                // safety net. We only defer when sources were actually
+                // reachable and simply didn't have the track.
+                val hadReachableSource = losslessRegistry.hasReachableSource()
+                if (hadReachableSource) {
+                    Log.i(
+                        TAG,
+                        "deferring '${track.artist} - ${track.title}': lossless had no match, fallback off",
+                    )
+                    return TrackDownloadResult.Deferred
+                }
+                Log.w(
                     TAG,
-                    "deferring '${track.artist} - ${track.title}': lossless unavailable, fallback off",
+                    "lossless sources all unavailable for '${track.artist} - ${track.title}'; " +
+                        "falling back to YouTube despite strict-FLAC (outage safety net)",
                 )
-                return TrackDownloadResult.Deferred
             }
         }
 

@@ -7,6 +7,7 @@ import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
+import androidx.work.workDataOf
 import com.stash.core.data.sync.workers.DiffWorker
 import com.stash.core.data.sync.workers.PlaylistFetchWorker
 import com.stash.core.data.sync.workers.SyncFinalizeWorker
@@ -85,8 +86,8 @@ class SyncScheduler @Inject constructor(
      * the user explicitly requested this sync. Replaces any existing pending
      * or running sync chain.
      */
-    fun triggerManualSync() {
-        Log.i(TAG, "Manual sync triggered by user")
+    fun triggerManualSync(forceDownload: Boolean = false) {
+        Log.i(TAG, "Manual sync triggered by user (forceDownload=$forceDownload)")
         // Immediately signal the UI that sync is starting so the button
         // shows progress feedback even before WorkManager picks up the work.
         syncStateManager.onAuthenticating()
@@ -94,7 +95,7 @@ class SyncScheduler @Inject constructor(
         val constraints = Constraints.Builder()
             .setRequiredNetworkType(NetworkType.CONNECTED)
             .build()
-        enqueueChain(initialDelayMs = 0, constraints = constraints)
+        enqueueChain(initialDelayMs = 0, constraints = constraints, forceDownload = forceDownload)
     }
 
     /**
@@ -152,7 +153,11 @@ class SyncScheduler @Inject constructor(
      *                       (Fetch, Diff, Download). The Finalize worker uses no
      *                       constraints since it only writes local state.
      */
-    private fun enqueueChain(initialDelayMs: Long, constraints: Constraints) {
+    private fun enqueueChain(
+        initialDelayMs: Long,
+        constraints: Constraints,
+        forceDownload: Boolean = false,
+    ) {
         val fetchWork = OneTimeWorkRequestBuilder<PlaylistFetchWorker>()
             .setConstraints(constraints)
             .setBackoffCriteria(
@@ -174,6 +179,13 @@ class SyncScheduler @Inject constructor(
 
         val downloadWork = OneTimeWorkRequestBuilder<TrackDownloadWorker>()
             .setConstraints(constraints)
+            // When the user explicitly asked to download (e.g. the per-playlist
+            // Download button), set a force flag so the worker drains the queue
+            // even in streaming mode. Merged on top of the chained DiffWorker
+            // output (distinct key, no collision).
+            .setInputData(
+                workDataOf(TrackDownloadWorker.KEY_FORCE_DOWNLOAD to forceDownload),
+            )
             .addTag("sync_download")
             .build()
 
