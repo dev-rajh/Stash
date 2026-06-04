@@ -56,6 +56,7 @@ class ListeningRecorderSkipTest {
         override suspend fun skipPrevious() = Unit
         override suspend fun seekTo(positionMs: Long) = Unit
         override suspend fun setQueue(tracks: List<Track>, startIndex: Int) = Unit
+        override fun resumeLastQueue() = Unit
         override suspend fun shuffleLibrary() = Unit
         override suspend fun addNext(track: Track) = Unit
         override suspend fun addToQueue(track: Track) = Unit
