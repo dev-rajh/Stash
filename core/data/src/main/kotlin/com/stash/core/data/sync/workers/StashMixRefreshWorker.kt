@@ -139,6 +139,19 @@ class StashMixRefreshWorker @AssistedInject constructor(
         const val KEY_RECIPE_ID = "stash_mix_refresh_recipe_id"
 
         /**
+         * Input-data key for [enqueueOneTime]'s materialize-only overload.
+         * When true, [doWork] LINKS already-drained discovery stubs into the
+         * mix playlists but does NOT re-queue discovery candidates and does
+         * NOT re-kick the discovery drain. This is the post-drain re-link
+         * path ([com.stash.core.data.sync.workers.StashDiscoveryWorker] fires
+         * it when it materializes a stub) — running it in full mode formed a
+         * runaway refresh⇄drain loop that continuously cleared + reinserted
+         * every mix (the user-visible "load 40 tracks, then repopulate with
+         * different tracks" churn on multi-genre mixes).
+         */
+        const val KEY_MATERIALIZE_ONLY = "stash_mix_refresh_materialize_only"
+
+        /**
          * Schedule the periodic refresh. Default 24-hour cadence with no
          * constraints — the library-only path works offline and fast
          * enough to not care. Discovery is opportunistic and tolerates
@@ -171,18 +184,20 @@ class StashMixRefreshWorker @AssistedInject constructor(
          * waiting 24 hours for the periodic schedule, and by the
          * manual-refresh button on the Home Stash Mixes card.
          */
-        fun enqueueOneTime(context: Context) {
-            val work = OneTimeWorkRequestBuilder<StashMixRefreshWorker>()
+        fun enqueueOneTime(context: Context, materializeOnly: Boolean = false) {
+            val builder = OneTimeWorkRequestBuilder<StashMixRefreshWorker>()
                 .setConstraints(
                     Constraints.Builder()
                         .setRequiredNetworkType(NetworkType.CONNECTED)
                         .build(),
                 )
-                .build()
+            if (materializeOnly) {
+                builder.setInputData(androidx.work.workDataOf(KEY_MATERIALIZE_ONLY to true))
+            }
             WorkManager.getInstance(context).enqueueUniqueWork(
                 ONE_SHOT_WORK_NAME,
                 androidx.work.ExistingWorkPolicy.REPLACE,
-                work,
+                builder.build(),
             )
         }
 
@@ -218,6 +233,7 @@ class StashMixRefreshWorker @AssistedInject constructor(
         // first WorkManager tick.
         StashMixDefaults.seedIfNeeded(recipeDao)
 
+        val materializeOnly = inputData.getBoolean(KEY_MATERIALIZE_ONLY, false)
         val targetId = inputData.getLong(KEY_RECIPE_ID, -1L)
         val active = if (targetId > 0L) {
             val one = recipeDao.getById(targetId)?.takeIf { it.isActive }
@@ -322,7 +338,9 @@ class StashMixRefreshWorker @AssistedInject constructor(
             excludeIds += result.discoveryIds
 
             // Discovery — opportunistic. Don't block refresh success on it.
-            if (recipe.discoveryRatio > 0f && lastFmConfigured) {
+            // Skipped in materialize-only mode: the post-drain re-link must not
+            // queue MORE candidates (that's the loop's fuel).
+            if (recipe.discoveryRatio > 0f && lastFmConfigured && !materializeOnly) {
                 runCatching { queueDiscoveryForRecipe(recipe, personas) }
                     .onFailure { Log.w(TAG, "discovery queueing failed for '${recipe.name}'", it) }
             }
@@ -349,13 +367,20 @@ class StashMixRefreshWorker @AssistedInject constructor(
         // at the END of the fill closes that race for every refresh path
         // (create, manual "Refresh this mix", periodic). Guarded + REPLACE:
         // a test-JVM WorkManager throws, and rapid double-fills coalesce.
-        runCatching {
-            StashDiscoveryWorker.enqueueOneTime(
-                applicationContext,
-                downloadNetworkPreference.current(),
-                expedited = true,
-            )
-        }.onFailure { Log.w(TAG, "discovery drain enqueue failed; refresh still succeeded", it) }
+        // Loop-break: in materialize-only mode (the post-drain re-link kicked
+        // by StashDiscoveryWorker) we must NOT re-kick the drain. Doing so
+        // formed a runaway refresh⇄drain cycle that continuously cleared +
+        // reinserted every mix. The normal refresh path still kicks it so
+        // freshly-queued candidates get drained once.
+        if (!materializeOnly) {
+            runCatching {
+                StashDiscoveryWorker.enqueueOneTime(
+                    applicationContext,
+                    downloadNetworkPreference.current(),
+                    expedited = true,
+                )
+            }.onFailure { Log.w(TAG, "discovery drain enqueue failed; refresh still succeeded", it) }
+        }
 
         return Result.success()
     }
