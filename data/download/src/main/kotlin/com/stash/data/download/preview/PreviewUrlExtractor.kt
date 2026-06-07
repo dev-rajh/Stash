@@ -134,7 +134,12 @@ class PreviewUrlExtractor @Inject constructor(
             }
             fun bitrate(f: JsonObject) = f["bitrate"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L
             fun isOpus(f: JsonObject) = (f["mimeType"]?.jsonPrimitive?.content ?: "").contains("opus")
-            val best = audio.filter(::isOpus).maxByOrNull(::bitrate) ?: audio.maxByOrNull(::bitrate)
+            val opusBest = audio.filter(::isOpus).maxByOrNull(::bitrate)
+            val best = opusBest ?: audio.maxByOrNull(::bitrate)
+            if (best != null) {
+                val mime = best["mimeType"]?.jsonPrimitive?.content
+                Log.d(TAG, "InnerTube selected mime=$mime bitrate=${bitrate(best)} opusPreferred=${opusBest != null}")
+            }
             return best?.get("url")?.jsonPrimitive?.content
         }
 
