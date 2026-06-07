@@ -91,6 +91,12 @@ interface DownloadQueueDao {
               WHERE pt.track_id = t.id
                 AND pt.removed_at IS NULL
                 AND p.sync_enabled = 1
+                -- Stash Mixes are stream-only (v0.9.37 seam): their stubs
+                -- live in a sync_enabled playlist (so they stay visible
+                -- offline) but must NEVER be download-eligible. Require a
+                -- sync-enabled, NON-mix parent. A track also in Liked Songs
+                -- /a real playlist still matches via that membership.
+                AND p.type != 'STASH_MIX'
           )
         ORDER BY (CASE WHEN dq.youtube_url IS NULL THEN 0 ELSE 1 END) ASC, dq.created_at ASC
     """)
@@ -121,6 +127,12 @@ interface DownloadQueueDao {
               WHERE pt.track_id = t.id
                 AND pt.removed_at IS NULL
                 AND p.sync_enabled = 1
+                -- Stash Mixes are stream-only (v0.9.37 seam): their stubs
+                -- live in a sync_enabled playlist (so they stay visible
+                -- offline) but must NEVER be download-eligible. Require a
+                -- sync-enabled, NON-mix parent. A track also in Liked Songs
+                -- /a real playlist still matches via that membership.
+                AND p.type != 'STASH_MIX'
           )
         ORDER BY (CASE WHEN dq.youtube_url IS NULL THEN 0 ELSE 1 END) ASC, dq.created_at ASC
     """)
@@ -442,6 +454,12 @@ interface DownloadQueueDao {
               WHERE pt.track_id = t.id
                 AND pt.removed_at IS NULL
                 AND p.sync_enabled = 1
+                -- Stash Mixes are stream-only (v0.9.37 seam): their stubs
+                -- live in a sync_enabled playlist (so they stay visible
+                -- offline) but must NEVER be download-eligible. Require a
+                -- sync-enabled, NON-mix parent. A track also in Liked Songs
+                -- /a real playlist still matches via that membership.
+                AND p.type != 'STASH_MIX'
           )
           AND t.id NOT IN (
               SELECT dq.track_id FROM download_queue dq
@@ -477,6 +495,12 @@ interface DownloadQueueDao {
               WHERE pt.track_id = t.id
                 AND pt.removed_at IS NULL
                 AND p.sync_enabled = 1
+                -- Stash Mixes are stream-only (v0.9.37 seam): their stubs
+                -- live in a sync_enabled playlist (so they stay visible
+                -- offline) but must NEVER be download-eligible. Require a
+                -- sync-enabled, NON-mix parent. A track also in Liked Songs
+                -- /a real playlist still matches via that membership.
+                AND p.type != 'STASH_MIX'
           )
           AND t.id NOT IN (
               SELECT dq.track_id FROM download_queue dq
@@ -514,6 +538,11 @@ interface DownloadQueueDao {
               INNER JOIN playlists p ON p.id = pt.playlist_id
               WHERE pt.removed_at IS NULL
                 AND p.sync_enabled = 1
+                -- A sync-enabled STASH_MIX membership does NOT spare a row:
+                -- mix tracks are stream-only, so a mix-only track's queue
+                -- entry is an orphan and gets swept. This drains the legacy
+                -- pre-v0.9.48 backlog of force-queued mix downloads.
+                AND p.type != 'STASH_MIX'
           )
     """)
     suspend fun deleteOrphanedQueueEntries(): Int
