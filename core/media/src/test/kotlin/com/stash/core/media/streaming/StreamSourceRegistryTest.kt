@@ -54,6 +54,23 @@ class StreamSourceRegistryTest {
         coVerify { youtube.resolve(track, allowYtDlp = true) }
     }
 
+    /**
+     * The forceYt test toggle skips kennyy/qobuz entirely and routes through
+     * the YouTube resolver only. Verify that branch still forwards
+     * `allowYtDlp` to [YouTubeStreamResolver.resolve].
+     */
+    @Test
+    fun resolve_forceYt_branch_passes_allowYtDlp_to_youtube() = runTest {
+        coEvery { streamingPreference.isForceYouTubeFallback() } returns true
+        // kennyy/qobuz are skipped in the forceYt branch — intentionally unstubbed.
+        coEvery { youtube.resolve(any(), any()) } returns null
+        val track = stubTrack()
+
+        registry().resolve(track, allowYouTube = true, allowYtDlp = false)
+
+        coVerify { youtube.resolve(track, allowYtDlp = false) }
+    }
+
     private fun stubTrack(): TrackEntity = TrackEntity(
         id = 1L,
         title = "Title",

@@ -67,6 +67,10 @@ class YouTubeStreamResolver @Inject constructor(
     private val urlExtractor: PreviewUrlExtractor,
     private val ytMusicApiClient: YTMusicApiClient,
 ) {
+    /**
+     * @param allowYtDlp when `false`, resolve via the fast InnerTube engine
+     *   only (no slow yt-dlp); used by the background queue-fill path.
+     */
     suspend fun resolve(track: TrackEntity, allowYtDlp: Boolean = true): StreamUrl? {
         // Prefer the existing youtubeId when present (YT-synced rows
         // and cross-matched Spotify rows already have one). Otherwise
