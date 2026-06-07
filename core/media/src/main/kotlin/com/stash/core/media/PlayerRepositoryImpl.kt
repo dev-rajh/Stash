@@ -394,7 +394,15 @@ class PlayerRepositoryImpl @Inject constructor(
         // YouTube-only tracks stay in the timeline instead of being
         // dropped (the old allowYouTube=false fill silently skipped every
         // YouTube track, leaving ~2-item queues and skipping all
-        // streamable tracks in mixed downloaded+stream mixes). Only the
+        // streamable tracks in mixed downloaded+stream mixes). Note the
+        // cap-8 here is NOT the Semaphore(STREAM_RESOLVE_PARALLELISM)=16
+        // fill semaphore in this file (that is the outer fan-out); the
+        // effective InnerTube bottleneck is its own cap-8 extractor
+        // semaphore (INNERTUBE_CONCURRENCY) inside PreviewUrlExtractor in
+        // another module. Behavior delta: background fill now performs real
+        // InnerTube resolution for EVERY streamable track (bounded by that
+        // cap-8), whereas the old allowYouTube=false fill resolved zero
+        // YouTube tracks — relevant if InnerTube ever rate-limits. Only the
         // SLOW yt-dlp engine is withheld from fill: it has a single
         // serialized extraction slot (cap-1) that must stay free for the
         // foreground tap and the next-up prefetch — a long Liked Songs
