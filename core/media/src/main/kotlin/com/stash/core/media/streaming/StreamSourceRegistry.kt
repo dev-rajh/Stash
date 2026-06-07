@@ -58,8 +58,16 @@ class StreamSourceRegistry @Inject constructor(
      *   yt-dlp's limited 2-slot extraction semaphore stays available
      *   for the foreground user-tap critical path. Foreground (tapped
      *   track) calls leave this true.
+     * @param allowYtDlp pass `false` to make the YouTube fallback resolve
+     *   via the fast InnerTube engine only (no slow yt-dlp). Used by the
+     *   background-fill path so a 15-35s yt-dlp invocation never sits on
+     *   the queue's critical path. Foreground calls leave this true.
      */
-    suspend fun resolve(track: TrackEntity, allowYouTube: Boolean = true): StreamUrl? {
+    suspend fun resolve(
+        track: TrackEntity,
+        allowYouTube: Boolean = true,
+        allowYtDlp: Boolean = true,
+    ): StreamUrl? {
         val forceYt = streamingPreference.isForceYouTubeFallback()
         val resolvers = buildList<Pair<String, suspend (TrackEntity) -> StreamUrl?>> {
             if (forceYt) {
@@ -67,11 +75,11 @@ class StreamSourceRegistry @Inject constructor(
                 // YouTube fallback path. Still gated by allowYouTube so the
                 // background-fill keeps resolving nothing (matching a genuine
                 // both-sources-down outage).
-                if (allowYouTube) add("youtube" to youtube::resolve)
+                if (allowYouTube) add("youtube" to { t: TrackEntity -> youtube.resolve(t, allowYtDlp) })
             } else {
                 add("kennyy" to kennyy::resolve)
                 add("squid" to qobuz::resolve)
-                if (allowYouTube) add("youtube" to youtube::resolve)
+                if (allowYouTube) add("youtube" to { t: TrackEntity -> youtube.resolve(t, allowYtDlp) })
             }
         }
         for ((name, fn) in resolvers) {

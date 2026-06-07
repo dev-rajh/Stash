@@ -67,7 +67,7 @@ class YouTubeStreamResolver @Inject constructor(
     private val urlExtractor: PreviewUrlExtractor,
     private val ytMusicApiClient: YTMusicApiClient,
 ) {
-    suspend fun resolve(track: TrackEntity): StreamUrl? {
+    suspend fun resolve(track: TrackEntity, allowYtDlp: Boolean = true): StreamUrl? {
         // Prefer the existing youtubeId when present (YT-synced rows
         // and cross-matched Spotify rows already have one). Otherwise
         // fall through to a YT Music search by metadata — covers the
@@ -77,7 +77,7 @@ class YouTubeStreamResolver @Inject constructor(
             ?: return null
 
         val url = withTimeoutOrNull(YT_RESOLVE_TIMEOUT_MS) {
-            runCatching { urlExtractor.extractStreamUrl(videoId) }
+            runCatching { urlExtractor.extractStreamUrl(videoId, allowYtDlp) }
                 .onFailure { t ->
                     // CancellationException MUST propagate — swallowing it would
                     // surface as StreamRoutingResult.NotAvailable upstream, firing
