@@ -166,8 +166,9 @@ class PlayerRepositoryImpl @Inject constructor(
         // is cached + the controller's MediaItem URI is refreshed BEFORE ExoPlayer
         // starts pre-buffering the next track. Eliminates the 5-10s pause that
         // happens when the next track's URL has expired or wasn't covered by
-        // background fill (e.g. YT-fallback tracks skipped because background
-        // fill uses allowYouTube=false).
+        // background fill (e.g. an iOS-miss straggler skipped because the
+        // background fill uses the fast lane allowYtDlp=false, so prefetch
+        // re-resolves it here with allowYtDlp=true).
         //
         // Bounded to 1 track ahead — does NOT prefetch idx+2 or further. The
         // reactive design handles skip-ahead: on a skip, the watcher re-fires
@@ -219,9 +220,9 @@ class PlayerRepositoryImpl @Inject constructor(
      * Snapshot of the [Track] list most recently passed to [setQueue]. Drives
      * the next-track prefetch watcher — we look up the next-to-play Track by
      * index here rather than relying on the controller's MediaItems, so
-     * tracks that were silently dropped by background fill (YT-fallback when
-     * allowYouTube=false in fillQueueAppend) can still be discovered for the
-     * eager prefetch.
+     * tracks that were silently dropped by background fill (iOS-miss
+     * stragglers the fast-lane allowYtDlp=false fill couldn't resolve) can
+     * still be discovered for the eager prefetch.
      */
     @Volatile
     private var currentQueueTracks: List<Track> = emptyList()
@@ -315,8 +316,8 @@ class PlayerRepositoryImpl @Inject constructor(
         librarySnapshot = emptyList()
 
         // Snapshot the requested queue early so the next-track prefetch watcher
-        // can look up idx+1 even for entries that background fill (allowYouTube=false)
-        // silently drops from the controller's timeline. New queue overwrites
+        // can look up idx+1 even for entries that background fill (fast-lane
+        // allowYtDlp=false) silently drops from the controller's timeline. New queue overwrites
         // the old; any prefetch in flight from the previous queue completes
         // harmlessly against the old reference it already captured.
         currentQueueTracks = tracks
@@ -347,6 +348,7 @@ class PlayerRepositoryImpl @Inject constructor(
             semaphore,
             streamingOn,
             allowYouTube = true,
+            allowYtDlp = true,
         )
 
         // Race guard: if another setQueue came in while we were
@@ -386,31 +388,39 @@ class PlayerRepositoryImpl @Inject constructor(
         // tracks before are prepended afterwards so skip-back still works
         // once the fill catches up. Cancellable — see queueBuildJob KDoc.
         //
-        // Background-fill uses lossless-only resolution (no YouTube
-        // fallback). yt-dlp has a 2-slot extraction semaphore shared
-        // across the app; if a 2700-track Liked Songs queue were to
-        // funnel ~5% of its tracks through yt-dlp during fill, that
-        // semaphore would be saturated for ~20 minutes and the next
-        // user-tap that needs yt-dlp would queue behind it. Unmatched
-        // tracks are silently skipped from the background queue here;
-        // when the user *taps* one, setQueue is called again with that
-        // index and the full chain (incl. YouTube) runs for that track.
+        // Background-fill uses the InnerTube FAST LANE
+        // (allowYouTube=true, allowYtDlp=false). InnerTube resolves in
+        // parallel (cap-8) and builds the WHOLE queue in order, so
+        // YouTube-only tracks stay in the timeline instead of being
+        // dropped (the old allowYouTube=false fill silently skipped every
+        // YouTube track, leaving ~2-item queues and skipping all
+        // streamable tracks in mixed downloaded+stream mixes). Only the
+        // SLOW yt-dlp engine is withheld from fill: it has a single
+        // serialized extraction slot (cap-1) that must stay free for the
+        // foreground tap and the next-up prefetch — a long Liked Songs
+        // queue funneling stragglers through it would saturate that slot
+        // for minutes and stall the next user-tap. Any iOS-miss track that
+        // InnerTube can't resolve is skipped from this batch and recovered
+        // by prefetchNextTrack (which runs with allowYtDlp=true), so it is
+        // re-resolved just-in-time before it's reached.
         val forward = tracks.subList(safeStart + 1, tracks.size)
         val backward = tracks.subList(0, safeStart)
         queueBuildJob = scope.launch {
             try {
-                fillQueueAppend(controller, forward, semaphore, streamingOn, allowYouTube = false)
-                fillQueuePrepend(controller, backward, semaphore, streamingOn, allowYouTube = false)
+                fillQueueAppend(controller, forward, semaphore, streamingOn, allowYouTube = true, allowYtDlp = false)
+                fillQueuePrepend(controller, backward, semaphore, streamingOn, allowYouTube = true, allowYtDlp = false)
                 Log.i(TAG, "setQueue: background fill complete (${tracks.size} tracks)")
                 // Kick the next-up prefetch for the FIRST track explicitly. The
                 // reactive watcher (playerState.currentIndex.distinctUntilChanged)
                 // suppresses the initial idx=0 emission for a freshly-started
                 // queue (the state already sits at 0), so without this the first
-                // track never gets its next resolved+inserted and the first
-                // auto-advance fails on all-streaming (YouTube-fallback) queues —
-                // where the background fill (allowYouTube=false) leaves a single-
-                // item timeline. Idempotent: a no-op when the next is already
-                // present (lossless queues) or not streamable.
+                // track never gets its next resolved+inserted. This matters when
+                // the fast-lane fill (allowYtDlp=false) couldn't resolve the
+                // second track (an iOS-miss straggler) and dropped it: prefetch
+                // re-resolves it here with allowYtDlp=true and inserts it so the
+                // first auto-advance works. Idempotent: a no-op when the next is
+                // already present (the common case now that fill is in-order) or
+                // not streamable.
                 prefetchNextTrack(controller.currentMediaItemIndex)
             } catch (e: CancellationException) {
                 // Expected when the user starts a new queue. Don't log as failure.
@@ -434,10 +444,11 @@ class PlayerRepositoryImpl @Inject constructor(
         semaphore: Semaphore,
         streamingOn: Boolean,
         allowYouTube: Boolean = true,
+        allowYtDlp: Boolean = true,
     ) {
         tracks.chunked(BACKGROUND_FILL_BATCH).forEach { batch ->
             if (!currentCoroutineActive()) return
-            val resolved = resolveBatchParallel(batch, semaphore, streamingOn, allowYouTube)
+            val resolved = resolveBatchParallel(batch, semaphore, streamingOn, allowYouTube, allowYtDlp)
             if (resolved.isNotEmpty()) controller.addMediaItems(resolved)
         }
     }
@@ -453,6 +464,7 @@ class PlayerRepositoryImpl @Inject constructor(
         semaphore: Semaphore,
         streamingOn: Boolean,
         allowYouTube: Boolean = true,
+        allowYtDlp: Boolean = true,
     ) {
         // Process from the END of [tracks] backwards in chunks. The chunk
         // closest to the current playback head is processed last so the
@@ -463,7 +475,7 @@ class PlayerRepositoryImpl @Inject constructor(
             // Resolve the batch in original (forward) order so the
             // semaphore-bounded async fan-out doesn't reshuffle results.
             val batch = batchReversed.asReversed()
-            val resolved = resolveBatchParallel(batch, semaphore, streamingOn, allowYouTube)
+            val resolved = resolveBatchParallel(batch, semaphore, streamingOn, allowYouTube, allowYtDlp)
             if (resolved.isNotEmpty()) controller.addMediaItems(/* index = */ 0, resolved)
         }
     }
@@ -473,10 +485,11 @@ class PlayerRepositoryImpl @Inject constructor(
         semaphore: Semaphore,
         streamingOn: Boolean,
         allowYouTube: Boolean = true,
+        allowYtDlp: Boolean = true,
     ): List<MediaItem> = coroutineScope {
         batch.map { track ->
             async(Dispatchers.IO) {
-                resolveTrackToMediaItem(track, semaphore, streamingOn, allowYouTube)
+                resolveTrackToMediaItem(track, semaphore, streamingOn, allowYouTube, allowYtDlp)
             }
         }.awaitAll().filterNotNull()
     }
@@ -485,9 +498,9 @@ class PlayerRepositoryImpl @Inject constructor(
      * Eager-resolve the next-up track (the successor of the currently-playing
      * track in `currentQueueTracks`, matched by identity — see the body) and
      * either refresh its existing timeline slot's URI, or — when it was dropped
-     * from the timeline by the `allowYouTube=false` background fill (the
-     * YouTube-fallback case) — insert it right after the current item so
-     * ExoPlayer can auto-advance and the Next button works.
+     * from the timeline by the fast-lane (`allowYtDlp=false`) background fill
+     * (an iOS-miss straggler InnerTube couldn't resolve) — insert it right
+     * after the current item so ExoPlayer can auto-advance and Next works.
      *
      * Skips when:
      *  - There is no next track (current is last).
@@ -533,7 +546,7 @@ class PlayerRepositoryImpl @Inject constructor(
         Log.d("LATDIAG", "prefetch-next-start id=${next.id} youtubeId=${next.youtubeId}")
         val entity = trackDao.getById(next.id) ?: next.toEntity()
         val resolved = try {
-            streamResolver.resolve(entity, allowYouTube = true)
+            streamResolver.resolve(entity, allowYouTube = true, allowYtDlp = true)
         } catch (ce: CancellationException) {
             throw ce
         } catch (e: Exception) {
@@ -549,9 +562,9 @@ class PlayerRepositoryImpl @Inject constructor(
         Log.d("LATDIAG", "prefetch-next-end id=${next.id} dt=${System.currentTimeMillis() - t0}ms outcome=url expiresAt=${resolved.expiresAtMs}")
 
         // If the next track is already a slot in the controller's timeline,
-        // refresh its URI in place. If it ISN'T — because the
-        // allowYouTube=false background fill skipped it (the YT-fallback case,
-        // where Squid/Kennyy are down) — the timeline has no next item, so
+        // refresh its URI in place. If it ISN'T — because the fast-lane
+        // (allowYtDlp=false) background fill skipped it (an iOS-miss straggler
+        // InnerTube couldn't resolve) — the timeline has no next item, so
         // ExoPlayer can't auto-advance and the Next button is a no-op. Insert
         // the next track right after the current item so playback flows. We
         // build a real MediaItem from the now-cached URL (cache hit — no extra
@@ -559,7 +572,7 @@ class PlayerRepositoryImpl @Inject constructor(
         // path, NOT the reverted stash-lazy:// placeholder/synthetic-id scheme.
         val swapped = refreshControllerMediaItem(controller, next, resolved)
         if (!swapped) {
-            val item = (buildMediaItemForTrack(entity, allowYouTube = true) as? StreamRoutingResult.Item)?.mediaItem
+            val item = (buildMediaItemForTrack(entity, allowYouTube = true, allowYtDlp = true) as? StreamRoutingResult.Item)?.mediaItem
             if (item != null) insertNextMediaItem(controller, next.id, item)
         }
     }
@@ -593,8 +606,8 @@ class PlayerRepositoryImpl @Inject constructor(
     /**
      * Insert the freshly-resolved next track right after the current item so
      * ExoPlayer has a next MediaItem to auto-advance to (and Next works). Used
-     * only when the track was dropped from the timeline by the
-     * allowYouTube=false background fill (YT-fallback). Re-scans first so a
+     * only when the track was dropped from the timeline by the fast-lane
+     * (allowYtDlp=false) background fill (iOS-miss straggler). Re-scans first so a
      * racing prefetch can't double-insert; the scan + insert run synchronously
      * on the controller thread, so they are atomic. Bounded to one track ahead
      * by the prefetch watcher, so it never floods the yt-dlp extraction slots.
@@ -640,6 +653,7 @@ class PlayerRepositoryImpl @Inject constructor(
         semaphore: Semaphore,
         streamingOn: Boolean,
         allowYouTube: Boolean = true,
+        allowYtDlp: Boolean = true,
     ): MediaItem? {
         val localPath = track.filePath
         if (track.isDownloaded && !localPath.isNullOrBlank() && filePathExistsOnDisk(localPath)) {
@@ -649,7 +663,7 @@ class PlayerRepositoryImpl @Inject constructor(
 
         return semaphore.withPermit {
             val entity = trackDao.getById(track.id) ?: track.toEntity()
-            val result = buildMediaItemForTrack(entity, allowYouTube = allowYouTube)
+            val result = buildMediaItemForTrack(entity, allowYouTube = allowYouTube, allowYtDlp = allowYtDlp)
             (result as? StreamRoutingResult.Item)?.mediaItem
         }
     }
@@ -939,6 +953,7 @@ class PlayerRepositoryImpl @Inject constructor(
     internal suspend fun buildMediaItemForTrack(
         track: TrackEntity,
         allowYouTube: Boolean = true,
+        allowYtDlp: Boolean = true,
     ): StreamRoutingResult {
         val localPath = track.filePath
         if (track.isDownloaded && !localPath.isNullOrBlank() && filePathExistsOnDisk(localPath)) {
@@ -973,7 +988,7 @@ class PlayerRepositoryImpl @Inject constructor(
         }
 
         val cached = streamUrlCache.get(track.id)
-        val stream = cached ?: streamResolver.resolve(track, allowYouTube = allowYouTube)?.also {
+        val stream = cached ?: streamResolver.resolve(track, allowYouTube = allowYouTube, allowYtDlp = allowYtDlp)?.also {
             streamUrlCache.put(track.id, it)
         } ?: return StreamRoutingResult.NotAvailable
 
