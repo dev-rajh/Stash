@@ -116,6 +116,29 @@ class PreviewUrlExtractor @Inject constructor(
         private val ytDlpSemaphore = Semaphore(YTDLP_CONCURRENCY)
 
         /**
+         * Picks the best audio stream URL from a list of InnerTube
+         * `adaptiveFormats` objects.
+         *
+         * YouTube's best free audio is Opus itag 251 (~160k). Opus sounds
+         * better than AAC at equal/lower bitrate, so we prefer the
+         * highest-bitrate Opus stream and only fall back to the
+         * highest-bitrate non-Opus (AAC) stream when no Opus is available.
+         * Mirrors yt-dlp's own `251/250/bestaudio` selector.
+         *
+         * Only formats with a direct `url` (not signatureCipher) are
+         * considered; ciphered formats are skipped.
+         */
+        internal fun selectBestAudioUrl(formats: List<JsonObject>): String? {
+            val audio = formats.filter { f ->
+                (f["mimeType"]?.jsonPrimitive?.content ?: "").startsWith("audio/") && f["url"] != null
+            }
+            fun bitrate(f: JsonObject) = f["bitrate"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L
+            fun isOpus(f: JsonObject) = (f["mimeType"]?.jsonPrimitive?.content ?: "").contains("opus")
+            val best = audio.filter(::isOpus).maxByOrNull(::bitrate) ?: audio.maxByOrNull(::bitrate)
+            return best?.get("url")?.jsonPrimitive?.content
+        }
+
+        /**
          * Test-only: exercises [race] directly without Android deps. Reuses
          * the shared semaphores so the tests also assert the real caps.
          */
@@ -349,28 +372,15 @@ class PreviewUrlExtractor @Inject constructor(
                 return@withTimeout null
             }
 
-            // Find the best audio format with a direct URL (not signatureCipher)
-            val audioFormats = adaptiveFormats
-                .filterIsInstance<JsonObject>()
-                .filter { format ->
-                    val mimeType = format["mimeType"]?.jsonPrimitive?.content ?: ""
-                    val hasDirectUrl = format["url"] != null
-                    val isAudio = mimeType.startsWith("audio/")
-                    isAudio && hasDirectUrl
-                }
-                .sortedByDescending { it["bitrate"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L }
-
-            val bestAudio = audioFormats.firstOrNull() ?: run {
+            // Find the best audio format with a direct URL (not signatureCipher).
+            // Prefers Opus 251/250 over AAC even at equal/lower bitrate.
+            val streamUrl = selectBestAudioUrl(adaptiveFormats.filterIsInstance<JsonObject>()) ?: run {
                 Log.d(TAG, "InnerTube: no audio formats with direct URL for $videoId " +
                     "(${adaptiveFormats.size} total formats, all may be ciphered)")
                 return@withTimeout null
             }
 
-            val streamUrl = bestAudio["url"]!!.jsonPrimitive.content
-            val mimeType = bestAudio["mimeType"]?.jsonPrimitive?.content ?: "unknown"
-            val bitrate = bestAudio["bitrate"]?.jsonPrimitive?.content ?: "?"
-
-            Log.d(TAG, "InnerTube: SUCCESS videoId=$videoId mime=$mimeType bitrate=$bitrate urlLen=${streamUrl.length}")
+            Log.d(TAG, "InnerTube: SUCCESS videoId=$videoId urlLen=${streamUrl.length}")
             streamUrl
         }
     }
