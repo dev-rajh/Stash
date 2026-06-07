@@ -43,6 +43,12 @@ enum class InnerTubeVariant(
     val clientVersion: String,
     val userAgent: String,
     val extraClientFields: Map<String, Any> = emptyMap(),
+    /** Host this client must POST against. Defaults to the YT-Music host. */
+    val apiBase: String = "https://music.youtube.com/youtubei/v1",
+    /** Numeric InnerTube client id for the `X-YouTube-Client-Name` header. */
+    val clientNameId: String = "",
+    /** Whether unauthenticated requests should append the YT-Music API key. */
+    val sendsApiKey: Boolean = false,
 ) {
     /** Oculus Quest 3 VR browser. Historically returns unciphered URLs. */
     ANDROID_VR(
@@ -60,19 +66,26 @@ enum class InnerTubeVariant(
         ),
     ),
 
-    /** iOS YouTube app. Also frequently returns unciphered URLs. */
+    /**
+     * iOS YouTube app. Returns direct, unciphered audio URLs in <1 s when hit
+     * on the `www.youtube.com` host, keyless, with the numeric client-name
+     * header (`5`) and a current app version. This is the fast lane; the
+     * config below was proven on-device against a no-rebuild spike.
+     */
     IOS(
         clientName = "IOS",
-        clientVersion = "19.45.4",
+        clientVersion = "21.02.3",
         userAgent =
-            "com.google.ios.youtube/19.45.4 " +
-                "(iPhone16,2; U; CPU iOS 17_7_1 like Mac OS X; en_US)",
+            "com.google.ios.youtube/21.02.3 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)",
         extraClientFields = mapOf(
             "deviceMake" to "Apple",
             "deviceModel" to "iPhone16,2",
-            "osName" to "iOS",
-            "osVersion" to "17.7.1.21H216",
+            "osName" to "iPhone",
+            "osVersion" to "18.3.2.22D82",
         ),
+        apiBase = "https://www.youtube.com/youtubei/v1",
+        clientNameId = "5",
+        sendsApiKey = false,
     ),
 
     /** Standard web YouTube Music client. URLs are typically ciphered. */
@@ -86,6 +99,8 @@ enum class InnerTubeVariant(
         userAgent =
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
                 "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        clientNameId = "67",
+        sendsApiKey = true,
     );
 
     /** Resolves the reported client version, computing it fresh for [WEB_REMIX]. */
@@ -128,14 +143,14 @@ class InnerTubeClient @Inject constructor(
         private const val API_KEY = "AIzaSyC9XL3ZjWddXya6X74dJoCTL-WEYFDNX30"
 
         /**
-         * Ordered attempt list for audio URL extraction. Unciphered-friendly
-         * variants first so [playerForAudio] exits on the earliest response
-         * that carries a direct URL.
+         * Ordered attempt list for audio URL extraction. Only the IOS client
+         * reliably returns direct (unciphered) URLs on the fast lane, so it is
+         * the sole entry; ANDROID_VR / WEB_REMIX no longer serve the unciphered
+         * shape and only added latency. `internal` so variant tests can assert
+         * the order without widening to the public API.
          */
-        private val AUDIO_VARIANT_ORDER = listOf(
-            InnerTubeVariant.ANDROID_VR,
+        internal val AUDIO_VARIANT_ORDER = listOf(
             InnerTubeVariant.IOS,
-            InnerTubeVariant.WEB_REMIX,
         )
     }
 
@@ -315,8 +330,10 @@ class InnerTubeClient @Inject constructor(
         val body = buildJsonObject {
             put("context", buildContext(variant))
             put("videoId", videoId)
+            put("contentCheckOk", true)
+            put("racyCheckOk", true)
         }
-        executeRequest("$BASE_URL/player", body, cookie, variant)
+        executeRequest("${variant.apiBase}/player", body, cookie, variant)
     }
 
     /**
@@ -583,10 +600,10 @@ class InnerTubeClient @Inject constructor(
         val (effectiveCookie, sapiSid, authHeader) = resolveAuth(cookie, variant)
 
         val separator = if (url.contains('?')) '&' else '?'
-        val fullUrl = if (sapiSid != null) {
-            "${url}${separator}prettyPrint=false"
-        } else {
-            "${url}${separator}key=$API_KEY&prettyPrint=false"
+        val fullUrl = when {
+            sapiSid != null -> "${url}${separator}prettyPrint=false"
+            variant.sendsApiKey -> "${url}${separator}key=$API_KEY&prettyPrint=false"
+            else -> "${url}${separator}prettyPrint=false" // keyless (IOS etc.)
         }
 
         Log.d(TAG, "executeRequest: POST $fullUrl (authenticated=${sapiSid != null}, variant=$variant)")
@@ -596,7 +613,7 @@ class InnerTubeClient @Inject constructor(
             .post(body.toString().toRequestBody(jsonMediaType))
             .header("Content-Type", "application/json")
             .header("User-Agent", variant.userAgent)
-            .header("X-YouTube-Client-Name", variant.clientName)
+            .header("X-YouTube-Client-Name", variant.clientNameId.ifBlank { variant.clientName })
             .header("X-YouTube-Client-Version", variant.currentVersion())
 
         // Cookies + SAPISIDHASH auth only make sense against the WEB family;
