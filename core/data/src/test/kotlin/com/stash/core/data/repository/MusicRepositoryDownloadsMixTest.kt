@@ -4,21 +4,17 @@ import android.content.Context
 import com.stash.core.common.ArtUrlUpgrader
 import com.stash.core.data.db.dao.DiscoveryQueueDao
 import com.stash.core.data.db.dao.DownloadQueueDao
-import com.stash.core.data.db.dao.ExternalRescanCandidate
 import com.stash.core.data.db.dao.PlaylistDao
 import com.stash.core.data.db.dao.SyncHistoryDao
 import com.stash.core.data.db.dao.TrackDao
-import com.stash.core.data.prefs.StoragePreference
 import com.stash.core.data.db.entity.PlaylistEntity
 import com.stash.core.data.db.entity.PlaylistTrackCrossRef
 import com.stash.core.model.MusicSource
 import com.stash.core.model.PlaylistType
 import io.mockk.coEvery
 import io.mockk.coVerify
-import io.mockk.every
 import io.mockk.mockk
 import io.mockk.slot
-import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -102,35 +98,6 @@ class MusicRepositoryDownloadsMixTest {
         coVerify(exactly = 0) { playlistDao.insertCrossRef(any()) }
     }
 
-    @Test
-    fun `rescanExternalDownloads returns zero when no candidates`() = runTest {
-        val trackDao = mockk<TrackDao>(relaxed = true)
-        coEvery { trackDao.getExternalRescanCandidates() } returns emptyList()
-        val repo = buildRepo(trackDao = trackDao)
-
-        val restored = repo.rescanExternalDownloads()
-
-        assertEquals(0, restored)
-        coVerify(exactly = 0) { trackDao.markAsDownloaded(any(), any(), any(), any(), any(), any()) }
-    }
-
-    @Test
-    fun `rescanExternalDownloads returns zero when tree uri missing`() = runTest {
-        val trackDao = mockk<TrackDao>(relaxed = true)
-        coEvery { trackDao.getExternalRescanCandidates() } returns listOf(
-            ExternalRescanCandidate(id = 1L, artist = "Artist", album = "Album", title = "Song"),
-        )
-        val storagePreference = mockk<StoragePreference> {
-            every { externalTreeUri } returns flowOf(null)
-        }
-        val repo = buildRepo(trackDao = trackDao, storagePreference = storagePreference)
-
-        val restored = repo.rescanExternalDownloads()
-
-        assertEquals(0, restored)
-        coVerify(exactly = 0) { trackDao.markAsDownloaded(any(), any(), any(), any(), any(), any()) }
-    }
-
     private fun buildRepo(
         playlistDao: PlaylistDao = mockk(relaxed = true),
         context: Context = mockk(relaxed = true),
@@ -138,9 +105,6 @@ class MusicRepositoryDownloadsMixTest {
         syncHistoryDao: SyncHistoryDao = mockk(relaxed = true),
         downloadQueueDao: DownloadQueueDao = mockk(relaxed = true),
         discoveryQueueDao: DiscoveryQueueDao = mockk(relaxed = true),
-        storagePreference: StoragePreference = mockk {
-            every { externalTreeUri } returns emptyFlow()
-        },
     ): MusicRepositoryImpl = MusicRepositoryImpl(
         context = context,
         trackDao = trackDao,
@@ -153,6 +117,6 @@ class MusicRepositoryDownloadsMixTest {
         stashMixRecipeDao = mockk(relaxed = true),
         downloadNetworkPreference = mockk(relaxed = true),
         streamingPreference = mockk(relaxed = true),
-        storagePreference = storagePreference,
+        localFileOps = mockk(relaxed = true),
     )
 }

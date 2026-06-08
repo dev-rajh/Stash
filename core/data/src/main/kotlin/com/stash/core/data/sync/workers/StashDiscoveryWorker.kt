@@ -286,7 +286,11 @@ class StashDiscoveryWorker @AssistedInject constructor(
         // only when we actually produced stubs so an idle run doesn't spin the
         // refresh⇄drain loop.
         if (newlyMaterialized > 0) {
-            runCatching { StashMixRefreshWorker.enqueueOneTime(applicationContext) }
+            // Materialize-only: LINK the freshly-drained stubs into the mix
+            // playlists, but do NOT re-queue discovery or re-kick this drain —
+            // otherwise refresh⇄drain loops forever, continuously clearing +
+            // reinserting every mix (the multi-genre "repopulate" churn).
+            runCatching { StashMixRefreshWorker.enqueueOneTime(applicationContext, materializeOnly = true) }
                 .onFailure { Log.w(TAG, "post-drain re-materialize enqueue failed; stubs surface on next refresh", it) }
         }
 

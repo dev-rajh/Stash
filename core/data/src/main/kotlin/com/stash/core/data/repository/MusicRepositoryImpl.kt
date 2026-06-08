@@ -5,18 +5,15 @@ import android.net.Uri
 import androidx.documentfile.provider.DocumentFile
 import com.stash.core.data.db.dao.AlbumSummary
 import com.stash.core.data.db.dao.ArtistSummary
-import com.stash.core.data.db.dao.ExternalRescanCandidate
 import com.stash.core.data.db.dao.PlaylistDao
 import com.stash.core.data.db.dao.SyncHistoryDao
 import com.stash.core.data.db.dao.TrackDao
 import com.stash.core.data.db.entity.SyncHistoryEntity
 import com.stash.core.data.mapper.toDomain
 import com.stash.core.data.mapper.toEntity
-import com.stash.core.data.prefs.StoragePreference
 import com.stash.core.model.Playlist
 import com.stash.core.model.Track
 import dagger.hilt.android.qualifiers.ApplicationContext
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -27,7 +24,6 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.retryWhen
-import kotlinx.coroutines.withContext
 import javax.inject.Inject
 import androidx.core.net.toUri
 
@@ -49,7 +45,7 @@ class MusicRepositoryImpl @Inject constructor(
     private val stashMixRecipeDao: com.stash.core.data.db.dao.StashMixRecipeDao,
     private val downloadNetworkPreference: com.stash.core.data.prefs.DownloadNetworkPreference,
     private val streamingPreference: com.stash.core.data.prefs.StreamingPreference,
-    private val storagePreference: StoragePreference,
+    private val localFileOps: com.stash.core.data.files.LocalFileOps,
 ) : MusicRepository {
 
     // ── Deletion event plumbing ─────────────────────────────────────────
@@ -144,11 +140,6 @@ class MusicRepositoryImpl @Inject constructor(
         // 2026-05-12: tracks with FLAC quality + album art + no audible
         // playback because the file was missing.
         reconcileMissingDownloadedFiles()
-        // B-06: reinstall/data-clear recovery. If the user keeps downloads
-        // in an external SAF folder, files can outlive app data. Re-scan
-        // that folder and re-link matching tracks so the library reflects
-        // already-present files instead of re-downloading everything.
-        rescanExternalDownloads()
 
         // Clean up orphaned mix tracks — downloaded tracks whose playlist was
         // refreshed and that no longer belong to any playlist. Deletes their
@@ -170,165 +161,52 @@ class MusicRepositoryImpl @Inject constructor(
         }
     }
 
-    // SAF DocumentFile traversal is blocking I/O (each listFiles() is a
-    // ContentResolver round-trip). Run off the main thread so a manual
-    // "Scan for existing songs" tap — launched from a Compose
-    // rememberCoroutineScope, which dispatches on Main — can't freeze the
-    // UI and trip an input-dispatch ANR on large libraries.
-    override suspend fun rescanExternalDownloads(): Int = withContext(Dispatchers.IO) {
-        val pending = trackDao.getExternalRescanCandidates()
-        if (pending.isEmpty()) return@withContext 0
-
-        val treeUri = storagePreference.externalTreeUri.first() ?: return@withContext 0
-        val root = DocumentFile.fromTreeUri(context, treeUri) ?: run {
-            android.util.Log.w("StashMigrations", "external rescan skipped: cannot open tree $treeUri")
-            return@withContext 0
-        }
-
-        val index = buildExternalRescanIndex(pending)
-        if (index.isEmpty()) return@withContext 0
-
-        var scannedFiles = 0
-        var restored = 0
-        var unmatched = 0
-        val consumedTrackIds = HashSet<Long>()
-        val stack = ArrayDeque<Pair<DocumentFile, List<String>>>()
-        stack.addLast(root to emptyList())
-        while (stack.isNotEmpty()) {
-            val (node, pathSegments) = stack.removeLast()
-            if (node.isDirectory) {
-                node.listFiles().forEach { child ->
-                    val seg = child.name?.takeIf { it.isNotBlank() }
-                    val nextPath = if (seg == null || !child.isDirectory) pathSegments else pathSegments + seg
-                    stack.addLast(child to nextPath)
-                }
-                continue
-            }
-            if (!node.isFile) continue
-
-            val fileName = node.name ?: continue
-            val ext = fileName.substringAfterLast('.', "").lowercase()
-            if (ext !in RESCAN_AUDIO_EXTENSIONS) continue
-            scannedFiles++
-
-            val titleSlug = slugForRescan(fileName.substringBeforeLast('.', fileName))
-            val albumSlug = pathSegments.lastOrNull()?.let(::slugForRescan).orEmpty()
-            val artistSlug = pathSegments.getOrNull(pathSegments.size - 2)?.let(::slugForRescan).orEmpty()
-            if (titleSlug.isBlank() || albumSlug.isBlank() || artistSlug.isBlank()) {
-                unmatched++
-                continue
-            }
-            val key = "$artistSlug|$albumSlug|$titleSlug"
-            val queue = index[key]
-            val match = queue?.firstOrNull { it.id !in consumedTrackIds }
-            if (match == null) {
-                unmatched++
-                continue
-            }
-            runCatching {
-                trackDao.markAsDownloaded(
-                    trackId = match.id,
-                    filePath = node.uri.toString(),
-                    fileSizeBytes = node.length(),
-                )
-            }.onSuccess {
-                consumedTrackIds += match.id
-                restored++
-            }.onFailure {
-                android.util.Log.w("StashMigrations", "external rescan: failed to restore ${match.id}", it)
-            }
-        }
-
-        if (scannedFiles > 0) {
-            android.util.Log.i(
-                "StashMigrations",
-                "external rescan: scanned=$scannedFiles restored=$restored unmatched=$unmatched",
-            )
-        }
-        restored
-    }
-
-    private fun buildExternalRescanIndex(
-        candidates: List<ExternalRescanCandidate>,
-    ): MutableMap<String, ArrayDeque<ExternalRescanCandidate>> {
-        val map = LinkedHashMap<String, ArrayDeque<ExternalRescanCandidate>>(candidates.size * 2)
-        candidates.forEach { row ->
-            val artistSlug = slugForRescan(row.artist)
-            val titleSlug = slugForRescan(row.title)
-            if (artistSlug.isBlank() || titleSlug.isBlank()) return@forEach
-
-            val albumSlug = slugForRescan(row.album).ifBlank { "singles" }
-            val primaryKey = "$artistSlug|$albumSlug|$titleSlug"
-            map.getOrPut(primaryKey) { ArrayDeque() }.addLast(row)
-
-            if (albumSlug != "singles") {
-                // Many legacy rows have blank album while files are under
-                // singles/, so index a fallback key too.
-                val singlesKey = "$artistSlug|singles|$titleSlug"
-                map.getOrPut(singlesKey) { ArrayDeque() }.addLast(row)
-            }
-        }
-        return map
-    }
-
-    private fun slugForRescan(value: String): String =
-        value.lowercase()
-            .replace(Regex("[^a-z0-9\\s-]"), "")
-            .replace(Regex("\\s+"), "-")
-            .trim('-')
-            .take(80)
-
     /**
-     * Verifies every `is_downloaded=1` row's file is actually readable.
-     * Handles both regular filesystem paths and SAF `content://` URIs.
-     * Rows with missing files have `is_downloaded`, `file_path`, and
-     * `file_size_bytes` cleared so the rest of the system stops treating
-     * them as playable.
+     * Download-integrity sweep (runs every launch via [runMigrations]). Checks
+     * every `is_downloaded=1` row's file against [LocalFileOps.classify]:
+     *  - reliably MISSING or TOO_SMALL (a failed download's tiny garbage body)
+     *    -> the row is un-marked (`is_downloaded`/`file_path`/`file_size_bytes`
+     *    cleared) so it streams / re-downloads; junk files are also deleted.
+     *  - OK or INCONCLUSIVE -> left untouched. INCONCLUSIVE (a SAF document
+     *    whose size couldn't be read at cold start) is the safety valve: we
+     *    never un-mark or delete on an ambiguous read, so a flaky boot can't
+     *    damage a real external-storage library.
      *
-     * Skipped: rows whose path is already null (they're a separate kind
-     * of corrupt state that bulkResetForReDownload will also clean —
-     * captured in `nullPath`).
+     * Handles both plain filesystem paths and SAF `content://` URIs. Null/blank
+     * paths count toward `nullPath` and are un-marked.
      */
     private suspend fun reconcileMissingDownloadedFiles() {
         val refs = trackDao.getDownloadedFileRefs()
         if (refs.isEmpty()) return
 
-        val missing = mutableListOf<Long>()
-        var nullPath = 0
-        for (ref in refs) {
-            val path = ref.filePath
-            if (path.isNullOrBlank()) {
-                missing += ref.id
-                nullPath++
-                continue
-            }
-            val exists = runCatching {
-                if (path.startsWith("content://")) {
-                    DocumentFile.fromSingleUri(context, path.toUri())?.exists() == true
-                } else {
-                    val plainPath = if (path.startsWith("file://")) {
-                        path.toUri().path ?: path.removePrefix("file://")
-                    } else {
-                        path
-                    }
-                    java.io.File(plainPath).exists()
-                }
-            }.getOrDefault(false)
-            if (!exists) missing += ref.id
+        // A downloaded row is unusable when its file is reliably missing OR too
+        // small to be real audio (a ~274-byte failed-download body). classify()
+        // distinguishes those from an INCONCLUSIVE SAF read (provider didn't
+        // report a size / transient cold-start failure), which we must NOT act
+        // on — un-marking/deleting on an ambiguous read could damage a real
+        // external-storage library on a flaky boot.
+        val result = classifyDownloadedRefs(refs) {
+            localFileOps.classify(it, com.stash.core.common.constants.StashConstants.MIN_PLAYABLE_LOCAL_BYTES)
         }
 
-        if (missing.isEmpty()) {
-            android.util.Log.d("StashMigrations", "file integrity: all ${refs.size} downloaded files present")
+        if (result.resetIds.isEmpty()) {
+            android.util.Log.d("StashMigrations", "download integrity: all ${refs.size} downloaded files usable")
             return
         }
-        // Bulk update in chunks to stay under SQLite's parameter ceiling.
-        missing.chunked(500).forEach { chunk ->
+
+        // Delete the junk files (present-but-tiny). Missing/null-path rows
+        // contribute no path. Best-effort, SAF-aware.
+        result.junkPaths.forEach { localFileOps.delete(it) }
+
+        // Un-mark the unusable rows in chunks to stay under SQLite's parameter
+        // ceiling — they become not-downloaded and therefore streamable.
+        result.resetIds.chunked(500).forEach { chunk ->
             trackDao.bulkResetForReDownload(chunk)
         }
         android.util.Log.i(
             "StashMigrations",
-            "file integrity: scanned ${refs.size} downloaded rows, " +
-                "reset ${missing.size} with missing files (nullPath=$nullPath)",
+            "download integrity: scanned ${refs.size} downloaded rows, reset ${result.resetIds.size} " +
+                "unusable (junk-deleted=${result.junkPaths.size}, nullPath=${result.nullPath})",
         )
     }
 
@@ -1047,9 +925,6 @@ class MusicRepositoryImpl @Inject constructor(
 
     companion object {
         private const val DOWNLOADS_MIX_SOURCE_ID = "stash_downloads_mix"
-        private val RESCAN_AUDIO_EXTENSIONS = setOf(
-            "m4a", "mp4", "aac", "opus", "ogg", "mp3", "flac", "wav", "alac", "ape", "tta", "wv", "aiff",
-        )
 
         /**
          * WorkManager unique-work names for the five Stash Mix workers. Used

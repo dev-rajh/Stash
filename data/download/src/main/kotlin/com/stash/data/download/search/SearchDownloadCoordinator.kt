@@ -78,6 +78,7 @@ class SearchDownloadCoordinator @Inject constructor(
      */
     private val losslessPrefs: LosslessSourcePreferences,
     private val downloadQueueDao: DownloadQueueDao,
+    private val localFileOps: com.stash.core.data.files.LocalFileOps,
     private val loudnessMeasurer: com.stash.core.data.audio.LoudnessMeasurer,
     /**
      * v0.9.36: enqueue a [com.stash.data.lyrics.worker.LyricsFetchWorker]
@@ -157,6 +158,19 @@ class SearchDownloadCoordinator @Inject constructor(
     // -------------------------------------------------------------------------
 
     private suspend fun performDownload(track: TrackItem): DownloadJobResult {
+        // Master lossless switch OFF → skip the registry (and the strict-FLAC
+        // defer) entirely and go straight to yt-dlp, mirroring
+        // DownloadManager.executeDownload. Without this, "lossless off" still
+        // resolved the registry, missed (sources down / no captcha cookie),
+        // and — with fallback also off — deferred to WAITING_FOR_LOSSLESS, so
+        // artist-page / search downloads hung on "waiting for lossless" forever.
+        if (!losslessPrefs.enabledNow()) {
+            return DownloadJobResult.Resolved(
+                source = SearchDownloadStatus.Source.YOUTUBE,
+                outcome = finalizeFromYtDlp(track),
+            )
+        }
+
         val match = runCatching { registry.resolve(track.toQuery()) }
             .onFailure { e ->
                 Log.w(TAG, "registry.resolve threw for ${track.videoId}: ${e.message}")
@@ -442,6 +456,14 @@ class SearchDownloadCoordinator @Inject constructor(
         if (existing != null && existing.albumArtist.isBlank() && albumArtistName.isNotBlank()) {
             runCatching { trackDao.updateAlbumArtistIfEmpty(trackId, albumArtistName) }
                 .onFailure { e -> Log.w(TAG, "updateAlbumArtistIfEmpty failed: ${e.message}") }
+        }
+
+        // Reject a "successful" download whose file is too small to be audio
+        // (a failed yt-dlp run leaving a tiny error body). Delete it + leave
+        // the track not-downloaded (streamable) rather than mark junk.
+        if (!localFileOps.acceptDownloadOrDelete(finalized.committed.filePath)) {
+            Log.w(TAG, "search download: discarded too-small file for trackId=$trackId: ${finalized.committed.filePath}")
+            return
         }
 
         trackDao.markAsDownloaded(

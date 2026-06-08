@@ -219,6 +219,67 @@ class StashMixRefreshWorkerStreamOnlyMaterializeTest {
         )
     }
 
+    // ── Loop-break: materialize-only re-kick ──────────────────────────────
+    // The post-drain re-kick from StashDiscoveryWorker exists only to LINK
+    // freshly-drained stream-only stubs into the playlists. It must NOT
+    // re-queue discovery or re-kick the drain again — otherwise refresh⇄drain
+    // form a runaway loop that continuously clears + reinserts every mix
+    // (the user-visible "load 40, then repopulate" churn).
+
+    private fun newWorkerMaterializeOnly(): StashMixRefreshWorker {
+        val params: WorkerParameters = mockk(relaxed = true) {
+            coEvery { inputData } returns workDataOf(
+                StashMixRefreshWorker.KEY_MATERIALIZE_ONLY to true,
+            )
+        }
+        return StashMixRefreshWorker(
+            appContext, params,
+            recipeDao, playlistDao, discoveryQueueDao, listeningEventDao,
+            trackDao, mixGenerator, seedGenerator, lastFmApiClient,
+            lastFmCredentials, sessionPreference, blocklistGuard,
+            trackSkipEventDao, tagPoolBuilder, trackMatcher, downloadNetworkPreference,
+        )
+    }
+
+    @Test fun `materialize-only refresh does not re-kick the discovery drain`() = runTest {
+        val recipe = recipe(id = 1L, name = "Daily Discover", playlistId = 100L)
+        coEvery { recipeDao.getActive() } returns listOf(recipe)
+        coEvery { mixGenerator.generate(recipe, any()) } returns emptyList()
+        coEvery { playlistDao.getById(100L) } returns PlaylistEntity(
+            id = 100L, name = "Daily Discover", source = MusicSource.BOTH,
+            sourceId = "stash_mix_1", type = PlaylistType.STASH_MIX,
+            trackCount = 0, syncEnabled = true, isActive = true,
+        )
+        coEvery { playlistDao.getStreamableOrDoneTrackIdsForRecipe(1L) } returns listOf(555L)
+        // Force a materialize (current membership differs from what we'd write).
+        coEvery { playlistDao.getOrderedTrackIdsForPlaylist(100L) } returns emptyList()
+
+        newWorkerMaterializeOnly().doWork()
+
+        // The end-of-refresh discovery-drain kick reads downloadNetworkPreference
+        // .current() for its constraints — so a zero call count proves the kick
+        // (the loop edge) was skipped.
+        coVerify(exactly = 0) { downloadNetworkPreference.current() }
+    }
+
+    @Test fun `normal refresh still kicks the discovery drain`() = runTest {
+        val recipe = recipe(id = 1L, name = "Daily Discover", playlistId = 100L)
+        coEvery { recipeDao.getById(1L) } returns recipe
+        coEvery { recipeDao.getActive() } returns listOf(recipe)
+        coEvery { mixGenerator.generate(recipe, any()) } returns emptyList()
+        coEvery { playlistDao.getById(100L) } returns PlaylistEntity(
+            id = 100L, name = "Daily Discover", source = MusicSource.BOTH,
+            sourceId = "stash_mix_1", type = PlaylistType.STASH_MIX,
+            trackCount = 0, syncEnabled = true, isActive = true,
+        )
+        coEvery { playlistDao.getStreamableOrDoneTrackIdsForRecipe(1L) } returns listOf(555L)
+        coEvery { playlistDao.getOrderedTrackIdsForPlaylist(100L) } returns emptyList()
+
+        newWorker(recipeId = 1L).doWork()
+
+        coVerify(atLeast = 1) { downloadNetworkPreference.current() }
+    }
+
     private fun recipe(id: Long, name: String, playlistId: Long?) = StashMixRecipeEntity(
         id = id,
         name = name,

@@ -13,6 +13,7 @@ import coil3.SingletonImageLoader
 import android.util.Log
 import com.stash.core.data.db.dao.ArtistProfileCacheDao
 import com.stash.core.data.db.dao.DiscoveryQueueDao
+import com.stash.core.data.db.dao.DownloadQueueDao
 import com.stash.core.data.diagnostics.CrashReporter
 import com.stash.core.data.db.dao.PlaylistDao
 import com.stash.core.data.db.dao.StashMixRecipeDao
@@ -102,6 +103,9 @@ class StashApplication : Application(), Configuration.Provider {
 
     @Inject
     lateinit var discoveryQueueDao: DiscoveryQueueDao
+
+    @Inject
+    lateinit var downloadQueueDao: DownloadQueueDao
 
     @Inject
     lateinit var trackDao: TrackDao
@@ -233,6 +237,19 @@ class StashApplication : Application(), Configuration.Provider {
         applicationScope.launch {
             musicRepository.runMigrations()
         }
+        // Reset stale IN_PROGRESS download_queue rows left over from an
+        // interrupted worker run / process death. The worker bulk-marks rows
+        // IN_PROGRESS and relies on the NEXT run's resetStaleInProgress() to
+        // flip leftovers back — but that next run may never come (e.g. in
+        // streaming mode the drain is skipped), so they linger forever showing
+        // "downloading". At a fresh process start no worker is running, so any
+        // IN_PROGRESS row is by definition stale and safe to reset.
+        applicationScope.launch {
+            runCatching {
+                val reset = downloadQueueDao.resetStaleInProgress()
+                if (reset > 0) Log.i("StashStartup", "reset $reset stale IN_PROGRESS download rows -> PENDING")
+            }.onFailure { Log.w("StashStartup", "stale IN_PROGRESS reset failed", it) }
+        }
         applicationScope.launch {
             musicRepository.ensureDownloadsMixSeeded()
         }
@@ -245,12 +262,14 @@ class StashApplication : Application(), Configuration.Provider {
             }
         }
         applicationScope.launch {
-            ytDlpManager.initialize()
-            // Kick a background warmup extraction right after init. Primes the
-            // player-JS + QuickJS caches so the first real user preview doesn't
-            // pay the ~14 s cold-start cost. Serial with initialize() because
-            // warmUp() requires [YtDlpManager.initialized].
-            ytDlpManager.warmUp()
+            // Best-effort prewarm: initialize, freshen yt-dlp to the latest
+            // nightly, and warm the player-JS + QuickJS + EJS caches so the
+            // first real user preview/download pays neither the ~14 s
+            // cold-start cost nor the nightly-update latency. This shares the
+            // once-per-session gate with the download path (DownloadExecutor),
+            // so whichever runs first does the work and the other returns
+            // immediately — downloads are still hard-gated on a fresh binary.
+            ytDlpManager.ensureFreshened()
         }
         // Warm up music.youtube.com TLS + DNS in the first 2s of launch so
         // the first search request doesn't pay the full handshake cost.
