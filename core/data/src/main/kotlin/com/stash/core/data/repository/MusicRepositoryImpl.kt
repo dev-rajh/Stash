@@ -206,7 +206,7 @@ class MusicRepositoryImpl @Inject constructor(
         android.util.Log.i(
             "StashMigrations",
             "download integrity: scanned ${refs.size} downloaded rows, reset ${result.resetIds.size} " +
-                "unusable (junk-deleted=${result.junkPaths.size}, nullPath=${result.nullPath})",
+                    "unusable (junk-deleted=${result.junkPaths.size}, nullPath=${result.nullPath})",
         )
     }
 
@@ -230,7 +230,7 @@ class MusicRepositoryImpl @Inject constructor(
             // attempts so a non-race failure doesn't loop forever.
             .retryWhen { cause, attempt ->
                 val raced = cause is IllegalStateException &&
-                    cause.message?.contains("CursorWindow") == true
+                        cause.message?.contains("CursorWindow") == true
                 raced && attempt < 3
             }
             .map { entities ->
@@ -355,10 +355,10 @@ class MusicRepositoryImpl @Inject constructor(
     // ── Playlist queries ────────────────────────────────────────────────
 
     override fun getAllPlaylists(): Flow<List<Playlist>> =
-        // Uses the sync-enabled-gated query so toggled-off external
-        // playlists vanish from Home + Library in step with their
-        // Sync Preferences state. See PlaylistDao.getAllVisible for
-        // the source=BOTH exemption that keeps local CUSTOM + STASH_MIX
+    // Uses the sync-enabled-gated query so toggled-off external
+    // playlists vanish from Home + Library in step with their
+    // Sync Preferences state. See PlaylistDao.getAllVisible for
+    // the source=BOTH exemption that keeps local CUSTOM + STASH_MIX
         // visible while still gating imported YouTube CUSTOM playlists.
         playlistDao.getAllVisible(includeStreamable = false)
             .map { entities -> entities.map { it.toDomain() } }
@@ -579,7 +579,7 @@ class MusicRepositoryImpl @Inject constructor(
             android.util.Log.w(
                 "MusicRepository",
                 "addTrackToPlaylist: skipping insert — trackExists=$trackExists " +
-                    "(id=$trackId), playlistExists=$playlistExists (id=$playlistId)",
+                        "(id=$trackId), playlistExists=$playlistExists (id=$playlistId)",
             )
             return
         }
@@ -603,7 +603,7 @@ class MusicRepositoryImpl @Inject constructor(
             android.util.Log.w(
                 "MusicRepository",
                 "addTrackToPlaylist: FK constraint failed after pre-check " +
-                    "(trackId=$trackId, playlistId=$playlistId) — likely race with delete",
+                        "(trackId=$trackId, playlistId=$playlistId) — likely race with delete",
                 e,
             )
             return
@@ -880,6 +880,10 @@ class MusicRepositoryImpl @Inject constructor(
             "Cleaned ${orphans.size} orphaned track(s) and their audio files",
         )
         return orphans.size
+    }
+
+    override suspend fun rescanExternalDownloads(): Int {
+        TODO("Not yet implemented")
     }
 
     // ── Art URL migration ──────────────────────────────────────────────
