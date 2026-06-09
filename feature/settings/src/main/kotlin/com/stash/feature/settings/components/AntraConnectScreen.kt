@@ -1,6 +1,7 @@
 package com.stash.feature.settings.components
 
 import android.annotation.SuppressLint
+import android.util.Log
 import android.webkit.CookieManager
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -74,18 +75,34 @@ fun AntraConnectScreen(
 
     // ── Cookie polling + login confirmation ─────────────────────────────
     LaunchedEffect(Unit) {
+        var lastCookieSig = ""
         while (isActive && !captured) {
             delay(POLL_INTERVAL_MS)
             val cookies = CookieManager.getInstance().getCookie(ANTRA_URL).orEmpty()
+            // DIAGNOSTIC: log the cookie NAMES + value lengths (not values)
+            // whenever the cookie set changes, so we can see what antra
+            // actually sets vs. the names we key off (`session`/`cf_clearance`).
+            val sig = cookies.split(";").mapNotNull {
+                val n = it.substringBefore("=").trim()
+                if (n.isEmpty()) null else "$n(${it.substringAfter("=", "").trim().length})"
+            }.sorted().joinToString(",")
+            if (sig != lastCookieSig) {
+                lastCookieSig = sig
+                Log.i(TAG, "cookies for $ANTRA_URL => [$sig]")
+            }
             val session = SESSION_REGEX.find(cookies)?.groupValues?.get(1)
             val cfClearance = CF_CLEARANCE_REGEX.find(cookies)?.groupValues?.get(1)
-            if (session.isNullOrBlank() || cfClearance.isNullOrBlank()) continue
+            if (session.isNullOrBlank() || cfClearance.isNullOrBlank()) {
+                Log.d(TAG, "harvest gate: session=${!session.isNullOrBlank()} cf_clearance=${!cfClearance.isNullOrBlank()}")
+                continue
+            }
 
             // Both cookies present — confirm the session is actually logged
             // in (cookies can exist pre-login) by hitting /api/auth/me in the
             // page context.
             val wv = webViewRef ?: continue
             val username = fetchUsername(wv)
+            Log.i(TAG, "both cookies present; /api/auth/me username=${username ?: "<none>"}")
             if (!username.isNullOrBlank()) {
                 captured = true
                 statusText = "Connected as $username — saving and closing."
@@ -179,6 +196,7 @@ private suspend fun fetchUsername(webView: WebView): String? =
             // result is a JSON-encoded string (quoted) of the body text, or
             // "null" — decode one layer, then parse the username.
             val body = decodeJsString(result)
+            Log.i(TAG, "/api/auth/me raw body (len=${body.length}): ${body.take(300)}")
             val username = runCatching {
                 if (body.isBlank()) null else JSONObject(body).optString("username").takeIf { it.isNotBlank() }
             }.getOrNull()
@@ -207,11 +225,62 @@ private fun buildWebView(context: android.content.Context): WebView {
             userAgentString = AntraFingerprint.USER_AGENT
             mediaPlaybackRequiresUserGesture = true
         }
-        webViewClient = WebViewClient()
+        Log.i(TAG, "WebView UA=${settings.userAgentString}")
+
+        // DIAGNOSTIC: surface page-load lifecycle + HTTP/net errors so a
+        // blank/white render is explainable from logcat (Cloudflare block?
+        // net error? SPA failure?).
+        webViewClient = object : WebViewClient() {
+            override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                Log.i(TAG, "onPageStarted url=$url")
+            }
+
+            override fun onPageFinished(view: WebView?, url: String?) {
+                Log.i(TAG, "onPageFinished url=$url title='${view?.title}'")
+            }
+
+            override fun onReceivedError(
+                view: WebView?,
+                request: android.webkit.WebResourceRequest?,
+                error: android.webkit.WebResourceError?,
+            ) {
+                if (request?.isForMainFrame == true) {
+                    Log.w(TAG, "onReceivedError main-frame url=${request.url} code=${error?.errorCode} desc=${error?.description}")
+                }
+            }
+
+            override fun onReceivedHttpError(
+                view: WebView?,
+                request: android.webkit.WebResourceRequest?,
+                errorResponse: android.webkit.WebResourceResponse?,
+            ) {
+                if (request?.isForMainFrame == true) {
+                    Log.w(TAG, "onReceivedHttpError main-frame url=${request.url} status=${errorResponse?.statusCode} (${errorResponse?.reasonPhrase})")
+                }
+            }
+        }
+
+        // DIAGNOSTIC: JS console → reveals SPA errors and Cloudflare
+        // challenge messages that would otherwise be invisible.
+        webChromeClient = object : android.webkit.WebChromeClient() {
+            override fun onConsoleMessage(msg: android.webkit.ConsoleMessage): Boolean {
+                Log.i(TAG, "console[${msg.messageLevel()}] ${msg.message()} @${msg.sourceId()}:${msg.lineNumber()}")
+                return true
+            }
+        }
+
+        // A login WebView must never download files. Swallow any download
+        // navigation (this is what white-screened after "download track"),
+        // and log it so we can see if antra routes through a blob/file URL.
+        setDownloadListener { url, _, _, mime, _ ->
+            Log.w(TAG, "DownloadListener swallowed download url=${url.take(120)} mime=$mime")
+        }
+
         loadUrl(ANTRA_URL)
     }
 }
 
+private const val TAG = "AntraConnect"
 private const val ANTRA_URL = "https://antra.hoshi.cfd/"
 private const val POLL_INTERVAL_MS = 800L
 private val SESSION_REGEX = Regex("(?:^|;\\s*)session=([^;\\s]+)")
