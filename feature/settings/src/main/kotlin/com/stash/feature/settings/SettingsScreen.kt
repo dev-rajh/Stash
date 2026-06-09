@@ -98,6 +98,7 @@ fun SettingsScreen(
     onNavigateToEqualizer: () -> Unit = {},
     onNavigateToLibraryHealth: () -> Unit = {},
     onNavigateToSquidWtfCaptcha: () -> Unit = {},
+    onNavigateToAntraConnect: () -> Unit = {},
     onNavigateToDiagnosticsPreview: () -> Unit = {},
     modifier: Modifier = Modifier,
     viewModel: SettingsViewModel = hiltViewModel(),
@@ -258,6 +259,7 @@ fun SettingsScreen(
         onNavigateToEqualizer = onNavigateToEqualizer,
         onNavigateToLibraryHealth = onNavigateToLibraryHealth,
         onNavigateToSquidWtfCaptcha = onNavigateToSquidWtfCaptcha,
+        onNavigateToAntraConnect = onNavigateToAntraConnect,
         onNavigateToDiagnosticsPreview = onNavigateToDiagnosticsPreview,
         onShareLatestCrashReport = viewModel::latestCrashShareTarget,
         onDiagnosticsRefresh = viewModel::refreshDiagnostics,
@@ -321,6 +323,7 @@ private fun SettingsContent(
     onNavigateToEqualizer: () -> Unit,
     onNavigateToLibraryHealth: () -> Unit,
     onNavigateToSquidWtfCaptcha: () -> Unit,
+    onNavigateToAntraConnect: () -> Unit,
     onNavigateToDiagnosticsPreview: () -> Unit,
     /**
      * Returns the latest crash file + its FileProvider URI, or null if
@@ -708,6 +711,41 @@ private fun SettingsContent(
                             squidStatus = uiState.squidCaptchaStatus,
                             onSolveCaptcha = onNavigateToSquidWtfCaptcha,
                         )
+
+                        // -- antra connect row --------------------------------
+                        // Independent per-user lossless source (antra.hoshi.cfd).
+                        // Engages only when both Qobuz proxies miss. Connecting
+                        // is optional redundancy, mirroring the squid captcha row.
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable(onClick = onNavigateToAntraConnect)
+                                .padding(vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = uiState.antraUsername
+                                        ?.let { "antra: $it" }
+                                        ?: "Connect antra",
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                )
+                                Text(
+                                    text = uiState.antraUsername
+                                        ?.let { "Connected — tap to reconnect" }
+                                        ?: "Independent lossless fallback (own account)",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            Text(
+                                text = if (uiState.antraUsername != null) "Reconnect →" else "Connect →",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                        }
 
                         // -- Lossless quality picker --------------------------
                         Spacer(modifier = Modifier.height(16.dp))

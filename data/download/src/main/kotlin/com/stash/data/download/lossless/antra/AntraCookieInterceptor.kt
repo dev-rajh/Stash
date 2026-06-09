@@ -89,10 +89,10 @@ class AntraCookieInterceptor @Inject constructor(
             .header("Cookie", mergedCookie)
             // Browser fingerprint — must match the WebView that minted
             // cf_clearance, or Cloudflare rejects the request.
-            .header("User-Agent", USER_AGENT)
+            .header("User-Agent", AntraFingerprint.USER_AGENT)
             .header("Origin", ANTRA_ORIGIN)
             .header("Referer", "$ANTRA_ORIGIN/")
-            .header("sec-ch-ua", SEC_CH_UA)
+            .header("sec-ch-ua", AntraFingerprint.SEC_CH_UA)
             .header("sec-ch-ua-mobile", "?1")
             .header("sec-ch-ua-platform", "\"Android\"")
             .build()
@@ -107,18 +107,7 @@ class AntraCookieInterceptor @Inject constructor(
         const val ANTRA_ORIGIN = "https://antra.hoshi.cfd"
         const val SESSION_COOKIE = "session"
         const val CF_CLEARANCE_COOKIE = "cf_clearance"
-
-        /**
-         * Android Chrome WebView fingerprint, shared with
-         * `AntraConnectScreen` so the OkHttp replay matches the WebView that
-         * minted `cf_clearance`. If Task 10 shows 403s, the WebView's live
-         * UA may need harvesting alongside the cookies instead of this
-         * constant.
-         */
-        const val USER_AGENT =
-            "Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 " +
-                "(KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
-        const val SEC_CH_UA =
-            "\"Google Chrome\";v=\"126\", \"Chromium\";v=\"126\", \"Not.A/Brand\";v=\"24\""
+        // UA / sec-ch-ua live in the shared [AntraFingerprint] so the
+        // connect WebView and this replay stay byte-identical.
     }
 }

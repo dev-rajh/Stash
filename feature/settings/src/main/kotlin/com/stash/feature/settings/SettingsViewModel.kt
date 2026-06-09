@@ -89,6 +89,7 @@ class SettingsViewModel @Inject constructor(
     private val youTubeHistoryScrobbler: YouTubeHistoryScrobbler,
     private val youTubeScrobblerState: YouTubeScrobblerState,
     private val losslessPrefs: LosslessSourcePreferences,
+    private val antraCredentialStore: com.stash.data.download.lossless.antra.AntraCredentialStore,
     private val losslessRateLimiter: AggregatorRateLimiter,
     private val qobuzSource: QobuzSource,
     private val likePreferences: LikePreferences,
@@ -237,6 +238,7 @@ class SettingsViewModel @Inject constructor(
         autoSavedCountLast7Days,
         losslessPrefs.youtubeFallbackEnabled,
         stashMixPreference.enabled,
+        losslessPrefs.antraUsername,
     ) { values ->
         @Suppress("UNCHECKED_CAST")
         val spotifyAuth = values[0] as AuthState
@@ -266,6 +268,7 @@ class SettingsViewModel @Inject constructor(
         val autoSavedCount7d = values[24] as Int
         val youtubeFallbackEnabled = values[25] as Boolean
         val stashMixesEnabled = values[26] as Boolean
+        val antraUsername = (values[27] as String?)
 
         val lastFmState: LastFmAuthState = local.lastFmAuthOverride
             ?: when {
@@ -307,6 +310,7 @@ class SettingsViewModel @Inject constructor(
             squidWtfCaptchaCookie = squidWtfCaptchaCookie,
             squidCaptchaStatus = squidCaptchaStatus(squidWtfCaptchaCookie, lastKnownBadCookie),
             losslessQualityTier = losslessQualityTier,
+            antraUsername = antraUsername,
             autoSaveEnabled = autoSaveEnabled,
             autoSaveThreshold = autoSaveThreshold,
             heartDefaultStash = heartDefaultStash,
@@ -929,6 +933,19 @@ class SettingsViewModel @Inject constructor(
     fun onSquidWtfCaptchaCookieChanged(value: String) {
         viewModelScope.launch {
             losslessPrefs.setCaptchaCookieValue(value)
+        }
+    }
+
+    /**
+     * Persists the antra `session` + `cf_clearance` cookies and username
+     * harvested by [com.stash.feature.settings.components.AntraConnectScreen]
+     * once the user has logged in and passed Cloudflare. The
+     * `AntraCookieInterceptor` picks the cookies up reactively, so antra
+     * becomes usable as soon as this returns.
+     */
+    fun onAntraConnected(session: String, cfClearance: String, username: String) {
+        viewModelScope.launch {
+            antraCredentialStore.save(session = session, cfClearance = cfClearance, username = username)
         }
     }
 

@@ -134,6 +134,9 @@ fun StashNavHost(
                 onNavigateToSquidWtfCaptcha = {
                     navController.navigate(SquidWtfCaptchaRoute)
                 },
+                onNavigateToAntraConnect = {
+                    navController.navigate(AntraConnectRoute)
+                },
                 onNavigateToDiagnosticsPreview = { navController.navigate(DiagnosticsPreviewRoute) },
             )
         }
@@ -151,6 +154,22 @@ fun StashNavHost(
                 androidx.hilt.navigation.compose.hiltViewModel(settingsEntry)
             com.stash.feature.settings.components.SquidWtfCaptchaScreen(
                 onCookieCaptured = viewModel::onSquidWtfCaptchaCookieChanged,
+                onClose = { navController.popBackStack() },
+            )
+        }
+
+        composable<AntraConnectRoute> { backStackEntry ->
+            // Same pattern as SquidWtfCaptchaRoute: reach the Settings
+            // ViewModel from the parent route so the harvested antra creds
+            // write to the same store the interceptor reads, surviving this
+            // route's dispose.
+            val settingsEntry = remember(backStackEntry) {
+                navController.getBackStackEntry(SettingsRoute)
+            }
+            val viewModel: com.stash.feature.settings.SettingsViewModel =
+                androidx.hilt.navigation.compose.hiltViewModel(settingsEntry)
+            com.stash.feature.settings.components.AntraConnectScreen(
+                onConnected = viewModel::onAntraConnected,
                 onClose = { navController.popBackStack() },
             )
         }
