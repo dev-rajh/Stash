@@ -1,6 +1,7 @@
 package com.stash.data.download.lossless.antra
 
 import android.util.Log
+import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.Dispatchers
@@ -140,6 +141,24 @@ class AntraClient @Inject constructor(
 
     /** The bytes URL for a completed job. Fetched with a plain GET (cookies via interceptor). */
     fun downloadUrl(jobId: String): String = "$baseUrl/api/jobs/$jobId/download"
+
+    /**
+     * Streams a completed job's FLAC bytes to [dest]. The cookie/header auth
+     * is attached by [AntraCookieInterceptor] on [httpClient]. Returns true
+     * on a 2xx with bytes written; false on non-2xx. Throws
+     * [AntraCloudflareException] on a Cloudflare `403`. Used by the stream
+     * resolver to cache the file for local playback (no cookie in ExoPlayer).
+     */
+    suspend fun downloadTo(jobId: String, dest: File): Boolean = withContext(Dispatchers.IO) {
+        val request = Request.Builder().url(downloadUrl(jobId)).get().build()
+        httpClient.newCall(request).execute().use { resp ->
+            guardCloudflare(resp)
+            if (!resp.isSuccessful) return@withContext false
+            val body = resp.body ?: return@withContext false
+            dest.outputStream().use { out -> body.byteStream().copyTo(out) }
+            true
+        }
+    }
 
     // ── Internals ───────────────────────────────────────────────────────
 

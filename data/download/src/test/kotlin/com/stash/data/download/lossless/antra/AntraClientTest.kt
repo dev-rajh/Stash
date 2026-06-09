@@ -82,6 +82,28 @@ class AntraClientTest {
         assertTrue(client.downloadUrl("job-9").endsWith("/api/jobs/job-9/download"))
     }
 
+    @Test fun `downloadTo streams bytes to the destination file`() = runTest {
+        val flac = "FLACBYTES".toByteArray()
+        server.enqueue(
+            MockResponse().setResponseCode(200)
+                .setBody(okio.Buffer().write(flac)),
+        )
+        val dest = java.io.File.createTempFile("antra", ".flac").apply { deleteOnExit() }
+
+        val ok = client.downloadTo("job-7", dest)
+
+        assertTrue(ok)
+        assertEquals("FLACBYTES", dest.readText())
+        assertTrue(server.takeRequest().path!!.endsWith("/api/jobs/job-7/download"))
+    }
+
+    @Test fun `downloadTo returns false on non-2xx`() = runTest {
+        server.enqueue(MockResponse().setResponseCode(404).setBody("nope"))
+        val dest = java.io.File.createTempFile("antra", ".flac").apply { deleteOnExit() }
+
+        assertEquals(false, client.downloadTo("job-7", dest))
+    }
+
     @Test fun `createJob posts range and pollStatus loops to complete`() = runTest {
         server.enqueue(
             MockResponse().setResponseCode(200)
