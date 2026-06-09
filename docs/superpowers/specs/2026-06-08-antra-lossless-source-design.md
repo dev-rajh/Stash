@@ -88,6 +88,12 @@ All requests are cookie-authenticated (`session` from login + `cf_clearance` fro
 - **Quota:** free tier ≈ 99 singles / period; antra auto-skips when `singles_left == 0`.
 - **Fragility:** Cloudflare can tighten the challenge (interactive Turnstile) at any time; the health gate makes that a graceful auto-skip, not a crash.
 
+## Implementation notes for planning
+
+- **Types:** `AntraSource` (download) receives the download path's track type; `AntraStreamResolver` receives **`TrackEntity`** (the `StreamSourceRegistry.resolve(track: TrackEntity, …)` signature). Both `Track.spotifyUri` (model, line 14) and `TrackEntity.spotifyUri` (entity, line 79) exist — read `spotifyUri` from whichever type each side gets; do not wire against `Track` on the stream side.
+- **Phasing (keep Approach A as v1):** the OkHttp cookie-replay path (Approach A) is the **v1 deliverable**; Approach B (WebView request-proxy) is a **bounded contingency task** to build *only if* the on-device test shows Cloudflare 403'ing the replay. Do not build both up front.
+- **Fixed format:** `format = "lossless-24"` is intended as a **fixed constant** (24-bit lossless), matching the HAR. No client-side format negotiation / 16-bit fallback in v1; the shipped duration backstop already guards against a quality regression.
+
 ## Open questions / risks
 
 1. **A-vs-B (the central risk):** will a WebView-harvested `cf_clearance` survive replay through OkHttp's TLS stack? Resolved empirically on-device; B is the fallback.
