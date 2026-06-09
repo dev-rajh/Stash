@@ -38,21 +38,19 @@ import com.stash.data.download.lossless.antra.AntraFingerprint
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
-import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
-import kotlin.coroutines.resume
 
 /**
- * Hosts a [WebView] pointed at `antra.hoshi.cfd` so the user can log in and
- * pass Cloudflare's JS challenge in-app. antra gates its API behind a
- * `session` cookie (from login) plus a `cf_clearance` cookie (from the
- * Cloudflare challenge); both must be present before requests authenticate.
+ * Hosts a [WebView] pointed at `antra.hoshi.cfd` so the user can log in (and
+ * pass Cloudflare's JS challenge, if one is served) in-app. antra gates its
+ * API behind an HttpOnly `antra_session` cookie; a `cf_clearance` cookie only
+ * exists while Cloudflare is actively challenging, so it's captured when
+ * present but never required (verified on-device 2026-06-09).
  *
- * A polling coroutine reads [CookieManager] until BOTH cookies appear, then
- * confirms the login is real by running an in-page `fetch('/api/auth/me')`
- * (which executes with the page's valid `cf_clearance` + matching TLS, so it
- * succeeds where a cold request would 403). When `/api/auth/me` returns a
+ * A polling coroutine reads [CookieManager] until `antra_session` appears,
+ * then confirms the login is real by running an in-page
+ * `fetch('/api/auth/me')` (awaited via [AntraJsBridge]). When it returns a
  * username, it forwards `(session, cf_clearance, username)` to [onConnected]
  * and pops. Mirrors [SquidWtfCaptchaScreen].
  *
@@ -81,47 +79,22 @@ fun AntraConnectScreen(
 
     // ── Cookie polling + login confirmation ─────────────────────────────
     LaunchedEffect(Unit) {
-        var lastCookieSig = ""
-        var diagged = false
         while (isActive && !captured) {
             delay(POLL_INTERVAL_MS)
             val cookies = CookieManager.getInstance().getCookie(ANTRA_URL).orEmpty()
-            // DIAGNOSTIC: log the cookie NAMES + value lengths (not values)
-            // whenever the cookie set changes, so we can see what antra
-            // actually sets vs. the names we key off (`session`/`cf_clearance`).
-            val sig = cookies.split(";").mapNotNull {
-                val n = it.substringBefore("=").trim()
-                if (n.isEmpty()) null else "$n(${it.substringAfter("=", "").trim().length})"
-            }.sorted().joinToString(",")
-            if (sig != lastCookieSig) {
-                lastCookieSig = sig
-                Log.i(TAG, "cookies for $ANTRA_URL => [$sig]")
-            }
             val session = SESSION_REGEX.find(cookies)?.groupValues?.get(1)
             // cf_clearance is optional — only present while Cloudflare is
             // actively challenging. We capture it if it's there (for the
             // OkHttp replay) but never block on it.
             val cfClearance = CF_CLEARANCE_REGEX.find(cookies)?.groupValues?.get(1).orEmpty()
-            if (session.isNullOrBlank()) {
-                Log.d(TAG, "harvest gate: antra_session absent")
-                continue
-            }
+            if (session.isNullOrBlank()) continue
 
             // Session cookie present — confirm the user is actually logged in
             // (the cookie can exist pre-login) by hitting /api/auth/me in the
-            // page context.
+            // page context (carries the HttpOnly antra_session cookie). Uses
+            // the JS bridge so the async fetch result is actually awaited.
             val wv = webViewRef ?: continue
-            // Confirm the session is really logged in by hitting
-            // /api/auth/me in the page context (carries the HttpOnly
-            // antra_session cookie). Uses the JS bridge so the async fetch
-            // result is actually awaited.
-            val authMe = fetchAuthMe(wv, jsBridge)
-            if (!diagged) {
-                diagged = true
-                Log.i(TAG, "AUTH PROBE storage => ${probeAuth(wv)}")
-            }
-            val username = parseUsername(authMe)
-            Log.i(TAG, "antra_session present; /api/auth/me => ${authMe.take(200)} username=${username ?: "<none>"} (cf_clearance=${cfClearance.isNotEmpty()})")
+            val username = parseUsername(fetchAuthMe(wv, jsBridge))
             if (!username.isNullOrBlank()) {
                 captured = true
                 statusText = "Connected as $username — saving and closing."
@@ -245,37 +218,6 @@ private fun parseUsername(authMeJson: String): String? = runCatching {
         ?: obj.optJSONObject("user")?.optString("username")?.takeIf { it.isNotBlank() }
 }.getOrNull()
 
-/**
- * DIAGNOSTIC: one-shot dump of where antra keeps its credential. Returns a
- * JSON blob with `/api/auth/me` status+body, JS-visible cookies, and
- * localStorage/sessionStorage keys (value prefixes only). Reveals whether
- * the API is cookie- or bearer-token-authenticated.
- */
-private suspend fun probeAuth(webView: WebView): String =
-    suspendCancellableCoroutine { cont ->
-        // SYNCHRONOUS reads only — localStorage/sessionStorage/document.cookie
-        // return immediately, so evaluateJavascript hands back the real value
-        // (unlike an async fetch, whose Promise serializes to "{}"). This
-        // reveals whether the login credential is a cookie or a stored token.
-        val js =
-            "JSON.stringify({" +
-                "cookie:document.cookie," +
-                "lsKeys:Object.keys(localStorage)," +
-                "lsVals:Object.fromEntries(Object.keys(localStorage).map(k=>[k,(localStorage.getItem(k)||'').slice(0,70)]))," +
-                "ssKeys:Object.keys(sessionStorage)" +
-                "})"
-        webView.evaluateJavascript(js) { result ->
-            if (cont.isActive) cont.resume(decodeJsString(result).take(1200))
-        }
-    }
-
-/** Decodes the JSON-string literal evaluateJavascript hands back. */
-private fun decodeJsString(raw: String?): String {
-    if (raw == null || raw == "null") return ""
-    // raw is a quoted JSON string like "\"{\\\"username\\\":...}\"".
-    return runCatching { JSONObject("{\"v\":$raw}").optString("v") }.getOrDefault("")
-}
-
 @SuppressLint("SetJavaScriptEnabled", "JavascriptInterface", "AddJavascriptInterface")
 private fun buildWebView(context: android.content.Context, bridge: AntraJsBridge): WebView {
     CookieManager.getInstance().setAcceptCookie(true)
@@ -293,20 +235,9 @@ private fun buildWebView(context: android.content.Context, bridge: AntraJsBridge
             userAgentString = AntraFingerprint.USER_AGENT
             mediaPlaybackRequiresUserGesture = true
         }
-        Log.i(TAG, "WebView UA=${settings.userAgentString}")
-
-        // DIAGNOSTIC: surface page-load lifecycle + HTTP/net errors so a
-        // blank/white render is explainable from logcat (Cloudflare block?
-        // net error? SPA failure?).
+        // Surface main-frame HTTP/net errors so a blank/white render is
+        // explainable from logcat (Cloudflare block? net error? SPA failure?).
         webViewClient = object : WebViewClient() {
-            override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
-                Log.i(TAG, "onPageStarted url=$url")
-            }
-
-            override fun onPageFinished(view: WebView?, url: String?) {
-                Log.i(TAG, "onPageFinished url=$url title='${view?.title}'")
-            }
-
             override fun onReceivedError(
                 view: WebView?,
                 request: android.webkit.WebResourceRequest?,
@@ -328,20 +259,11 @@ private fun buildWebView(context: android.content.Context, bridge: AntraJsBridge
             }
         }
 
-        // DIAGNOSTIC: JS console → reveals SPA errors and Cloudflare
-        // challenge messages that would otherwise be invisible.
-        webChromeClient = object : android.webkit.WebChromeClient() {
-            override fun onConsoleMessage(msg: android.webkit.ConsoleMessage): Boolean {
-                Log.i(TAG, "console[${msg.messageLevel()}] ${msg.message()} @${msg.sourceId()}:${msg.lineNumber()}")
-                return true
-            }
-        }
-
         // A login WebView must never download files. Swallow any download
-        // navigation (this is what white-screened after "download track"),
-        // and log it so we can see if antra routes through a blob/file URL.
+        // navigation (an antra "download track" tap otherwise white-screens
+        // this screen).
         setDownloadListener { url, _, _, mime, _ ->
-            Log.w(TAG, "DownloadListener swallowed download url=${url.take(120)} mime=$mime")
+            Log.w(TAG, "swallowed download navigation url=${url.take(120)} mime=$mime")
         }
 
         loadUrl(ANTRA_URL)
