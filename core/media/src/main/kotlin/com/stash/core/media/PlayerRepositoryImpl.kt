@@ -333,6 +333,19 @@ class PlayerRepositoryImpl @Inject constructor(
         val myEpoch = ++setQueueEpoch
         val tappedTrack = tracks[safeStart]
 
+        // Optimistic loading state: show the tapped track + spinner
+        // immediately. Resolving a YouTube-fallback track via yt-dlp takes
+        // ~11 s, and no MediaItem is set yet, so without this the UI would
+        // sit on the previous track with no feedback — looking frozen and
+        // tempting the user to re-tap (which supersedes and cancels this
+        // resolve). Overwritten by updateState once playback starts; cleared
+        // explicitly on the hard-failure path below.
+        _playerState.value = _playerState.value.copy(
+            currentTrack = tappedTrack,
+            isPlaying = false,
+            isBuffering = true,
+        )
+
         // Resolve ONLY the tapped track. Earlier revisions probed forward
         // through the next few entries looking for *anything* playable,
         // but that has two real-user pathologies: (1) it silently
@@ -370,6 +383,8 @@ class PlayerRepositoryImpl @Inject constructor(
                     "resolve — preserving current playback",
             )
             _userMessages.tryEmit("Couldn't play this track right now.")
+            // Clear the optimistic spinner — nothing is going to play.
+            _playerState.value = _playerState.value.copy(isBuffering = false)
             return
         }
 
@@ -1361,6 +1376,12 @@ class PlayerRepositoryImpl @Inject constructor(
             queue = queue,
             currentIndex = controller.currentMediaItemIndex,
             isStreaming = isStreaming,
+            // STATE_BUFFERING covers normal buffering AND the in-data-source
+            // 403→yt-dlp re-resolve (RefreshingDataSource blocks the loader
+            // thread while a skipped-to YouTube placeholder is recovered). The
+            // tapped-track resolve gap is covered separately by setQueue's
+            // optimistic emit, which this overwrites once playback starts.
+            isBuffering = controller.playbackState == Player.STATE_BUFFERING,
         )
         _playerState.value = newState
 

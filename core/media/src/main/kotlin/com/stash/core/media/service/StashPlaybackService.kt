@@ -29,6 +29,8 @@ import com.stash.core.media.equalizer.LoudnessController
 import com.stash.core.media.equalizer.StashRenderersFactory
 import com.stash.core.media.equalizer.computeGain
 import com.stash.core.media.streaming.PrefetchOrchestrator
+import com.stash.core.media.streaming.StashMediaSourceFactory
+import com.stash.core.media.streaming.StreamingMediaSourceFactory
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -69,6 +71,7 @@ class StashPlaybackService : MediaLibraryService() {
     @Inject lateinit var playlistDao: PlaylistDao
     @Inject lateinit var stashLikedRepository: StashLikedPlaylistRepository
     @Inject lateinit var prefetchOrchestrator: PrefetchOrchestrator
+    @Inject lateinit var streamingMediaSourceFactory: StreamingMediaSourceFactory
 
     companion object {
         /** Custom command action for toggling shuffle mode. */
@@ -195,8 +198,30 @@ class StashPlaybackService : MediaLibraryService() {
             )
             .build()
 
+        // Route ONLY YouTube-origin streaming items through the refresh chain
+        // (RefreshingDataSource → yt-dlp on 403). Background queue-fill seeds
+        // the timeline with cheap InnerTube/iOS placeholder URLs that 403 past
+        // ~1 MB; without this they surface as onPlayerError and skip-storm the
+        // queue. Lossless (Kennyy/Squid) and local/downloaded items stay on the
+        // default factory, unchanged.
+        val mediaSourceFactory = StashMediaSourceFactory(
+            context = this,
+            streamingFactory = streamingMediaSourceFactory,
+            streamingTrackId = { item ->
+                val scheme = item.localConfiguration?.uri?.scheme?.lowercase()
+                val origin = item.mediaMetadata.extras?.getString(EXTRA_STREAM_ORIGIN)
+                val trackId = item.mediaMetadata.extras?.getLong(EXTRA_TRACK_ID, -1L) ?: -1L
+                if ((scheme == "http" || scheme == "https") && origin == "youtube" && trackId > 0L) {
+                    trackId
+                } else {
+                    null
+                }
+            },
+        )
+
         val player = ExoPlayer.Builder(this)
             .setRenderersFactory(StashRenderersFactory(this, eqController, loudnessController))
+            .setMediaSourceFactory(mediaSourceFactory)
             .setLoadControl(loadControl)
             .setAudioAttributes(audioAttributes, /* handleAudioFocus = */ true)
             .setHandleAudioBecomingNoisy(true)

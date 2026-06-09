@@ -366,16 +366,54 @@ class PreviewUrlExtractor @Inject constructor(
     }
 
     /**
+     * Streaming-playback extraction: yt-dlp DIRECT, bypassing the InnerTube
+     * fast lane entirely.
+     *
+     * InnerTube/iOS URLs are PO-token-gated to a ~1 MB preview and return
+     * HTTP 403 on any full-file / open-ended request (proven on-device
+     * 2026-06-08: every offset past ~1.1 MB 403s, via Range header, `&range=`
+     * query, and sequential chunking alike). They cannot stream a whole
+     * track, so the player path must never use them. yt-dlp solves the
+     * n-sig / PO challenge and yields full-range-playable URLs, at the cost
+     * of ~11 s extraction.
+     *
+     * **Cap-1 safety.** Holds the shared [ytDlpSemaphore] — a second
+     * concurrent yt-dlp `execute()` throws YoutubeDLException at the JNI
+     * boundary (the cap=2 crash). The serialized [race] arm takes this
+     * permit too; the older [extractViaYtDlpForRetry] did NOT, which this
+     * path fixes by routing through here.
+     *
+     * **Coalescing.** Concurrent callers for the same [videoId] share one
+     * extract under a dedicated `#ytdlp` key so they never collide with the
+     * race-mode (`videoId`) or fast-only (`videoId#fast`) Deferreds.
+     */
+    suspend fun extractStreamUrlViaYtDlp(videoId: String): String =
+        coalesce("$videoId#ytdlp") {
+            ytDlpSemaphore.withPermit { extractViaYtDlp(videoId) }
+        }
+
+    /**
+     * Test-only mirror of [extractStreamUrlViaYtDlp] driven by the [TestHooks]
+     * SPI (the real path needs Android + JNI). Shares the exact coalesce +
+     * cap-1 semaphore wrapper so tests assert the real concurrency contract.
+     */
+    internal suspend fun extractStreamUrlViaYtDlpForTest(hooks: TestHooks, videoId: String): String =
+        coalesce("$videoId#ytdlp") {
+            ytDlpSemaphore.withPermit { hooks.ytDlpExtract(videoId) }
+        }
+
+    /**
      * Retry-only entry point: bypass the InnerTube race and go straight to
      * yt-dlp. Used by [com.stash.feature.search.SearchViewModel.onPreviewError]
      * when ExoPlayer rejects an InnerTube URL (typically because the URL is
      * n-parameter-throttled past what ExoPlayer is willing to wait for).
      *
-     * yt-dlp's QuickJS cipher path produces unthrottled URLs that play
-     * reliably, at the cost of ~15-35 s extraction latency.
+     * Delegates to [extractStreamUrlViaYtDlp] so it shares the cap-1
+     * semaphore + coalescing (it previously called [extractViaYtDlp]
+     * directly, bypassing both).
      */
     suspend fun extractViaYtDlpForRetry(videoId: String): String =
-        extractViaYtDlp(videoId)
+        extractStreamUrlViaYtDlp(videoId)
 
     /**
      * Fast path: extract stream URL via InnerTube player API.

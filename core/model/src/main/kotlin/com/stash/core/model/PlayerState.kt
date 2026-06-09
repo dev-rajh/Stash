@@ -17,6 +17,15 @@ data class PlayerState(
      * refresh (see `PlayerRepositoryImpl.updateState`).
      */
     val isStreaming: Boolean = false,
+    /**
+     * `true` while the active track is loading and not yet playable —
+     * either ExoPlayer is in `STATE_BUFFERING`, or `setQueue` is still
+     * resolving a tapped track's stream URL (the YouTube-fallback yt-dlp
+     * resolve takes ~11 s, during which no MediaItem is set yet so the
+     * player isn't buffering). Drives the play/pause spinner so a slow
+     * resolve doesn't look frozen.
+     */
+    val isBuffering: Boolean = false,
 )
 
 enum class RepeatMode {
