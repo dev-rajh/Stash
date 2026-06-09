@@ -1,0 +1,124 @@
+package com.stash.data.download.lossless.antra
+
+import android.util.Log
+import com.stash.data.download.lossless.LosslessSourcePreferences
+import javax.inject.Inject
+import javax.inject.Singleton
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.runBlocking
+import okhttp3.Interceptor
+import okhttp3.Response
+
+/**
+ * Attaches antra's auth cookies (`session` + `cf_clearance`) and the
+ * browser-style fingerprint headers to every `antra.hoshi.cfd` request,
+ * when the user has connected an antra account. Other hosts pass through
+ * untouched, so installing this on the antra OkHttp client is a no-op for
+ * anything that isn't antra.
+ *
+ * **Why both cookies and a browser fingerprint?** antra's API is gated by
+ * Cloudflare. `session` proves the login; `cf_clearance` proves a passed
+ * Cloudflare JS challenge. Cloudflare binds `cf_clearance` to the
+ * requesting browser's fingerprint (User-Agent + sec-ch-ua* client hints),
+ * so the OkHttp replay must send the *same* headers the in-app WebView used
+ * when the clearance was minted ([USER_AGENT] is shared with
+ * `AntraConnectScreen`). Mismatched headers → Cloudflare `403`. Whether
+ * cookie-replay holds at all is the empirical question Task 10 answers
+ * (Approach A); if it 403s, Approach B (WebView request-proxy) takes over.
+ *
+ * Cookie values are held in-memory (volatile) and refreshed reactively from
+ * [LosslessSourcePreferences]'s flows — reading DataStore inside an OkHttp
+ * interceptor would block the dispatcher on every request, so the in-memory
+ * cache keeps the hot path synchronous. Mirrors
+ * [com.stash.data.download.lossless.squid.SquidWtfCaptchaInterceptor].
+ */
+@Singleton
+class AntraCookieInterceptor @Inject constructor(
+    prefs: LosslessSourcePreferences,
+) : Interceptor {
+
+    @Volatile private var session: String? = null
+    @Volatile private var cfClearance: String? = null
+
+    /**
+     * Host this interceptor decorates. Defaults to the real antra host;
+     * tests point it at a [okhttp3.mockwebserver.MockWebServer] authority
+     * (which runs on 127.0.0.1) to exercise the host-match path.
+     */
+    @Volatile internal var hostOverride: String? = null
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    init {
+        // Eager seed: the first OkHttp call may fire before the flows emit,
+        // so block once at construction. Subsequent updates flow in via the
+        // launchIn collectors. Construction is at first @Inject use, well
+        // before any antra request, so the brief block is fine.
+        runBlocking {
+            session = prefs.antraSessionCookieNow()
+            cfClearance = prefs.antraCfClearanceNow()
+        }
+        Log.d(TAG, "init: ${if (isConnected()) "connected" else "not connected"}")
+        prefs.antraSessionCookie.onEach { session = it }.launchIn(scope)
+        prefs.antraCfClearance.onEach { cfClearance = it }.launchIn(scope)
+    }
+
+    private fun isConnected() = !session.isNullOrBlank() && !cfClearance.isNullOrBlank()
+
+    override fun intercept(chain: Interceptor.Chain): Response {
+        val request = chain.request()
+        val targetHost = hostOverride ?: ANTRA_HOST
+        if (request.url.host != targetHost) return chain.proceed(request)
+
+        val s = session
+        val c = cfClearance
+        if (s.isNullOrBlank() || c.isNullOrBlank()) {
+            Log.w(TAG, "not connected; passing ${request.url.encodedPath} through")
+            return chain.proceed(request)
+        }
+
+        val antraCookies = "$SESSION_COOKIE=$s; $CF_CLEARANCE_COOKIE=$c"
+        val existing = request.header("Cookie")
+        val mergedCookie = if (existing.isNullOrBlank()) antraCookies else "$existing; $antraCookies"
+
+        val decorated = request.newBuilder()
+            .header("Cookie", mergedCookie)
+            // Browser fingerprint — must match the WebView that minted
+            // cf_clearance, or Cloudflare rejects the request.
+            .header("User-Agent", USER_AGENT)
+            .header("Origin", ANTRA_ORIGIN)
+            .header("Referer", "$ANTRA_ORIGIN/")
+            .header("sec-ch-ua", SEC_CH_UA)
+            .header("sec-ch-ua-mobile", "?1")
+            .header("sec-ch-ua-platform", "\"Android\"")
+            .build()
+
+        Log.d(TAG, "attaching antra cookies to ${request.url.encodedPath}")
+        return chain.proceed(decorated)
+    }
+
+    internal companion object {
+        const val TAG = "AntraCookie"
+        const val ANTRA_HOST = "antra.hoshi.cfd"
+        const val ANTRA_ORIGIN = "https://antra.hoshi.cfd"
+        const val SESSION_COOKIE = "session"
+        const val CF_CLEARANCE_COOKIE = "cf_clearance"
+
+        /**
+         * Android Chrome WebView fingerprint, shared with
+         * `AntraConnectScreen` so the OkHttp replay matches the WebView that
+         * minted `cf_clearance`. If Task 10 shows 403s, the WebView's live
+         * UA may need harvesting alongside the cookies instead of this
+         * constant.
+         */
+        const val USER_AGENT =
+            "Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 " +
+                "(KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
+        const val SEC_CH_UA =
+            "\"Google Chrome\";v=\"126\", \"Chromium\";v=\"126\", \"Not.A/Brand\";v=\"24\""
+    }
+}
