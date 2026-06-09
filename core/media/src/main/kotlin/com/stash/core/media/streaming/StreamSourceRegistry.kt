@@ -38,10 +38,13 @@ import javax.inject.Singleton
  * id. Subsequent plays of the same track hit the cache and bypass the
  * registry entirely until the URL's `etsp` expires.
  *
- * Test toggle: when [StreamingPreference.isForceYouTubeFallback] is on,
- * [resolve] skips Kennyy and Squid entirely and routes every track through
- * the YouTube resolver only — used to reproduce the lossless-down fallback
- * path on demand. Off for normal use.
+ * Test toggles (both off for normal use):
+ *  - [StreamingPreference.isForceYouTubeFallback]: [resolve] skips Kennyy
+ *    and Squid entirely and routes every track through the YouTube resolver
+ *    only — reproduces the lossless-down fallback path on demand.
+ *  - [StreamingPreference.isForceAntraOnly]: routes through antra ONLY
+ *    (no kennyy/squid/YouTube) — the outage drill proving the antra
+ *    fallback can serve by itself. Takes precedence over forceYt.
  */
 @Singleton
 class StreamSourceRegistry @Inject constructor(
@@ -73,9 +76,14 @@ class StreamSourceRegistry @Inject constructor(
         allowYouTube: Boolean = true,
         allowYtDlp: Boolean = true,
     ): StreamUrl? {
-        val forceYt = streamingPreference.isForceYouTubeFallback()
         val resolvers = buildList<Pair<String, suspend (TrackEntity) -> StreamUrl?>> {
-            if (forceYt) {
+            if (streamingPreference.isForceAntraOnly()) {
+                // Test toggle (outage drill): antra ONLY — kennyy, squid and
+                // the YouTube fallback are all removed from play so a track
+                // either streams via antra or fails visibly. Takes precedence
+                // over forceYt (which is not even consulted).
+                add("antra" to antra::resolve)
+            } else if (streamingPreference.isForceYouTubeFallback()) {
                 // Test toggle: skip the lossless sources, forcing the
                 // YouTube fallback path. Still gated by allowYouTube so the
                 // background-fill keeps resolving nothing (matching a genuine

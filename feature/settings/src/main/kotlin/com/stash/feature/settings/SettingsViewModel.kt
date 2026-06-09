@@ -167,6 +167,24 @@ class SettingsViewModel @Inject constructor(
         streamingPreference.setForceYouTubeFallback(v)
     }
 
+    /**
+     * Test-only "Force antra only" toggle — the outage drill for the antra
+     * fallback. When on, both registries route through antra ONLY (no
+     * kennyy/squid/YouTube), so the antra path can be exercised end-to-end
+     * on demand.
+     */
+    val forceAntraOnly: kotlinx.coroutines.flow.StateFlow<Boolean> =
+        streamingPreference.forceAntraOnly.stateIn(
+            scope = viewModelScope,
+            started = kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5_000),
+            initialValue = false,
+        )
+
+    /** Persist the force-antra-only test toggle flip. */
+    fun setForceAntraOnly(v: Boolean) = viewModelScope.launch {
+        streamingPreference.setForceAntraOnly(v)
+    }
+
     /** Internal mutable UI state that is combined with token-manager flows. */
     private val _localState = MutableStateFlow(LocalState())
 

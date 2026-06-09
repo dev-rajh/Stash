@@ -22,12 +22,48 @@ class StreamSourceRegistryTest {
     private fun registry() = StreamSourceRegistry(kennyy, qobuz, antra, youtube, streamingPreference)
 
     /**
+     * The forceAntraOnly test toggle is the outage drill for the antra
+     * fallback: kennyy, squid AND youtube are all removed from play, so a
+     * track either streams via antra or not at all.
+     */
+    @Test
+    fun resolve_forceAntraOnly_routes_through_antra_only() = runTest {
+        coEvery { streamingPreference.isForceAntraOnly() } returns true
+        // kennyy/qobuz/youtube must never be consulted — intentionally unstubbed.
+        coEvery { antra.resolve(any()) } returns antraStreamUrl()
+        val track = stubTrack()
+
+        val result = registry().resolve(track, allowYouTube = true)
+
+        assertThat(result?.origin).isEqualTo("antra")
+        coVerify(exactly = 0) { youtube.resolve(any(), any()) }
+    }
+
+    /**
+     * Under forceAntraOnly an antra miss must NOT fall through to youtube —
+     * the drill exists to prove antra alone can serve, so a miss surfaces
+     * as "no stream" rather than being papered over.
+     */
+    @Test
+    fun resolve_forceAntraOnly_returns_null_when_antra_misses() = runTest {
+        coEvery { streamingPreference.isForceAntraOnly() } returns true
+        coEvery { antra.resolve(any()) } returns null
+        val track = stubTrack()
+
+        val result = registry().resolve(track, allowYouTube = true)
+
+        assertThat(result).isNull()
+        coVerify(exactly = 0) { youtube.resolve(any(), any()) }
+    }
+
+    /**
      * The background-fill path passes `allowYtDlp = false` so the YouTube
      * fallback resolves via the fast InnerTube engine only. Verify the flag
      * is forwarded to [YouTubeStreamResolver.resolve].
      */
     @Test
     fun resolve_passes_allowYtDlp_to_youtube_resolver() = runTest {
+        coEvery { streamingPreference.isForceAntraOnly() } returns false
         coEvery { streamingPreference.isForceYouTubeFallback() } returns false
         coEvery { kennyy.resolve(any()) } returns null
         coEvery { qobuz.resolve(any()) } returns null
@@ -46,6 +82,7 @@ class StreamSourceRegistryTest {
      */
     @Test
     fun resolve_defaults_allowYtDlp_true() = runTest {
+        coEvery { streamingPreference.isForceAntraOnly() } returns false
         coEvery { streamingPreference.isForceYouTubeFallback() } returns false
         coEvery { kennyy.resolve(any()) } returns null
         coEvery { qobuz.resolve(any()) } returns null
@@ -64,6 +101,7 @@ class StreamSourceRegistryTest {
      */
     @Test
     fun resolve_antra_served_before_youtube_when_qobuz_misses() = runTest {
+        coEvery { streamingPreference.isForceAntraOnly() } returns false
         coEvery { streamingPreference.isForceYouTubeFallback() } returns false
         coEvery { kennyy.resolve(any()) } returns null
         coEvery { qobuz.resolve(any()) } returns null
@@ -82,6 +120,7 @@ class StreamSourceRegistryTest {
      */
     @Test
     fun resolve_falls_to_youtube_when_antra_returns_null() = runTest {
+        coEvery { streamingPreference.isForceAntraOnly() } returns false
         coEvery { streamingPreference.isForceYouTubeFallback() } returns false
         coEvery { kennyy.resolve(any()) } returns null
         coEvery { qobuz.resolve(any()) } returns null
@@ -102,6 +141,7 @@ class StreamSourceRegistryTest {
      */
     @Test
     fun resolve_forceYt_branch_passes_allowYtDlp_to_youtube() = runTest {
+        coEvery { streamingPreference.isForceAntraOnly() } returns false
         coEvery { streamingPreference.isForceYouTubeFallback() } returns true
         // kennyy/qobuz are skipped in the forceYt branch — intentionally unstubbed.
         coEvery { youtube.resolve(any(), any()) } returns null
