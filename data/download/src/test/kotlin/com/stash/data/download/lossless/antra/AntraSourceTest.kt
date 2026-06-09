@@ -27,7 +27,7 @@ class AntraSourceTest {
     private val store: AntraCredentialStore = mockk()
     private val rateLimiter: AggregatorRateLimiter = mockk()
 
-    private fun source() = AntraSource(client, store, rateLimiter)
+    private fun source() = AntraSource(client, store, rateLimiter, AntraJobGate())
 
     private val query = TrackQuery(
         artist = "Curtis Mayfield",
@@ -117,6 +117,21 @@ class AntraSourceTest {
 
         assertThat(source().resolve(query)).isNull()
         coVerify { store.markStale() }
+    }
+
+    @Test fun `429 reports rate-limited backoff, not a failure`() = runTest {
+        // A concurrent-job collision (429) must NOT count toward the circuit
+        // breaker — otherwise a few parallel sync workers brick antra for
+        // 30 min. It's a transient backoff (reportRateLimited), not a failure.
+        coEvery { store.isConnected() } returns true
+        coEvery { client.me() } returns AntraMe(username = "rawn", singles_left = 5)
+        coEvery { client.resolve(expectedUrl) } returns
+            AntraResolve(artist = "Curtis Mayfield", artwork_url = null)
+        coEvery { client.createJob(expectedUrl, 0, 1) } throws AntraRateLimitedException()
+
+        assertThat(source().resolve(query)).isNull()
+        coVerify { rateLimiter.reportRateLimited("antra") }
+        coVerify(exactly = 0) { rateLimiter.reportFailure("antra") }
     }
 
     private companion object {

@@ -41,6 +41,7 @@ class AntraSource @Inject constructor(
     private val client: AntraClient,
     private val credentialStore: AntraCredentialStore,
     private val rateLimiter: AggregatorRateLimiter,
+    private val jobGate: AntraJobGate,
 ) : LosslessSource {
 
     override val id: String = SOURCE_ID
@@ -57,59 +58,11 @@ class AntraSource @Inject constructor(
 
         if (!rateLimiter.acquire(id)) return null
         return try {
-            // 1. Auth + quota. A null me() means the session is dead; 0
-            //    singles means nothing to spend — either way, skip.
-            val me = client.me()
-            if (me == null || me.singles_left <= 0) {
-                Log.d(TAG, "skip: ${if (me == null) "no auth" else "quota=0"}")
-                rateLimiter.reportFailure(id)
-                return null
-            }
-
-            // 2. Sanity-resolve the URL (also yields cover art).
-            val resolved = client.resolve(spotifyUrl)
-            if (resolved == null) {
-                rateLimiter.reportFailure(id)
-                return null
-            }
-
-            // 3. Enqueue a single-track job and poll to a terminal state.
-            val created = client.createJob(spotifyUrl, startIndex = 0, endIndex = 1)
-            if (created == null) {
-                rateLimiter.reportFailure(id)
-                return null
-            }
-            val status = client.pollStatus(created.job_id)
-            if (status.status != STATUS_COMPLETE) {
-                Log.d(TAG, "job ${created.job_id} terminal=${status.status} error=${status.error}")
-                rateLimiter.reportFailure(id)
-                return null
-            }
-
-            val cookie = credentialStore.cookieHeader()
-            if (cookie == null) {
-                // Creds were cleared mid-resolve — can't fetch the bytes.
-                rateLimiter.reportFailure(id)
-                return null
-            }
-
-            rateLimiter.reportSuccess(id)
-            SourceResult(
-                sourceId = id,
-                downloadUrl = client.downloadUrl(created.job_id),
-                downloadHeaders = mapOf("Cookie" to cookie),
-                format = AudioFormat(
-                    codec = "flac",
-                    bitrateKbps = 0,
-                    sampleRateHz = 0,
-                    bitsPerSample = 24,
-                ),
-                confidence = if (query.isrc != null) 0.95f else 0.85f,
-                sourceTrackId = created.job_id,
-                coverArtUrl = resolved.artwork_url,
-            ).also {
-                Log.d(TAG, "resolved '${query.title}' via job ${created.job_id}")
-            }
+            // antra allows one job at a time (429 on a 2nd). The gate makes
+            // parallel sync workers take turns instead of colliding. Held
+            // only across the job; the /download bytes fetch (done later by
+            // DownloadManager) creates no new job and needs no slot.
+            jobGate.withJob { runJob(query, spotifyUrl) }
         } catch (e: AntraCloudflareException) {
             // Cookie-replay no longer satisfies Cloudflare — mark stale so
             // the user is prompted to reconnect, and fail over.
@@ -117,12 +70,78 @@ class AntraSource @Inject constructor(
             credentialStore.markStale()
             rateLimiter.reportFailure(id)
             null
+        } catch (e: AntraRateLimitedException) {
+            // Concurrent-job collision — a transient backoff, NOT a failure.
+            // Reporting it as a failure would trip the circuit breaker and
+            // brick antra for 30 min after a few parallel workers raced.
+            Log.i(TAG, "429 job-slot busy — backing off, not failing")
+            rateLimiter.reportRateLimited(id)
+            null
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             Log.w(TAG, "resolve threw: ${e.javaClass.simpleName}: ${e.message}", e)
             rateLimiter.reportFailure(id)
             null
+        }
+    }
+
+    /**
+     * The job lifecycle, run under [AntraJobGate]: confirm auth+quota,
+     * sanity-resolve the URL, enqueue a single-track job, poll to a terminal
+     * state, and build the [SourceResult]. Returns null (and reports a
+     * failure) on any non-exceptional miss. A 429 propagates as
+     * [AntraRateLimitedException] for the caller to back off on.
+     */
+    private suspend fun runJob(query: TrackQuery, spotifyUrl: String): SourceResult? {
+        val me = client.me()
+        if (me == null || me.singles_left <= 0) {
+            Log.d(TAG, "skip: ${if (me == null) "no auth" else "quota=0"}")
+            rateLimiter.reportFailure(id)
+            return null
+        }
+
+        val resolved = client.resolve(spotifyUrl)
+        if (resolved == null) {
+            rateLimiter.reportFailure(id)
+            return null
+        }
+
+        val created = client.createJob(spotifyUrl, startIndex = 0, endIndex = 1)
+        if (created == null) {
+            rateLimiter.reportFailure(id)
+            return null
+        }
+        val status = client.pollStatus(created.job_id)
+        if (status.status != STATUS_COMPLETE) {
+            Log.d(TAG, "job ${created.job_id} terminal=${status.status} error=${status.error}")
+            rateLimiter.reportFailure(id)
+            return null
+        }
+
+        val cookie = credentialStore.cookieHeader()
+        if (cookie == null) {
+            // Creds were cleared mid-resolve — can't fetch the bytes.
+            rateLimiter.reportFailure(id)
+            return null
+        }
+
+        rateLimiter.reportSuccess(id)
+        return SourceResult(
+            sourceId = id,
+            downloadUrl = client.downloadUrl(created.job_id),
+            downloadHeaders = mapOf("Cookie" to cookie),
+            format = AudioFormat(
+                codec = "flac",
+                bitrateKbps = 0,
+                sampleRateHz = 0,
+                bitsPerSample = 24,
+            ),
+            confidence = if (query.isrc != null) 0.95f else 0.85f,
+            sourceTrackId = created.job_id,
+            coverArtUrl = resolved.artwork_url,
+        ).also {
+            Log.d(TAG, "resolved '${query.title}' via job ${created.job_id}")
         }
     }
 

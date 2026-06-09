@@ -111,6 +111,7 @@ class AntraClient @Inject constructor(
                 .build()
             httpClient.newCall(request).execute().use { resp ->
                 guardCloudflare(resp)
+                guardRateLimited(resp)
                 if (!resp.isSuccessful) return@withContext null
                 parse(resp, AntraJobCreated.serializer())
             }
@@ -179,6 +180,19 @@ class AntraClient @Inject constructor(
         }
     }
 
+    /**
+     * Throws [AntraRateLimitedException] on a `429` so the caller can treat a
+     * concurrent-job collision as a transient backoff (not a hard failure
+     * that trips the circuit breaker). antra returns 429 when a second job is
+     * created while one is still running — its single-concurrent-job limit.
+     */
+    private fun guardRateLimited(resp: Response) {
+        if (resp.code == 429) {
+            Log.i(TAG, "429 on ${resp.request.url.encodedPath} — antra job slot busy")
+            throw AntraRateLimitedException()
+        }
+    }
+
     private fun <T> parse(resp: Response, serializer: DeserializationStrategy<T>): T? {
         val body = resp.body?.string().orEmpty()
         return runCatching { json.decodeFromString(serializer, body) }
@@ -219,3 +233,13 @@ class AntraClient @Inject constructor(
  */
 class AntraCloudflareException :
     RuntimeException("antra returned a Cloudflare 403 — credentials stale or fingerprint mismatch")
+
+/**
+ * Thrown when antra returns `429 Too Many Requests` — almost always its
+ * single-concurrent-job limit (a second `POST /api/jobs` while one is still
+ * running). Distinct from a generic failure so [AntraSource] can report it
+ * as a rate-limit backoff rather than a circuit-breaker-tripping failure:
+ * a few parallel sync workers colliding must not brick antra for 30 minutes.
+ */
+class AntraRateLimitedException :
+    RuntimeException("antra returned 429 — job slot busy (single concurrent job)")

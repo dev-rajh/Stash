@@ -7,6 +7,8 @@ import com.stash.data.download.lossless.TrackQuery
 import com.stash.data.download.lossless.antra.AntraClient
 import com.stash.data.download.lossless.antra.AntraCloudflareException
 import com.stash.data.download.lossless.antra.AntraCredentialStore
+import com.stash.data.download.lossless.antra.AntraJobGate
+import com.stash.data.download.lossless.antra.AntraRateLimitedException
 import com.stash.data.download.lossless.spotifyTrackUrl
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
@@ -39,13 +41,15 @@ class AntraStreamResolver internal constructor(
     private val client: AntraClient,
     private val store: AntraCredentialStore,
     private val cacheRoot: File,
+    private val jobGate: AntraJobGate,
 ) {
 
     @Inject constructor(
         @ApplicationContext context: Context,
         client: AntraClient,
         store: AntraCredentialStore,
-    ) : this(client, store, context.cacheDir)
+        jobGate: AntraJobGate,
+    ) : this(client, store, context.cacheDir, jobGate)
 
     suspend fun resolve(track: TrackEntity): StreamUrl? {
         val spotifyUrl = TrackQuery(
@@ -63,24 +67,31 @@ class AntraStreamResolver internal constructor(
 
         return try {
             withTimeout(STREAM_TIMEOUT_MS) {
-                // Auth + quota gate.
-                val me = client.me()
-                if (me == null || me.singles_left <= 0) {
-                    Log.d(TAG, "skip id=${track.id} (${if (me == null) "no auth" else "quota=0"})")
-                    return@withTimeout null
-                }
-                val created = client.createJob(spotifyUrl, startIndex = 0, endIndex = 1)
-                    ?: return@withTimeout null
-                val status = client.pollStatus(created.job_id)
-                if (status.status != STATUS_COMPLETE) {
-                    Log.d(TAG, "job ${created.job_id} terminal=${status.status}")
-                    return@withTimeout null
-                }
+                // The job portion runs under the shared gate so a stream
+                // never collides (429) with a parallel download job or a
+                // prefetch. Released before the /download fetch, which
+                // creates no new job and needs no slot.
+                val jobId = jobGate.withJob {
+                    val me = client.me()
+                    if (me == null || me.singles_left <= 0) {
+                        Log.d(TAG, "skip id=${track.id} (${if (me == null) "no auth" else "quota=0"})")
+                        return@withJob null
+                    }
+                    val created = client.createJob(spotifyUrl, startIndex = 0, endIndex = 1)
+                        ?: return@withJob null
+                    val status = client.pollStatus(created.job_id)
+                    if (status.status != STATUS_COMPLETE) {
+                        Log.d(TAG, "job ${created.job_id} terminal=${status.status}")
+                        return@withJob null
+                    }
+                    created.job_id
+                } ?: return@withTimeout null
+
                 // Fetch to a .part file, then atomically promote so a
                 // partial download is never seen as a valid cache entry.
                 cacheFile.parentFile?.mkdirs()
                 val tmp = File(cacheFile.path + ".part")
-                val ok = client.downloadTo(created.job_id, tmp)
+                val ok = client.downloadTo(jobId, tmp)
                 if (!ok || tmp.length() == 0L) {
                     tmp.delete()
                     return@withTimeout null
@@ -90,12 +101,16 @@ class AntraStreamResolver internal constructor(
                     tmp.copyTo(cacheFile, overwrite = true)
                     tmp.delete()
                 }
-                Log.d(TAG, "fetched+cached id=${track.id} via job ${created.job_id}")
+                Log.d(TAG, "fetched+cached id=${track.id} via job $jobId")
                 streamUrlFor(cacheFile)
             }
         } catch (e: AntraCloudflareException) {
             Log.w(TAG, "Cloudflare 403 — marking antra credentials stale", e)
             store.markStale()
+            null
+        } catch (e: AntraRateLimitedException) {
+            // Job slot busy (concurrent job elsewhere) — fail over cleanly.
+            Log.i(TAG, "429 job-slot busy id=${track.id} — failing over")
             null
         } catch (e: TimeoutCancellationException) {
             Log.w(TAG, "timeout id=${track.id} after ${STREAM_TIMEOUT_MS}ms")

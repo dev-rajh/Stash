@@ -154,6 +154,17 @@ class AntraClientTest {
         }
     }
 
+    @Test fun `createJob 429 throws AntraRateLimitedException`() = runTest {
+        // antra enforces one concurrent job; a 2nd POST /api/jobs while one
+        // is running returns 429. Must surface as a typed exception so the
+        // caller can back off (not trip the failure circuit breaker).
+        server.enqueue(MockResponse().setResponseCode(429).setBody("""{"error":"job in progress"}"""))
+
+        assertThrows(AntraRateLimitedException::class.java) {
+            kotlinx.coroutines.runBlocking { client.createJob(spotifyUrl, startIndex = 0, endIndex = 1) }
+        }
+    }
+
     // assertThrows needs a non-suspending throwing call; bridge through here.
     private fun runBlockingResolve() = kotlinx.coroutines.runBlocking {
         client.resolve(spotifyUrl)

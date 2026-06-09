@@ -4,6 +4,7 @@ import com.google.common.truth.Truth.assertThat
 import com.stash.core.data.db.entity.TrackEntity
 import com.stash.data.download.lossless.antra.AntraClient
 import com.stash.data.download.lossless.antra.AntraCredentialStore
+import com.stash.data.download.lossless.antra.AntraJobGate
 import com.stash.data.download.lossless.antra.AntraJobCreated
 import com.stash.data.download.lossless.antra.AntraJobStatus
 import com.stash.data.download.lossless.antra.AntraMe
@@ -37,7 +38,7 @@ class AntraStreamResolverTest {
         cacheDir = File.createTempFile("antra-cache", "").apply {
             delete(); mkdirs()
         }
-        resolver = AntraStreamResolver(client, store, cacheDir)
+        resolver = AntraStreamResolver(client, store, cacheDir, AntraJobGate())
     }
 
     @After fun tearDown() {
