@@ -13,6 +13,7 @@ import com.stash.core.media.streaming.StreamSourceRegistry
 import com.stash.core.media.streaming.StreamUrl
 import com.stash.core.media.streaming.StreamUrlCache
 import io.mockk.coEvery
+import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
@@ -191,6 +192,34 @@ class PlayerRepositoryStreamingTest {
         // so a subsequent tap doesn't re-resolve.
         verify {
             streamUrlCache.put(3L, match { it.url.contains("fresh?etsp=1234") })
+        }
+    }
+
+    @Test
+    fun buildMediaItem_forwards_allowAntra_false_to_resolver() = runTest {
+        // The background-fill / prefetch paths pass allowAntra = false so a
+        // speculative resolve can never spend antra quota (1 single per
+        // resolve). Verify the flag reaches the registry untouched.
+        val track = streamable(id = 4L)
+        every { streamingPreference.streamOnCellular } returns flowOf(true)
+        coEvery { streamingPreference.current() } returns true
+        every { connectivity.isConnected() } returns true
+        every { connectivity.isCellular() } returns false
+        every { streamUrlCache.get(4L) } returns null
+        coEvery {
+            streamResolver.resolve(track, allowYouTube = true, allowYtDlp = false, allowAntra = false)
+        } returns null
+
+        val result = repo.buildMediaItemForTrack(
+            track,
+            allowYouTube = true,
+            allowYtDlp = false,
+            allowAntra = false,
+        )
+
+        assertThat(result).isEqualTo(StreamRoutingResult.NotAvailable)
+        coVerify {
+            streamResolver.resolve(track, allowYouTube = true, allowYtDlp = false, allowAntra = false)
         }
     }
 

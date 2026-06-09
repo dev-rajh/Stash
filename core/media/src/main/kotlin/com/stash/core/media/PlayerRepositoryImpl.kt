@@ -430,8 +430,14 @@ class PlayerRepositoryImpl @Inject constructor(
         val backward = tracks.subList(0, safeStart)
         queueBuildJob = scope.launch {
             try {
-                fillQueueAppend(controller, forward, semaphore, streamingOn, allowYouTube = true, allowYtDlp = false)
-                fillQueuePrepend(controller, backward, semaphore, streamingOn, allowYouTube = true, allowYtDlp = false)
+                // allowAntra = false: the fill is speculative — an antra
+                // resolve spends 1 single + 60-120s of its exclusive job
+                // slot PER TRACK, so a playlist tap during a kennyy outage
+                // would otherwise drain the whole quota (seen on-device
+                // 2026-06-09). Antra stays available to the tapped track
+                // and to JIT resolution of the track actually being played.
+                fillQueueAppend(controller, forward, semaphore, streamingOn, allowYouTube = true, allowYtDlp = false, allowAntra = false)
+                fillQueuePrepend(controller, backward, semaphore, streamingOn, allowYouTube = true, allowYtDlp = false, allowAntra = false)
                 Log.i(TAG, "setQueue: background fill complete (${tracks.size} tracks)")
                 // Kick the next-up prefetch for the FIRST track explicitly. The
                 // reactive watcher (playerState.currentIndex.distinctUntilChanged)
@@ -468,10 +474,11 @@ class PlayerRepositoryImpl @Inject constructor(
         streamingOn: Boolean,
         allowYouTube: Boolean = true,
         allowYtDlp: Boolean = true,
+        allowAntra: Boolean = true,
     ) {
         tracks.chunked(BACKGROUND_FILL_BATCH).forEach { batch ->
             if (!currentCoroutineActive()) return
-            val resolved = resolveBatchParallel(batch, semaphore, streamingOn, allowYouTube, allowYtDlp)
+            val resolved = resolveBatchParallel(batch, semaphore, streamingOn, allowYouTube, allowYtDlp, allowAntra)
             if (resolved.isNotEmpty()) controller.addMediaItems(resolved)
         }
     }
@@ -488,6 +495,7 @@ class PlayerRepositoryImpl @Inject constructor(
         streamingOn: Boolean,
         allowYouTube: Boolean = true,
         allowYtDlp: Boolean = true,
+        allowAntra: Boolean = true,
     ) {
         // Process from the END of [tracks] backwards in chunks. The chunk
         // closest to the current playback head is processed last so the
@@ -498,7 +506,7 @@ class PlayerRepositoryImpl @Inject constructor(
             // Resolve the batch in original (forward) order so the
             // semaphore-bounded async fan-out doesn't reshuffle results.
             val batch = batchReversed.asReversed()
-            val resolved = resolveBatchParallel(batch, semaphore, streamingOn, allowYouTube, allowYtDlp)
+            val resolved = resolveBatchParallel(batch, semaphore, streamingOn, allowYouTube, allowYtDlp, allowAntra)
             if (resolved.isNotEmpty()) controller.addMediaItems(/* index = */ 0, resolved)
         }
     }
@@ -509,10 +517,11 @@ class PlayerRepositoryImpl @Inject constructor(
         streamingOn: Boolean,
         allowYouTube: Boolean = true,
         allowYtDlp: Boolean = true,
+        allowAntra: Boolean = true,
     ): List<MediaItem> = coroutineScope {
         batch.map { track ->
             async(Dispatchers.IO) {
-                resolveTrackToMediaItem(track, semaphore, streamingOn, allowYouTube, allowYtDlp)
+                resolveTrackToMediaItem(track, semaphore, streamingOn, allowYouTube, allowYtDlp, allowAntra)
             }
         }.awaitAll().filterNotNull()
     }
@@ -569,7 +578,9 @@ class PlayerRepositoryImpl @Inject constructor(
         Log.d("LATDIAG", "prefetch-next-start id=${next.id} youtubeId=${next.youtubeId}")
         val entity = trackDao.getById(next.id) ?: next.toEntity()
         val resolved = try {
-            streamResolver.resolve(entity, allowYouTube = true, allowYtDlp = true)
+            // allowAntra = false: this prefetch is speculative (the user may
+            // skip/stop before auto-advance) — never spend antra quota on it.
+            streamResolver.resolve(entity, allowYouTube = true, allowYtDlp = true, allowAntra = false)
         } catch (ce: CancellationException) {
             throw ce
         } catch (e: Exception) {
@@ -595,7 +606,7 @@ class PlayerRepositoryImpl @Inject constructor(
         // path, NOT the reverted stash-lazy:// placeholder/synthetic-id scheme.
         val swapped = refreshControllerMediaItem(controller, next, resolved)
         if (!swapped) {
-            val item = (buildMediaItemForTrack(entity, allowYouTube = true, allowYtDlp = true) as? StreamRoutingResult.Item)?.mediaItem
+            val item = (buildMediaItemForTrack(entity, allowYouTube = true, allowYtDlp = true, allowAntra = false) as? StreamRoutingResult.Item)?.mediaItem
             if (item != null) insertNextMediaItem(controller, next.id, item)
         }
     }
@@ -677,6 +688,7 @@ class PlayerRepositoryImpl @Inject constructor(
         streamingOn: Boolean,
         allowYouTube: Boolean = true,
         allowYtDlp: Boolean = true,
+        allowAntra: Boolean = true,
     ): MediaItem? {
         val localPath = track.filePath
         if (track.isDownloaded && !localPath.isNullOrBlank() && filePathExistsOnDisk(localPath)) {
@@ -686,7 +698,12 @@ class PlayerRepositoryImpl @Inject constructor(
 
         return semaphore.withPermit {
             val entity = trackDao.getById(track.id) ?: track.toEntity()
-            val result = buildMediaItemForTrack(entity, allowYouTube = allowYouTube, allowYtDlp = allowYtDlp)
+            val result = buildMediaItemForTrack(
+                entity,
+                allowYouTube = allowYouTube,
+                allowYtDlp = allowYtDlp,
+                allowAntra = allowAntra,
+            )
             (result as? StreamRoutingResult.Item)?.mediaItem
         }
     }
@@ -977,6 +994,7 @@ class PlayerRepositoryImpl @Inject constructor(
         track: TrackEntity,
         allowYouTube: Boolean = true,
         allowYtDlp: Boolean = true,
+        allowAntra: Boolean = true,
     ): StreamRoutingResult {
         val localPath = track.filePath
         if (track.isDownloaded && !localPath.isNullOrBlank() && filePathExistsOnDisk(localPath)) {
@@ -1011,7 +1029,12 @@ class PlayerRepositoryImpl @Inject constructor(
         }
 
         val cached = streamUrlCache.get(track.id)
-        val stream = cached ?: streamResolver.resolve(track, allowYouTube = allowYouTube, allowYtDlp = allowYtDlp)?.also {
+        val stream = cached ?: streamResolver.resolve(
+            track,
+            allowYouTube = allowYouTube,
+            allowYtDlp = allowYtDlp,
+            allowAntra = allowAntra,
+        )?.also {
             streamUrlCache.put(track.id, it)
         } ?: return StreamRoutingResult.NotAvailable
 

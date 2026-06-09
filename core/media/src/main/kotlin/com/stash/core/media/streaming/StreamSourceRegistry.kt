@@ -70,19 +70,31 @@ class StreamSourceRegistry @Inject constructor(
      *   via the fast InnerTube engine only (no slow yt-dlp). Used by the
      *   background-fill path so a 15-35s yt-dlp invocation never sits on
      *   the queue's critical path. Foreground calls leave this true.
+     * @param allowAntra pass `false` to keep antra out of the chain. An
+     *   antra resolve is EXPENSIVE: it spends one single from a finite
+     *   per-account quota and occupies antra's exclusive job slot for
+     *   60-120s. Every speculative caller (setQueue's background fill,
+     *   both next-track prefetchers) passes `false`; only a track the
+     *   user is actually playing may resolve via antra. Without this a
+     *   single playlist tap during a kennyy outage drains the quota at
+     *   ~1 single/90s (observed on-device 2026-06-09).
      */
     suspend fun resolve(
         track: TrackEntity,
         allowYouTube: Boolean = true,
         allowYtDlp: Boolean = true,
+        allowAntra: Boolean = true,
     ): StreamUrl? {
         val resolvers = buildList<Pair<String, suspend (TrackEntity) -> StreamUrl?>> {
             if (streamingPreference.isForceAntraOnly()) {
                 // Test toggle (outage drill): antra ONLY — kennyy, squid and
                 // the YouTube fallback are all removed from play so a track
                 // either streams via antra or fails visibly. Takes precedence
-                // over forceYt (which is not even consulted).
-                add("antra" to antra::resolve)
+                // over forceYt (which is not even consulted). Still gated by
+                // allowAntra so speculative callers resolve nothing under the
+                // drill instead of draining the quota (matching how the
+                // forceYt branch keeps the background fill empty).
+                if (allowAntra) add("antra" to antra::resolve)
             } else if (streamingPreference.isForceYouTubeFallback()) {
                 // Test toggle: skip the lossless sources, forcing the
                 // YouTube fallback path. Still gated by allowYouTube so the
@@ -96,7 +108,7 @@ class StreamSourceRegistry @Inject constructor(
                 // so it only serves when both Qobuz proxies miss. Kept out of
                 // the forceYt branch above on purpose: that toggle exists to
                 // force the YouTube path by skipping ALL lossless sources.
-                add("antra" to antra::resolve)
+                if (allowAntra) add("antra" to antra::resolve)
                 if (allowYouTube) add("youtube" to { t: TrackEntity -> youtube.resolve(t, allowYtDlp) })
             }
         }

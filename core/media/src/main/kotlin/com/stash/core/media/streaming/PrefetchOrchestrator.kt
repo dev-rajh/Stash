@@ -97,7 +97,11 @@ class PrefetchOrchestrator @Inject constructor(
                 if (track.isDownloaded) return@launch
                 if (!track.isStreamable) return@launch
 
-                val resolved = streamResolver.resolve(track)
+                // allowAntra = false: prefetch is speculative — an antra
+                // resolve spends 1 single from a finite quota and holds
+                // antra's exclusive job slot for 60-120s. Antra is reserved
+                // for the track the user is actually playing.
+                val resolved = streamResolver.resolve(track, allowAntra = false)
                 if (resolved != null) {
                     streamUrlCache.put(nextTrackId, resolved)
                     Log.d(TAG, "Prefetched stream URL for track $nextTrackId")
