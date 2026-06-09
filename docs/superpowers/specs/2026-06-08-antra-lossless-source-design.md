@@ -99,3 +99,40 @@ All requests are cookie-authenticated (`session` from login + `cf_clearance` fro
 1. **A-vs-B (the central risk):** will a WebView-harvested `cf_clearance` survive replay through OkHttp's TLS stack? Resolved empirically on-device; B is the fallback.
 2. **Quota reset semantics** — period length of the 99-singles cap is unknown; we only read `singles_left` and skip at 0 (no client-side reset modeling needed).
 3. **`/download` cookie need** — confirm whether `/api/jobs/<id>/download` requires the session cookie (likely yes); if so `fetchFlac` carries it. Already covered by the interceptor.
+
+## Verification Results
+
+### Phases 1–5 — implementation complete (2026-06-08)
+
+All code for Approach A (Phases 1–5, Tasks 1–9) is implemented TDD-first and committed on `feat/antra-lossless-source`:
+
+| Task | Unit | Tests | Status |
+|---|---|---|---|
+| 1 | `AntraCredentialStore` | `AntraCredentialStoreTest` | ✅ green |
+| 2 | `AntraCookieInterceptor` | `AntraCookieInterceptorTest` | ✅ green |
+| 3 | API models + `AntraJson` | `AntraApiModelsTest` | ✅ green |
+| 4 | `AntraClient` (+`downloadTo`) | `AntraClientTest` | ✅ green |
+| 5 | `TrackQuery.spotifyUri` + `spotifyTrackUrl()` | `TrackQuerySpotifyUriTest` | ✅ green |
+| 6 | `AntraSource : LosslessSource` | `AntraSourceTest` | ✅ green |
+| 7 | `AntraStreamResolver` | `AntraStreamResolverTest` | ✅ green |
+| 8 | `AntraModule` + registry wiring | `StreamSourceRegistryTest` | ✅ green |
+| 9 | `AntraConnectScreen` + Settings entry | (manual) | ✅ builds |
+
+**Build/runtime verified (no device account needed):**
+- `:app:assembleDebug` compiles end-to-end — the Hilt graph accepts `AntraSource` (`@IntoSet Set<LosslessSource>`) and `AntraStreamResolver` (constructor-injected into `StreamSourceRegistry`).
+- `:app:installDebug` + launch on a connected device: app starts cleanly (no FATAL / Hilt / antra errors in logcat), Settings screen renders the new "Connect antra" row.
+- Pre-existing unrelated reds (`YtLibraryCanonicalizerTest`, `InnerTubeSearchExecutorTest`) confirmed red on the clean baseline — not caused by this work.
+
+**Implementation note (deviation from plan):** the plan's Task 8 Step 2 said add antra to "both the `forceYt` and normal branches" of `StreamSourceRegistry`. antra was added to the **normal branch only** — the `forceYt` toggle's documented purpose is to skip ALL lossless sources to reproduce the YouTube-only fallback path, so adding antra (a lossless source) there would defeat the toggle. Single-source-of-truth UA lives in the new `AntraFingerprint` object, shared by the WebView (mint) and interceptor (replay).
+
+### Task 10 — on-device end-to-end (PENDING — decides Approach A vs B)
+
+**Not yet run.** Requires the user to log into their own antra account and trigger a real lossless download. This is the empirical Cloudflare test:
+
+1. Settings → "Connect antra" → log in → confirm the row shows the username.
+2. Trigger a lossless download for a track that misses kennyy/squid but has a `spotifyUri`. Capture logcat.
+3. **Decision point:** if any antra OkHttp call (especially `GET /api/jobs/<id>/download`) returns Cloudflare `403`, Approach A's cookie-replay is insufficient → build **Phase 6 (Approach B, WebView request-proxy)**. If FLAC bytes come back clean → **Approach A is sufficient; done.**
+4. Stream check: play the track via antra → fetches to cache + plays; second play is a cache hit (no new job, `singles_left` unchanged).
+5. No-regression: kennyy/squid lossless + YouTube fallback still behave normally.
+
+(Note: per session memory the user is free-only on a shared, maxed Xfinity hotspot that has blocked download tests before — the antra download leg may need a different network to validate.)
