@@ -9,11 +9,13 @@ import com.stash.core.data.db.dao.PlaylistDao
 import com.stash.core.data.db.dao.SyncHistoryDao
 import com.stash.core.data.db.dao.TrackDao
 import com.stash.core.data.db.entity.SyncHistoryEntity
+import com.stash.core.common.MediaPathSlug
 import com.stash.core.data.mapper.toDomain
 import com.stash.core.data.mapper.toEntity
 import com.stash.core.model.Playlist
 import com.stash.core.model.Track
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -24,6 +26,7 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.retryWhen
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 import androidx.core.net.toUri
 
@@ -45,6 +48,7 @@ class MusicRepositoryImpl @Inject constructor(
     private val stashMixRecipeDao: com.stash.core.data.db.dao.StashMixRecipeDao,
     private val downloadNetworkPreference: com.stash.core.data.prefs.DownloadNetworkPreference,
     private val streamingPreference: com.stash.core.data.prefs.StreamingPreference,
+    private val storagePreference: com.stash.core.data.prefs.StoragePreference,
     private val localFileOps: com.stash.core.data.files.LocalFileOps,
 ) : MusicRepository {
 
@@ -882,8 +886,94 @@ class MusicRepositoryImpl @Inject constructor(
         return orphans.size
     }
 
-    override suspend fun rescanExternalDownloads(): Int {
-        TODO("Not yet implemented")
+    override suspend fun rescanExternalDownloads(): Int = withContext(Dispatchers.IO) {
+        // Only SAF (external-folder) libraries survive an uninstall / data-clear.
+        // Internal-storage downloads live under filesDir and are wiped with the
+        // app, so there is nothing on disk to re-link — bail when no external
+        // tree is configured.
+        val treeUri = storagePreference.externalTreeUri.first()
+            ?: return@withContext 0
+        val root = DocumentFile.fromTreeUri(context, treeUri)
+            ?: return@withContext 0
+
+        // Tracks the (re-)sync repopulated as metadata-only rows. These are the
+        // rows that should flip back to downloaded if their file is still on disk.
+        val candidates = trackDao.getExternalRescanCandidates()
+        if (candidates.isEmpty()) return@withContext 0
+
+        // The download pipeline writes every file at
+        // `<artistSlug>/<albumSlug>/<titleSlug>.<ext>` (see FileOrganizer). Walk
+        // that layout ONCE into an in-memory index keyed by the slug stem
+        // (extension dropped, so a format we can't predict still matches), then
+        // resolve every candidate against it — far cheaper than a per-track SAF
+        // lookup (one ContentResolver query per disk node instead of per track).
+        val index = buildExternalSlugIndex(root)
+        if (index.isEmpty()) return@withContext 0
+
+        var restored = 0
+        for (candidate in candidates) {
+            val artistSlug = MediaPathSlug.slugify(candidate.artist)
+            val albumSlug = if (candidate.album.isNotBlank()) {
+                MediaPathSlug.slugify(candidate.album)
+            } else {
+                // Mirrors FileOrganizer's blank-album fallback so a single's
+                // path reconstructs identically.
+                "singles"
+            }
+            val titleSlug = MediaPathSlug.slugify(candidate.title)
+            val doc = index["$artistSlug/$albumSlug/$titleSlug"] ?: continue
+            val size = doc.length()
+            if (size <= 0L) continue // empty / stub file — leave for a real re-download
+            trackDao.markAsDownloaded(
+                trackId = candidate.id,
+                filePath = doc.uri.toString(),
+                fileSizeBytes = size,
+            )
+            restored++
+        }
+
+        if (restored > 0) {
+            android.util.Log.i(
+                "StashRescan",
+                "Re-linked $restored existing external file(s) to library rows " +
+                    "(${candidates.size} undownloaded candidates, ${index.size} files on disk)",
+            )
+        }
+        restored
+    }
+
+    /**
+     * Walks the external SAF tree's `<artist>/<album>/<title>.<ext>` layout one
+     * level at a time and indexes every audio file by its slug stem
+     * `"artistDir/albumDir/fileNameWithoutExtension"` (lowercased). The folder
+     * and file names were themselves produced by [MediaPathSlug.slugify] at
+     * download time, so a candidate row slugged the same way looks up directly.
+     *
+     * Only the known 3-level depth is descended — files other apps left at the
+     * tree root or in unrelated structures are ignored (they cannot match a
+     * Stash row anyway), keeping the ContentResolver query count bounded to the
+     * library's own folders.
+     */
+    private fun buildExternalSlugIndex(root: DocumentFile): Map<String, DocumentFile> {
+        val index = HashMap<String, DocumentFile>()
+        for (artistDir in root.listFiles()) {
+            if (!artistDir.isDirectory) continue
+            val artist = artistDir.name?.lowercase() ?: continue
+            for (albumDir in artistDir.listFiles()) {
+                if (!albumDir.isDirectory) continue
+                val album = albumDir.name?.lowercase() ?: continue
+                for (file in albumDir.listFiles()) {
+                    if (!file.isFile) continue
+                    val stem = file.name
+                        ?.substringBeforeLast('.')
+                        ?.lowercase()
+                        ?.takeIf { it.isNotBlank() }
+                        ?: continue
+                    index["$artist/$album/$stem"] = file
+                }
+            }
+        }
+        return index
     }
 
     // ── Art URL migration ──────────────────────────────────────────────

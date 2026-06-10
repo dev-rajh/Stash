@@ -1,38 +1,25 @@
 package com.stash.data.download.files
 
+import com.stash.core.common.MediaPathSlug
+
 /**
  * Filesystem-safe slug helpers lifted out of [FileOrganizer].
  *
  * v0.9.36: the lyrics-sidecar writer (`:data:lyrics`) needs to derive
  * the same `<artist>/<album>/<title>` directory layout as the download
- * pipeline when writing a `.lrc` next to a SAF-tree audio file. Rather
- * than duplicate the slug semantics (which the original `slugify`
- * encoded as a `private` member of [FileOrganizer]), lift the helper
- * into an object that cross-module callers in `:data` can share — one
- * definition, no drift.
+ * pipeline when writing a `.lrc` next to a SAF-tree audio file.
  *
- * Visibility is `public` (the default) rather than `internal` because
- * Kotlin's `internal` is scoped to the containing Gradle module, and
- * `:data:lyrics` is a sibling module that needs to call this. There
- * is no public API surface exposure cost: the only callers are other
- * `:data:*` modules wiring downloads + sidecars, and the object is
- * intentionally narrow — one pure helper, no state.
- *
- * The body is copied verbatim from the previous
- * `FileOrganizer.slugify` — behaviour is identical.
+ * The slug algorithm itself now lives in [MediaPathSlug] (`:core:common`)
+ * so that the external-library rescan in `:core:data` — which cannot depend
+ * on this download module — reconstructs the exact same paths the download
+ * writer produced. This object stays as the established `:data:*` entry point
+ * and simply delegates, keeping one definition with no drift.
  */
 object FileOrganizerSlugs {
 
     /**
-     * Converts a human-readable string into a filesystem-safe slug.
-     *
-     * Lowercases, strips non-alphanumeric characters (except spaces and hyphens),
-     * collapses whitespace into single hyphens, and truncates to 60 characters.
+     * Converts a human-readable string into a filesystem-safe slug. See
+     * [MediaPathSlug.slugify] for the exact transformation.
      */
-    fun slugify(input: String): String =
-        input.lowercase()
-            .replace(Regex("[^a-z0-9\\s-]"), "")
-            .replace(Regex("\\s+"), "-")
-            .trim('-')
-            .take(60)
+    fun slugify(input: String): String = MediaPathSlug.slugify(input)
 }

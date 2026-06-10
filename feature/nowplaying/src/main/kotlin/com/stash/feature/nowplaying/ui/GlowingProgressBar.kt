@@ -3,6 +3,7 @@ package com.stash.feature.nowplaying.ui
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -175,6 +176,11 @@ fun GlowingProgressBar(
         // --- Time labels ---
         Spacer(modifier = Modifier.height(2.dp))
 
+        // VLC-style: the right-hand label toggles between remaining time
+        // (the default, `-m:ss`) and the track's total length (`m:ss`) when
+        // tapped. State is local to the bar and persists across track changes.
+        var showTotalTime by remember { mutableStateOf(false) }
+
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -192,9 +198,14 @@ fun GlowingProgressBar(
                 color = Color.White.copy(alpha = 0.7f),
             )
             Text(
-                text = "-${formatTime((safeTotalMs - displayMs).coerceAtLeast(0L))}",
+                text = if (showTotalTime) {
+                    formatTime(safeTotalMs)
+                } else {
+                    "-${formatTime((safeTotalMs - displayMs).coerceAtLeast(0L))}"
+                },
                 style = MaterialTheme.typography.labelSmall,
                 color = Color.White.copy(alpha = 0.7f),
+                modifier = Modifier.clickable { showTotalTime = !showTotalTime },
             )
         }
     }
