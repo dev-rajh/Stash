@@ -126,6 +126,12 @@ class DownloadManager @Inject constructor(
      */
     private val audioDurationExtractor: AudioDurationExtractor,
     private val losslessHealthGate: LosslessSourceHealthGate,
+    /**
+     * Test-only "Force antra only" outage drill. When on, antra is the sole
+     * source and NOTHING may reach yt-dlp — the stash-mix / preResolvedUrl
+     * fall-through carve-outs are suppressed so exempt tracks defer too.
+     */
+    private val streamingPreference: com.stash.core.data.prefs.StreamingPreference,
 ) {
     /** Limits concurrent downloads. 8 parallel slots — with native opus (no FFmpeg
      *  transcode) downloads are almost entirely network-bound so more parallelism helps. */
@@ -197,25 +203,42 @@ class DownloadManager @Inject constructor(
         // On success we short-circuit the YouTube pipeline. On null /
         // failure we fall through to the YouTube path (or defer when
         // fallback is off, per v0.9.17 strict-FLAC).
+        val forceAntraOnly = streamingPreference.isForceAntraOnly()
         val forceLossless = isStashMixTrack(track.id)
-        if (forceLossless || losslessPrefs.enabledNow()) {
+        if (forceLossless || losslessPrefs.enabledNow() || forceAntraOnly) {
             val losslessResult = tryLosslessDownload(track, forced = forceLossless)
             if (losslessResult != null) return losslessResult
+            // Outage drill (force-antra-only): antra is the only source and
+            // NOTHING may reach yt-dlp — even the stash-mix / preResolvedUrl
+            // carve-outs below defer, so the test population stays pure antra.
+            if (forceAntraOnly) {
+                Log.i(TAG, "deferring '${track.artist} - ${track.title}': force-antra-only, antra missed")
+                return TrackDownloadResult.Deferred
+            }
             // v0.9.17 strict-FLAC: when lossless returned null AND
             // fallback is off, defer instead of falling through to
             // yt-dlp. Two exemptions:
             //  - Stash-mix tracks (forceLossless=true) — small curated
             //    rotating playlist would silently empty if stuck in
             //    deferral, so they keep legacy fall-through semantics.
-            //  - Tracks with a preResolvedUrl already set (YT-Music
-            //    direct sync, lossless-upgrade callers, etc.) — the
-            //    caller already opted into YouTube as the source; the
-            //    fallback toggle was designed for Spotify tracks with
-            //    no source-of-truth audio, not for "I synced a YT
-            //    playlist." Without this carve-out, an entire YT-Music
-            //    playlist defers en-masse the first time lossless can't
-            //    match (2026-05-12).
-            if (preResolvedUrl == null && !forceLossless &&
+            //  - GENUINELY YouTube-sourced tracks with a preResolvedUrl
+            //    (YT-Music direct sync) — YouTube is their source of
+            //    truth, so a lossless miss has no lossless original to
+            //    wait for; falling through is correct. Without this an
+            //    entire YT-Music playlist would defer en-masse the first
+            //    time lossless can't match (2026-05-12).
+            //
+            // The carve-out is gated on track.source == YOUTUBE, NOT on
+            // preResolvedUrl alone. A SPOTIFY/BOTH track acquires a
+            // youtube_id from match-for-playback, which the queue turns
+            // into a youtubeUrl/preResolvedUrl — that is a MATCH, not a
+            // user opt-in to YouTube. Keying the carve-out on the URL
+            // leaked lossy downloads for every matched Spotify track when
+            // fallback was off (observed 2026-06: 671 Spotify tracks came
+            // down as lossy mp4 on-device). Such tracks must defer.
+            val youtubeOptIn = preResolvedUrl != null &&
+                track.source == com.stash.core.model.MusicSource.YOUTUBE
+            if (!youtubeOptIn && !forceLossless &&
                 !losslessPrefs.youtubeFallbackEnabledNow()
             ) {
                 // Strict-FLAC normally defers when no lossless match is found.
@@ -392,6 +415,7 @@ class DownloadManager @Inject constructor(
             album = track.album.takeIf { it.isNotBlank() },
             isrc = track.isrc,
             durationMs = track.durationMs.takeIf { it > 0 },
+            spotifyUri = track.spotifyUri,
         )
 
         // Bounded failover loop: the duration backstop can reject a degraded

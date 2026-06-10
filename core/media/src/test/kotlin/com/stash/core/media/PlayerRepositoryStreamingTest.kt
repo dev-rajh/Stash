@@ -13,6 +13,7 @@ import com.stash.core.media.streaming.StreamSourceRegistry
 import com.stash.core.media.streaming.StreamUrl
 import com.stash.core.media.streaming.StreamUrlCache
 import io.mockk.coEvery
+import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
@@ -191,6 +192,102 @@ class PlayerRepositoryStreamingTest {
         // so a subsequent tap doesn't re-resolve.
         verify {
             streamUrlCache.put(3L, match { it.url.contains("fresh?etsp=1234") })
+        }
+    }
+
+    /**
+     * The optimistic "tapped track is resolving" spinner must survive
+     * controller state emissions. setQueue emits isBuffering=true before a
+     * resolve that can take 60-120s (antra job), during which the previous
+     * queue keeps playing — every controller event recomputes state, and
+     * pre-fix that stomped isBuffering back to false (player looked frozen
+     * for the rest of the resolve). computeIsBuffering ORs the controller's
+     * real buffering with the epoch-keyed "tap resolve in flight" flag.
+     */
+    @Test
+    fun computeIsBuffering_passesThroughControllerBuffering_whenNoTapResolve() {
+        repo.tapResolveEpoch = -1L
+
+        assertThat(repo.computeIsBuffering(controllerBuffering = true)).isTrue()
+        assertThat(repo.computeIsBuffering(controllerBuffering = false)).isFalse()
+    }
+
+    @Test
+    fun computeIsBuffering_true_whileTapResolveInFlight_evenWhenControllerIdle() {
+        repo.setQueueEpoch = 5L
+        repo.tapResolveEpoch = 5L
+
+        assertThat(repo.computeIsBuffering(controllerBuffering = false)).isTrue()
+    }
+
+    @Test
+    fun computeIsBuffering_false_afterTapResolveCleared() {
+        repo.setQueueEpoch = 5L
+        repo.tapResolveEpoch = -1L
+
+        assertThat(repo.computeIsBuffering(controllerBuffering = false)).isFalse()
+    }
+
+    @Test
+    fun computeIsBuffering_false_whenTapResolveSuperseded_byNewerSetQueue() {
+        // A stale in-flight resolve (epoch 5) must not keep the spinner on
+        // once a newer setQueue (epoch 6) owns the player state.
+        repo.setQueueEpoch = 6L
+        repo.tapResolveEpoch = 5L
+
+        assertThat(repo.computeIsBuffering(controllerBuffering = false)).isFalse()
+    }
+
+    // ── isStreaming: drives the Now Playing wifi/streaming indicator ──
+    // A track counts as "streaming" when it came from a stream resolver,
+    // NOT purely when its URI is http(s). antra plays its lossless FLAC
+    // from a LOCAL cache file (file://) but is every bit a stream — without
+    // this it rendered like a downloaded track (no wifi glyph).
+
+    @Test
+    fun computeIsStreaming_true_for_http_url() {
+        assertThat(repo.computeIsStreaming(scheme = "https", streamOrigin = null)).isTrue()
+        assertThat(repo.computeIsStreaming(scheme = "http", streamOrigin = null)).isTrue()
+    }
+
+    @Test
+    fun computeIsStreaming_true_for_antra_file_uri_with_stream_origin() {
+        // antra: file:// URI but resolved by a stream resolver.
+        assertThat(repo.computeIsStreaming(scheme = "file", streamOrigin = "antra")).isTrue()
+    }
+
+    @Test
+    fun computeIsStreaming_false_for_downloaded_local_file() {
+        // Downloaded track: file:// and NO stream origin → not streaming.
+        assertThat(repo.computeIsStreaming(scheme = "file", streamOrigin = null)).isFalse()
+        assertThat(repo.computeIsStreaming(scheme = null, streamOrigin = null)).isFalse()
+    }
+
+    @Test
+    fun buildMediaItem_forwards_allowAntra_false_to_resolver() = runTest {
+        // The background-fill / prefetch paths pass allowAntra = false so a
+        // speculative resolve can never spend antra quota (1 single per
+        // resolve). Verify the flag reaches the registry untouched.
+        val track = streamable(id = 4L)
+        every { streamingPreference.streamOnCellular } returns flowOf(true)
+        coEvery { streamingPreference.current() } returns true
+        every { connectivity.isConnected() } returns true
+        every { connectivity.isCellular() } returns false
+        every { streamUrlCache.get(4L) } returns null
+        coEvery {
+            streamResolver.resolve(track, allowYouTube = true, allowYtDlp = false, allowAntra = false)
+        } returns null
+
+        val result = repo.buildMediaItemForTrack(
+            track,
+            allowYouTube = true,
+            allowYtDlp = false,
+            allowAntra = false,
+        )
+
+        assertThat(result).isEqualTo(StreamRoutingResult.NotAvailable)
+        coVerify {
+            streamResolver.resolve(track, allowYouTube = true, allowYtDlp = false, allowAntra = false)
         }
     }
 

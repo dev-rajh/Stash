@@ -91,6 +91,14 @@ interface DownloadQueueDao {
               WHERE pt.track_id = t.id
                 AND pt.removed_at IS NULL
                 AND p.sync_enabled = 1
+                -- Must also be ACTIVE (visible in the Sync UI). A playlist
+                -- can be sync_enabled=1 yet is_active=0 — e.g. a YouTube
+                -- daily mix force-enabled by the one-shot migration, then
+                -- rotated out of the feed. Hidden from the UI (so the user
+                -- can't toggle it off) but it kept downloading (observed:
+                -- Replay Mix queued 90 tracks). Mirrors the is_active=1
+                -- guard in PlaylistDao.getSyncEnabledPlaylists.
+                AND p.is_active = 1
                 -- Stash Mixes are stream-only (v0.9.37 seam): their stubs
                 -- live in a sync_enabled playlist (so they stay visible
                 -- offline) but must NEVER be download-eligible. Require a
@@ -127,6 +135,14 @@ interface DownloadQueueDao {
               WHERE pt.track_id = t.id
                 AND pt.removed_at IS NULL
                 AND p.sync_enabled = 1
+                -- Must also be ACTIVE (visible in the Sync UI). A playlist
+                -- can be sync_enabled=1 yet is_active=0 — e.g. a YouTube
+                -- daily mix force-enabled by the one-shot migration, then
+                -- rotated out of the feed. Hidden from the UI (so the user
+                -- can't toggle it off) but it kept downloading (observed:
+                -- Replay Mix queued 90 tracks). Mirrors the is_active=1
+                -- guard in PlaylistDao.getSyncEnabledPlaylists.
+                AND p.is_active = 1
                 -- Stash Mixes are stream-only (v0.9.37 seam): their stubs
                 -- live in a sync_enabled playlist (so they stay visible
                 -- offline) but must NEVER be download-eligible. Require a
@@ -454,6 +470,14 @@ interface DownloadQueueDao {
               WHERE pt.track_id = t.id
                 AND pt.removed_at IS NULL
                 AND p.sync_enabled = 1
+                -- Must also be ACTIVE (visible in the Sync UI). A playlist
+                -- can be sync_enabled=1 yet is_active=0 — e.g. a YouTube
+                -- daily mix force-enabled by the one-shot migration, then
+                -- rotated out of the feed. Hidden from the UI (so the user
+                -- can't toggle it off) but it kept downloading (observed:
+                -- Replay Mix queued 90 tracks). Mirrors the is_active=1
+                -- guard in PlaylistDao.getSyncEnabledPlaylists.
+                AND p.is_active = 1
                 -- Stash Mixes are stream-only (v0.9.37 seam): their stubs
                 -- live in a sync_enabled playlist (so they stay visible
                 -- offline) but must NEVER be download-eligible. Require a
@@ -495,6 +519,14 @@ interface DownloadQueueDao {
               WHERE pt.track_id = t.id
                 AND pt.removed_at IS NULL
                 AND p.sync_enabled = 1
+                -- Must also be ACTIVE (visible in the Sync UI). A playlist
+                -- can be sync_enabled=1 yet is_active=0 — e.g. a YouTube
+                -- daily mix force-enabled by the one-shot migration, then
+                -- rotated out of the feed. Hidden from the UI (so the user
+                -- can't toggle it off) but it kept downloading (observed:
+                -- Replay Mix queued 90 tracks). Mirrors the is_active=1
+                -- guard in PlaylistDao.getSyncEnabledPlaylists.
+                AND p.is_active = 1
                 -- Stash Mixes are stream-only (v0.9.37 seam): their stubs
                 -- live in a sync_enabled playlist (so they stay visible
                 -- offline) but must NEVER be download-eligible. Require a
@@ -538,6 +570,12 @@ interface DownloadQueueDao {
               INNER JOIN playlists p ON p.id = pt.playlist_id
               WHERE pt.removed_at IS NULL
                 AND p.sync_enabled = 1
+                -- Only an ACTIVE parent spares a row. A hidden (is_active=0)
+                -- but sync_enabled=1 playlist — e.g. a rotated-out YouTube
+                -- daily mix — does NOT spare its tracks, so this sweep drains
+                -- the invisible-download backlog (Replay Mix's 90 queued
+                -- tracks) the same way it drains mix-only orphans.
+                AND p.is_active = 1
                 -- A sync-enabled STASH_MIX membership does NOT spare a row:
                 -- mix tracks are stream-only, so a mix-only track's queue
                 -- entry is an orphan and gets swept. This drains the legacy

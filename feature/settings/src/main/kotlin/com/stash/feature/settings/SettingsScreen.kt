@@ -99,6 +99,7 @@ fun SettingsScreen(
     onNavigateToEqualizer: () -> Unit = {},
     onNavigateToLibraryHealth: () -> Unit = {},
     onNavigateToSquidWtfCaptcha: () -> Unit = {},
+    onNavigateToAntraConnect: () -> Unit = {},
     onNavigateToDiagnosticsPreview: () -> Unit = {},
     modifier: Modifier = Modifier,
     viewModel: SettingsViewModel = hiltViewModel(),
@@ -260,6 +261,7 @@ fun SettingsScreen(
         onNavigateToEqualizer = onNavigateToEqualizer,
         onNavigateToLibraryHealth = onNavigateToLibraryHealth,
         onNavigateToSquidWtfCaptcha = onNavigateToSquidWtfCaptcha,
+        onNavigateToAntraConnect = onNavigateToAntraConnect,
         onNavigateToDiagnosticsPreview = onNavigateToDiagnosticsPreview,
         onShareLatestCrashReport = viewModel::latestCrashShareTarget,
         onDiagnosticsRefresh = viewModel::refreshDiagnostics,
@@ -269,6 +271,8 @@ fun SettingsScreen(
         onStreamOnCellularToggle = viewModel::onStreamOnCellularToggle,
         forceYouTubeFallback = viewModel.forceYouTubeFallback.collectAsStateWithLifecycle().value,
         onToggleForceYouTubeFallback = viewModel::setForceYouTubeFallback,
+        forceAntraOnly = viewModel.forceAntraOnly.collectAsStateWithLifecycle().value,
+        onToggleForceAntraOnly = viewModel::setForceAntraOnly,
         treePicker = treePicker,
         onSetPickerIntent = { pendingPickerIntent = it },
         modifier = modifier,
@@ -324,6 +328,7 @@ private fun SettingsContent(
     onNavigateToEqualizer: () -> Unit,
     onNavigateToLibraryHealth: () -> Unit,
     onNavigateToSquidWtfCaptcha: () -> Unit,
+    onNavigateToAntraConnect: () -> Unit,
     onNavigateToDiagnosticsPreview: () -> Unit,
     /**
      * Returns the latest crash file + its FileProvider URI, or null if
@@ -351,6 +356,10 @@ private fun SettingsContent(
     forceYouTubeFallback: Boolean,
     /** Routed to [SettingsViewModel.setForceYouTubeFallback] in the host. */
     onToggleForceYouTubeFallback: (Boolean) -> Unit,
+    /** Live "force antra only" test pref — see [SettingsViewModel.forceAntraOnly]. */
+    forceAntraOnly: Boolean,
+    /** Routed to [SettingsViewModel.setForceAntraOnly] in the host. */
+    onToggleForceAntraOnly: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val extendedColors = StashTheme.extendedColors
@@ -507,6 +516,35 @@ private fun SettingsContent(
                         Switch(
                             checked = forceYouTubeFallback,
                             onCheckedChange = onToggleForceYouTubeFallback,
+                        )
+                    }
+
+                    // Test-only outage drill for the antra fallback: routes
+                    // streaming AND downloads through antra alone (no Qobuz
+                    // proxies, no YouTube), so the antra path can be verified
+                    // end-to-end. Backed by StreamingPreference.forceAntraOnly.
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Force antra only (test)",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                            Text(
+                                text = "Route streaming and downloads through antra alone — no Qobuz proxies, no YouTube. Each antra fetch spends a single from your quota. Turn off after testing.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Switch(
+                            checked = forceAntraOnly,
+                            onCheckedChange = onToggleForceAntraOnly,
                         )
                     }
                 }
@@ -711,6 +749,41 @@ private fun SettingsContent(
                             squidStatus = uiState.squidCaptchaStatus,
                             onSolveCaptcha = onNavigateToSquidWtfCaptcha,
                         )
+
+                        // -- antra connect row --------------------------------
+                        // Independent per-user lossless source (antra.hoshi.cfd).
+                        // Engages only when both Qobuz proxies miss. Connecting
+                        // is optional redundancy, mirroring the squid captcha row.
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable(onClick = onNavigateToAntraConnect)
+                                .padding(vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = uiState.antraUsername
+                                        ?.let { "antra: $it" }
+                                        ?: "Connect antra",
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                )
+                                Text(
+                                    text = uiState.antraUsername
+                                        ?.let { "Connected — tap to reconnect" }
+                                        ?: "Independent lossless fallback (own account)",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            Text(
+                                text = if (uiState.antraUsername != null) "Reconnect →" else "Connect →",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                        }
 
                         // -- Lossless quality picker --------------------------
                         Spacer(modifier = Modifier.height(16.dp))

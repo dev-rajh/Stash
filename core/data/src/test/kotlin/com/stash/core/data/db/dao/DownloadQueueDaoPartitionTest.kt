@@ -191,6 +191,80 @@ class DownloadQueueDaoPartitionTest {
         assertEquals("overlap track must keep its queue row", 0, deleted)
     }
 
+    // ---- is_active=0 (hidden / rotated-out) exclusion ----
+    //
+    // A playlist can be sync_enabled=1 yet is_active=0 — e.g. a YouTube
+    // daily mix force-enabled by the one-shot enableAllYouTubePlaylistSync
+    // migration, then rotated out of the feed. It's HIDDEN from the Sync UI
+    // (so the user can't toggle it off) but was still downloading its tracks
+    // (observed on-device: Replay Mix, is_active=0 + sync_enabled=1, queued
+    // 90 tracks). Download-eligibility must require the parent be ACTIVE too,
+    // matching PlaylistDao.getSyncEnabledPlaylists (is_active=1 AND sync_enabled=1).
+
+    @Test fun `getAllPendingBySources excludes a track whose only sync-enabled playlist is hidden`() = runTest {
+        seedTrack(trackId = 1L)
+        addPlaylistMembership(trackId = 1L, type = PlaylistType.DAILY_MIX, syncEnabled = true, isActive = false)
+        dao.insert(pendingRow(id = 100L, trackId = 1L, syncId = 5L))
+
+        val result = dao.getAllPendingBySources(listOf("YOUTUBE"))
+
+        assertTrue("hidden-playlist track must not download, got $result", result.isEmpty())
+    }
+
+    @Test fun `getAllPendingBySources includes a track in a hidden mix AND an active playlist`() = runTest {
+        seedTrack(trackId = 1L)
+        addPlaylistMembership(trackId = 1L, type = PlaylistType.DAILY_MIX, syncEnabled = true, isActive = false)
+        addPlaylistMembership(trackId = 1L, type = PlaylistType.CUSTOM, syncEnabled = true, isActive = true)
+        dao.insert(pendingRow(id = 100L, trackId = 1L, syncId = 5L))
+
+        val result = dao.getAllPendingBySources(listOf("YOUTUBE"))
+
+        assertEquals("track in an active playlist must still download", listOf(100L), result.map { it.id })
+    }
+
+    @Test fun `getRetryableBySources excludes a track whose only sync-enabled playlist is hidden`() = runTest {
+        seedTrack(trackId = 1L)
+        addPlaylistMembership(trackId = 1L, type = PlaylistType.DAILY_MIX, syncEnabled = true, isActive = false)
+        dao.insert(failedRow(id = 100L, trackId = 1L, syncId = 5L, retryCount = 1))
+
+        val result = dao.getRetryableBySources(listOf("YOUTUBE"))
+
+        assertTrue("hidden-playlist retry row must not resurface, got $result", result.isEmpty())
+    }
+
+    @Test fun `getUnqueuedTrackIds excludes hidden-playlist-only tracks but keeps active-playlist tracks`() = runTest {
+        seedTrack(trackId = 1L) // hidden-mix only
+        addPlaylistMembership(trackId = 1L, type = PlaylistType.DAILY_MIX, syncEnabled = true, isActive = false)
+        seedTrack(trackId = 2L) // active playlist
+        addPlaylistMembership(trackId = 2L, type = PlaylistType.CUSTOM, syncEnabled = true, isActive = true)
+
+        val result = dao.getUnqueuedTrackIds(listOf("YOUTUBE"))
+
+        assertEquals("only the active-playlist track should be re-queued", listOf(2L), result)
+    }
+
+    @Test fun `deleteOrphanedQueueEntries evicts a hidden-playlist-only track's queue row`() = runTest {
+        seedTrack(trackId = 1L)
+        addPlaylistMembership(trackId = 1L, type = PlaylistType.DAILY_MIX, syncEnabled = true, isActive = false)
+        dao.insert(pendingRow(id = 100L, trackId = 1L, syncId = 5L))
+
+        val deleted = dao.deleteOrphanedQueueEntries()
+
+        assertEquals("hidden-playlist queue row should be swept", 1, deleted)
+        assertTrue(dao.getAllPendingBySources(listOf("YOUTUBE")).isEmpty())
+    }
+
+    @Test fun `deleteOrphanedQueueEntries spares a track in a hidden mix AND an active playlist`() = runTest {
+        seedTrack(trackId = 1L)
+        addPlaylistMembership(trackId = 1L, type = PlaylistType.DAILY_MIX, syncEnabled = true, isActive = false)
+        addPlaylistMembership(trackId = 1L, type = PlaylistType.CUSTOM, syncEnabled = true, isActive = true)
+        dao.insert(pendingRow(id = 100L, trackId = 1L, syncId = 5L))
+
+        val deleted = dao.deleteOrphanedQueueEntries()
+
+        assertEquals("track in an active playlist must keep its queue row", 0, deleted)
+    }
+
     // ---- helpers ----
 
     private suspend fun seedTrack(trackId: Long) {
@@ -235,16 +309,17 @@ class DownloadQueueDaoPartitionTest {
         trackId: Long,
         type: PlaylistType,
         syncEnabled: Boolean,
+        isActive: Boolean = true,
     ) {
         val playlistId = playlistDao.insert(
             PlaylistEntity(
-                name = "$type playlist $trackId",
+                name = "$type playlist $trackId active=$isActive",
                 source = MusicSource.BOTH,
-                sourceId = "playlist_${type}_$trackId",
+                sourceId = "playlist_${type}_${trackId}_$isActive",
                 type = type,
                 trackCount = 0,
                 syncEnabled = syncEnabled,
-                isActive = true,
+                isActive = isActive,
             )
         )
         playlistDao.insertCrossRef(
