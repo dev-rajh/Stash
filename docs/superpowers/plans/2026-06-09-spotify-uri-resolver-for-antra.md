@@ -24,23 +24,30 @@
 - `core/data/src/main/kotlin/com/stash/core/data/db/dao/SpotifyResolutionDao.kt`
 - Tests mirroring each.
 
+**Create:**
+- `data/download/.../matching/ArtistMatching.kt` — `internal object` holding `ARTIST_PART_SEPARATOR` + `artistParts` + `containsRun`, extracted from `MatchScorer` so both `MatchScorer` and `SpotifySearchScorer` call it statically (the helpers are private *instance* methods today — a separate scorer can't reach them, and we won't duplicate the logic).
+
 **Modify:**
-- `data/download/.../matching/MatchScorer.kt` — promote `ARTIST_PART_SEPARATOR`, `artistParts`, `containsRun` from `private` to `internal`.
+- `data/download/build.gradle.kts` — add `implementation(project(":data:spotify"))` (the module does NOT depend on `:data:spotify` today; the resolver/scorer need it). Verified acyclic.
+- `data/download/.../matching/MatchScorer.kt` — delegate its artist-part logic to `ArtistMatching` (no behavior change).
 - `data/spotify/.../SpotifyApiClient.kt` — add `searchTracks()`; `Mutex`-guard token refresh.
-- `core/data/.../db/StashDatabase.kt` — register entity+DAO, version 31→32, `MIGRATION_31_32`.
+- `core/data/.../db/StashDatabase.kt` — register entity+DAO, version 31→32, define `MIGRATION_31_32`.
+- `core/data/.../di/DatabaseModule.kt` — register `MIGRATION_31_32` in `.addMigrations(...)` AND add `@Provides fun provideSpotifyResolutionDao(db) = db.spotifyResolutionDao()` (every DAO is hand-provided here; nothing is auto-provided).
 - `data/download/.../lossless/LosslessSource.kt` — add `trackId` to `TrackQuery`; add `resolvedSpotifyTrackUrl` extension.
 - `data/download/.../lossless/antra/AntraSource.kt` — use the extension; inject resolver.
 - `data/download/.../DownloadManager.kt:398` — add `trackId = track.id` to the `TrackQuery`.
-- `core/media/.../streaming/AntraStreamResolver.kt:70` — thread `trackId`+`durationMs`+`album`; inject + use resolver.
-- DI: `data/download/.../lossless/di/LosslessModule.kt` (or a new `SpotifyResolveModule.kt`) — provide `SpotifyUriResolver`/`SpotifySearchScorer` if not constructor-injectable; expose the DAO from the DB module.
+- `core/media/.../streaming/AntraStreamResolver.kt:70` — thread `trackId`+`durationMs`+`album`; inject + use resolver; update the existing `AntraStreamResolverTest` internal-constructor call.
+- `SpotifyUriResolver`/`SpotifySearchScorer`/`SpotifyApiClient` are all `@Inject @Singleton` → constructor-injectable, no new DI module needed beyond the DAO provider above.
 
 ---
 
-## Task 1: Candidate DTO + new exception + MatchScorer helper visibility
+## Task 1: Candidate DTO + new exception + extract ArtistMatching + Gradle edge
 
 **Files:**
 - Create: `data/spotify/src/main/kotlin/com/stash/data/spotify/SpotifyTrackCandidate.kt`
+- Create: `data/download/src/main/kotlin/com/stash/data/download/matching/ArtistMatching.kt`
 - Modify: `data/download/src/main/kotlin/com/stash/data/download/matching/MatchScorer.kt`
+- Modify: `data/download/build.gradle.kts`
 
 - [ ] **Step 1: Create the DTO + exception** (no test needed — pure data declarations)
 
@@ -63,20 +70,36 @@ class SpotifyRateLimitException(val retryAfterSeconds: Long?) :
     Exception("Spotify rate limited (Retry-After=${retryAfterSeconds}s)")
 ```
 
-- [ ] **Step 2: Promote MatchScorer artist helpers to `internal`**
+- [ ] **Step 2: Extract `ArtistMatching` and delegate from MatchScorer**
 
-In `MatchScorer.kt`, change the visibility of `ARTIST_PART_SEPARATOR` (companion), `artistParts(...)`, and `containsRun(...)` from `private` to `internal`. Do NOT change their logic. (If they live in the companion object, `internal` there is reachable from the same module; `SpotifySearchScorer` is in the same `:data:download` module.)
+`MatchScorer.artistParts(...)` (≈line 317) and `containsRun(...)` (≈line 303) are private **instance** methods, and `ARTIST_PART_SEPARATOR` is in its companion — a separate `SpotifySearchScorer` cannot reach private instance methods just by marking them `internal`. Extract them into a shared, stateless helper so both classes call it statically and the logic lives once:
 
-- [ ] **Step 3: Compile the module**
+```kotlin
+package com.stash.data.download.matching
 
-Run: `./gradlew --no-daemon :data:download:compileDebugKotlin :data:spotify:compileDebugKotlin`
-Expected: BUILD SUCCESSFUL.
+internal object ArtistMatching {
+    val ARTIST_PART_SEPARATOR: Regex = /* move the exact regex from MatchScorer */
+    fun artistParts(raw: String): List<String> = /* move body verbatim */
+    fun containsRun(haystackTokens: List<String>, needleTokens: List<String>): Boolean = /* move body verbatim — match the real signature */
+}
+```
 
-- [ ] **Step 4: Commit**
+In `MatchScorer.kt`, replace the bodies of the (now-removed-or-thin-wrapper) private methods with calls to `ArtistMatching.*`, leaving `MatchScorer`'s public behavior identical. Copy the EXACT signatures and bodies from the current `MatchScorer` — do not re-derive.
+
+- [ ] **Step 3: Add the Gradle dependency edge**
+
+In `data/download/build.gradle.kts`, add `implementation(project(":data:spotify"))` to the `dependencies { }` block. (The module does not depend on `:data:spotify` today; the new scorer/resolver reference `SpotifyTrackCandidate`/`SpotifyApiClient`.)
+
+- [ ] **Step 4: Compile both modules**
+
+Run: `./gradlew --stop; ./gradlew --no-daemon :data:download:compileDebugKotlin :data:spotify:compileDebugKotlin`
+Expected: BUILD SUCCESSFUL. Run `./gradlew --no-daemon :data:download:testDebugUnitTest --tests "*MatchScorer*"` to confirm the `ArtistMatching` extraction didn't change `MatchScorer` behavior.
+
+- [ ] **Step 5: Commit**
 
 ```bash
-git add data/spotify/src/main/kotlin/com/stash/data/spotify/SpotifyTrackCandidate.kt data/download/src/main/kotlin/com/stash/data/download/matching/MatchScorer.kt
-git commit -m "feat(spotify): add SpotifyTrackCandidate DTO + RateLimitException; expose MatchScorer artist helpers"
+git add data/spotify/src/main/kotlin/com/stash/data/spotify/SpotifyTrackCandidate.kt data/download/src/main/kotlin/com/stash/data/download/matching/ArtistMatching.kt data/download/src/main/kotlin/com/stash/data/download/matching/MatchScorer.kt data/download/build.gradle.kts
+git commit -m "feat(spotify): add SpotifyTrackCandidate DTO + RateLimitException; extract ArtistMatching; add :data:spotify edge"
 ```
 
 ---
@@ -124,7 +147,7 @@ Expected: FAIL — compile error, `SpotifySearchScorer` not defined.
 
 - [ ] **Step 3: Implement `SpotifySearchScorer` to the spec**
 
-Implement per the spec's "Acceptance rule": signals `titleSim` (Jaro-Winkler over `canonicalTitle`), `artistOk` (per-element via the now-`internal` `artistParts`/`containsRun` + `jaroWinkler ≥ 0.85`), `durKnown` (require `track.durationMs != null && > 0 && cand.durationMs > 0`), `durDeltaSec` (≤ 4), `versionConflict` (**raw lowercased titles**, word-boundary tokens, symmetric presence over the explicit disqualifying set). Accept iff `durKnown && durDeltaSec ≤ 4 && titleSim ≥ 0.92 && artistOk && !versionConflict`. Among survivors pick min `durDeltaSec` (tie: max `titleSim`); apply the **ambiguity-abstain** (reject all if two survivors within 0.02 titleSim AND 2s durDeltaSec). Return `Decision(accepted, reason)`. Define the disqualifying token set as a private `val` exactly as the spec lists it.
+Implement per the spec's "Acceptance rule": signals `titleSim` (Jaro-Winkler over `canonicalTitle`), `artistOk` (per-element via `ArtistMatching.artistParts`/`ArtistMatching.containsRun` called statically + `jaroWinkler ≥ 0.85`; `SpotifySearchScorer` injects only `TrackMatcher`), `durKnown` (require `track.durationMs != null && > 0 && cand.durationMs > 0`), `durDeltaSec` (≤ 4), `versionConflict` (**raw lowercased titles**, word-boundary tokens, symmetric presence over the explicit disqualifying set). Accept iff `durKnown && durDeltaSec ≤ 4 && titleSim ≥ 0.92 && artistOk && !versionConflict`. Among survivors pick min `durDeltaSec` (tie: max `titleSim`); apply the **ambiguity-abstain** (reject all if two survivors within 0.02 titleSim AND 2s durDeltaSec). Return `Decision(accepted, reason)`. Define the disqualifying token set as a private `val` exactly as the spec lists it.
 
 - [ ] **Step 4: Run, watch it pass**
 
@@ -166,6 +189,7 @@ git add -A && git commit -m "test(spotify): SpotifySearchScorer rejects <trap>"
 - Create: `core/data/src/main/kotlin/com/stash/core/data/db/entity/SpotifyResolutionEntity.kt`
 - Create: `core/data/src/main/kotlin/com/stash/core/data/db/dao/SpotifyResolutionDao.kt`
 - Modify: `core/data/src/main/kotlin/com/stash/core/data/db/StashDatabase.kt`
+- Modify: `core/data/src/main/kotlin/com/stash/core/data/di/DatabaseModule.kt` (register migration + provide DAO)
 - Test: `core/data/src/test/kotlin/com/stash/core/data/db/dao/SpotifyResolutionDaoTest.kt`
 
 - [ ] **Step 1: Create the entity** (per spec §Persistence)
@@ -210,7 +234,7 @@ interface SpotifyResolutionDao {
 }
 ```
 
-- [ ] **Step 3: Register in StashDatabase** — add `SpotifyResolutionEntity::class` to `entities`, bump `version = 32`, add `abstract fun spotifyResolutionDao(): SpotifyResolutionDao`, and add the migration + register it in `addMigrations(...)`:
+- [ ] **Step 3: Register in StashDatabase** — add `SpotifyResolutionEntity::class` to the `entities` list, bump `version = 32`, add `abstract fun spotifyResolutionDao(): SpotifyResolutionDao`, and define the migration object in the companion:
 
 ```kotlin
 val MIGRATION_31_32 = object : Migration(31, 32) {
@@ -231,6 +255,12 @@ val MIGRATION_31_32 = object : Migration(31, 32) {
     }
 }
 ```
+
+- [ ] **Step 3b: Wire DatabaseModule** — in `core/data/.../di/DatabaseModule.kt`: add `StashDatabase.MIGRATION_31_32` to the `.addMigrations(...)` chain (where the other migrations are registered, ≈line 36), and add a provider next to the other DAO providers:
+```kotlin
+@Provides fun provideSpotifyResolutionDao(db: StashDatabase): SpotifyResolutionDao = db.spotifyResolutionDao()
+```
+Without this, Hilt cannot inject the DAO and the migration won't run.
 
 - [ ] **Step 4: Write the failing DAO test** (in-memory Room, mirror `DownloadQueueDaoPartitionTest` setup)
 
@@ -359,7 +389,7 @@ git commit -m "feat(spotify): TrackQuery.trackId + resolvedSpotifyTrackUrl exten
 
 - [ ] **Step 2: AntraSource** — inject `SpotifyUriResolver`; change line ~57 from `query.spotifyTrackUrl() ?: return null` to `query.resolvedSpotifyTrackUrl(resolver) ?: return null`.
 
-- [ ] **Step 3: AntraStreamResolver** — inject `SpotifyUriResolver`; change the `TrackQuery(...)` at line ~70 to include `trackId = track.id, durationMs = track.durationMs, album = track.album`; change `.spotifyTrackUrl() ?: return null` to `.resolvedSpotifyTrackUrl(resolver) ?: return null`. Add the resolver to the `@Inject` constructor AND the `internal` test constructor.
+- [ ] **Step 3: AntraStreamResolver** — inject `SpotifyUriResolver`; change the `TrackQuery(...)` at line ~70 to include `trackId = track.id, durationMs = track.durationMs, album = track.album`; change `.spotifyTrackUrl() ?: return null` to `.resolvedSpotifyTrackUrl(resolver) ?: return null`. Add the resolver to the `@Inject` constructor AND the `internal` test constructor. **Update the existing `AntraStreamResolverTest.kt:44` call** `AntraStreamResolver(client, store, cacheDir, AntraJobGate())` to pass a `mockk(relaxed=true)` resolver (and have the resolver default to returning null so existing tests are unaffected) — otherwise that suite won't compile.
 
 - [ ] **Step 4: Write an integration test** (mockk resolver) in the existing `AntraStreamResolverTest` / a new `AntraSourceTest`:
   - `no spotifyUri + resolver returns url → antra proceeds to job` (assert `createJob` called).
@@ -409,6 +439,10 @@ git commit --allow-empty -m "test(spotify): on-device verification of YouTube->S
 ```
 
 ---
+
+## Deferred (explicit — out of scope this round)
+- **`"spotify_search"` token-bucket** (spec §Failure "search-burst safety net"): on-demand resolution drips one search per uncached track, so the bucket is a backstop, not a throttle. Defer until a real 429 pattern appears; the `TRANSIENT` cache already absorbs bursts.
+- **Wiring `SpotifyResolutionDao.deleteByTrackIds` into track-orphan cleanup:** a deleted track leaves a harmless stale `spotify_resolution` row (the table is independently clearable). The method is created for future use; wire it into the existing track-deletion path in a follow-up if orphan rows become a concern.
 
 ## Done criteria
 - All new unit tests green; existing `:data:download` / `:core:media` / `:core:data` / `:data:spotify` suites green (minus the known pre-existing InnerTube/canonicalizer failures).
