@@ -74,6 +74,15 @@ class TrackDownloadWorker @AssistedInject constructor(
          * from the Failed Downloads viewer.
          */
         const val KEY_QUEUE_ID = "queue_id"
+
+        /**
+         * Optional input-data key. When `true`, the worker drains pending
+         * downloads even while the app is in streaming (online) mode — set
+         * by user-initiated downloads such as the per-playlist Download
+         * button on the Sync tab, where the user has explicitly asked for
+         * tracks on disk regardless of the global streaming preference.
+         */
+        const val KEY_FORCE_DOWNLOAD = "force_download"
         private const val TAG = "TrackDownloadWorker"
 
         /**
@@ -117,6 +126,13 @@ class TrackDownloadWorker @AssistedInject constructor(
         }
 
         val startedAtMs = System.currentTimeMillis()
+        // User-initiated downloads (per-playlist Download button) force a real
+        // drain even in streaming mode. Scheduled/auto syncs leave this false
+        // so streaming mode stays metadata-only.
+        val forceDownload = inputData.getBoolean(KEY_FORCE_DOWNLOAD, false)
+        // Effective streaming gate: streaming mode is only honored when the
+        // caller didn't explicitly request a download.
+        val streamingGateActive = streamingPreference.current() && !forceDownload
         val syncId = inputData.getLong(DiffWorker.KEY_SYNC_ID, -1L)
         if (syncId == -1L) {
             syncStateManager.onError("TrackDownloadWorker: missing sync ID")
@@ -168,7 +184,7 @@ class TrackDownloadWorker @AssistedInject constructor(
             // resumes them. Housekeeping above (orphan sweep, stale-IP reset)
             // still ran so counters stay accurate. Fall through to finalize
             // with downloaded=0 so the chain closes cleanly.
-            if (streamingPreference.current()) {
+            if (streamingGateActive) {
                 Log.i(TAG, "Streaming mode: skipping download drain (PENDING rows preserved)")
                 syncStateManager.onDownloading(downloaded = 0, total = 0)
                 return Result.success(
@@ -193,7 +209,7 @@ class TrackDownloadWorker @AssistedInject constructor(
             // "Download to library" path still work — they insert into
             // download_queue directly and this worker processes the
             // existing pending rows further down.
-            if (!streamingPreference.current()) {
+            if (!streamingGateActive) {
                 val unqueuedTrackIds = downloadQueueDao.getUnqueuedTrackIds(connectedSources)
                 if (unqueuedTrackIds.isNotEmpty()) {
                     Log.i(TAG, "Re-queuing ${unqueuedTrackIds.size} undownloaded tracks with no active queue entry")

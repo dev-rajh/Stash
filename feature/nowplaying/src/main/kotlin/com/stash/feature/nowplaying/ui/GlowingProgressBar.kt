@@ -3,6 +3,7 @@ package com.stash.feature.nowplaying.ui
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -72,12 +73,16 @@ fun GlowingProgressBar(
     onSeek: (Long) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val safeTotalMs = totalMs.coerceAtLeast(0L)
+    val safeElapsedMs = elapsedMs.coerceIn(0L, safeTotalMs.takeIf { it > 0L } ?: Long.MAX_VALUE)
+    val safeProgress = progress.takeIf { it.isFinite() }?.coerceIn(0f, 1f) ?: 0f
+
     var isDragging by remember { mutableStateOf(false) }
-    var dragProgress by remember { mutableFloatStateOf(progress) }
+    var dragProgress by remember(safeProgress) { mutableFloatStateOf(safeProgress) }
 
     // Smoothly animate progress when not dragging to avoid jitter.
     val displayProgress by animateFloatAsState(
-        targetValue = if (isDragging) dragProgress else progress,
+        targetValue = if (isDragging) dragProgress else safeProgress,
         animationSpec = tween(durationMillis = if (isDragging) 0 else 150),
         label = "progressAnim",
     )
@@ -87,20 +92,20 @@ fun GlowingProgressBar(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(TrackHeight + TouchPadding * 2)
-                .pointerInput(totalMs) {
+                .pointerInput(safeTotalMs) {
                     detectTapGestures { offset ->
                         val fraction = (offset.x / size.width).coerceIn(0f, 1f)
-                        onSeek((fraction * totalMs).roundToLong())
+                        onSeek((fraction * safeTotalMs).roundToLong())
                     }
                 }
-                .pointerInput(totalMs) {
+                .pointerInput(safeTotalMs) {
                     detectHorizontalDragGestures(
                         onDragStart = { offset ->
                             isDragging = true
                             dragProgress = (offset.x / size.width).coerceIn(0f, 1f)
                         },
                         onDragEnd = {
-                            onSeek((dragProgress * totalMs).roundToLong())
+                            onSeek((dragProgress * safeTotalMs).roundToLong())
                             isDragging = false
                         },
                         onDragCancel = {
@@ -171,22 +176,36 @@ fun GlowingProgressBar(
         // --- Time labels ---
         Spacer(modifier = Modifier.height(2.dp))
 
+        // VLC-style: the right-hand label toggles between remaining time
+        // (the default, `-m:ss`) and the track's total length (`m:ss`) when
+        // tapped. State is local to the bar and persists across track changes.
+        var showTotalTime by remember { mutableStateOf(false) }
+
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 4.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
-            val displayMs = if (isDragging) (dragProgress * totalMs).roundToLong() else elapsedMs
+            val displayMs = if (isDragging) {
+                (dragProgress * safeTotalMs).roundToLong()
+            } else {
+                safeElapsedMs
+            }
             Text(
                 text = formatTime(displayMs),
                 style = MaterialTheme.typography.labelSmall,
                 color = Color.White.copy(alpha = 0.7f),
             )
             Text(
-                text = "-${formatTime((totalMs - displayMs).coerceAtLeast(0L))}",
+                text = if (showTotalTime) {
+                    formatTime(safeTotalMs)
+                } else {
+                    "-${formatTime((safeTotalMs - displayMs).coerceAtLeast(0L))}"
+                },
                 style = MaterialTheme.typography.labelSmall,
                 color = Color.White.copy(alpha = 0.7f),
+                modifier = Modifier.clickable { showTotalTime = !showTotalTime },
             )
         }
     }

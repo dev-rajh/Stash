@@ -38,6 +38,14 @@ data class NowPlayingUiState(
      * a small wifi indicator on the quality line.
      */
     val isStreaming: Boolean = false,
+    /** `true` when a sleep timer is currently armed. */
+    val sleepTimerActive: Boolean = false,
+    /** Milliseconds left before the sleep timer pauses playback. `0` for an end-of-track timer. */
+    val sleepTimerRemainingMs: Long = 0L,
+    /** `true` when the armed sleep timer pauses at the end of the current track. */
+    val sleepTimerEndOfTrack: Boolean = false,
+    /** Playlists (by name) the current track belongs to. Empty for streaming-only tracks. */
+    val containingPlaylists: List<PlaylistInfo> = emptyList(),
 ) {
 
     /**

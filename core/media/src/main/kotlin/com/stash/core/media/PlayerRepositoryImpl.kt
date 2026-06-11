@@ -4,6 +4,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.net.Uri
 import android.os.Bundle
+import android.os.SystemClock
 import android.util.Log
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
@@ -24,6 +25,7 @@ import com.stash.core.media.streaming.StreamUrl
 import com.stash.core.media.streaming.StreamUrlCache
 import com.stash.core.model.PlayerState
 import com.stash.core.model.RepeatMode
+import com.stash.core.model.SleepTimerState
 import com.stash.core.model.Track
 import com.stash.core.media.service.StashPlaybackService.Companion.EXTRA_STREAM_BIT_DEPTH
 import com.stash.core.media.service.StashPlaybackService.Companion.EXTRA_STREAM_BITRATE
@@ -54,9 +56,11 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.guava.await
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -184,6 +188,12 @@ class PlayerRepositoryImpl @Inject constructor(
 
     private val _playerState = MutableStateFlow(PlayerState())
     override val playerState: StateFlow<PlayerState> = _playerState.asStateFlow()
+
+    private val _sleepTimer = MutableStateFlow(SleepTimerState())
+    override val sleepTimer: StateFlow<SleepTimerState> = _sleepTimer.asStateFlow()
+
+    /** Active sleep-timer coroutine; cancelled when re-armed or cancelled. */
+    private var sleepTimerJob: Job? = null
 
     /**
      * Emits the playback position every 250 ms while the player is active.
@@ -319,6 +329,52 @@ class PlayerRepositoryImpl @Inject constructor(
 
     override suspend fun pause() {
         ensureController()?.pause()
+    }
+
+    override fun startSleepTimer(durationMs: Long) {
+        sleepTimerJob?.cancel()
+        if (durationMs <= 0L) {
+            _sleepTimer.value = SleepTimerState()
+            return
+        }
+        sleepTimerJob = scope.launch {
+            val deadline = SystemClock.elapsedRealtime() + durationMs
+            _sleepTimer.value = SleepTimerState(isActive = true, remainingMs = durationMs)
+            while (true) {
+                val remaining = deadline - SystemClock.elapsedRealtime()
+                if (remaining <= 0L) break
+                _sleepTimer.value = SleepTimerState(isActive = true, remainingMs = remaining)
+                delay(SLEEP_TIMER_TICK_MS)
+            }
+            ensureController()?.pause()
+            _sleepTimer.value = SleepTimerState()
+        }
+    }
+
+    override fun startSleepTimerEndOfTrack() {
+        sleepTimerJob?.cancel()
+        _sleepTimer.value = SleepTimerState(isActive = true, endOfTrack = true)
+        sleepTimerJob = scope.launch {
+            // Pause as soon as the player advances away from the track that was
+            // playing when the timer was armed — i.e. let the current song
+            // finish, then stop. Keyed on (trackId, index) so a natural
+            // auto-advance, a repeat-all wrap, or a manual skip all trip it.
+            _playerState
+                .map { it.currentTrack?.id to it.currentIndex }
+                .distinctUntilChanged()
+                .drop(1)
+                .take(1)
+                .collect {
+                    ensureController()?.pause()
+                    _sleepTimer.value = SleepTimerState()
+                }
+        }
+    }
+
+    override fun cancelSleepTimer() {
+        sleepTimerJob?.cancel()
+        sleepTimerJob = null
+        _sleepTimer.value = SleepTimerState()
     }
 
     override suspend fun skipNext() {
@@ -1656,6 +1712,9 @@ class PlayerRepositoryImpl @Inject constructor(
     companion object {
         private const val TAG = "StashPlayer"
         private const val POSITION_UPDATE_INTERVAL_MS = 250L
+
+        /** Tick interval for the sleep-timer countdown. */
+        private const val SLEEP_TIMER_TICK_MS = 500L
 
         /** Auto-grow fires once the remaining queue tail drops below this many tracks. */
         private const val LIBRARY_SHUFFLE_GROW_THRESHOLD = 5

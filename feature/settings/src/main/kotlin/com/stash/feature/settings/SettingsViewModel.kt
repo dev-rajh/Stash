@@ -358,8 +358,27 @@ class SettingsViewModel @Inject constructor(
     fun setExternalStorageUri(uri: Uri?) {
         viewModelScope.launch {
             storagePreference.setExternalTreeUri(uri)
+            if (uri != null) {
+                // B-06: user may have just re-pointed Stash at an existing
+                // external library after reinstall/data-clear. Re-scan now
+                // so already-downloaded files are restored immediately.
+                musicRepository.rescanExternalDownloads()
+            }
         }
     }
+
+    /**
+     * Manually re-scan the configured external download folder and re-link
+     * any files already on disk to their (undownloaded) library rows, so
+     * songs downloaded before a reinstall/data-clear aren't fetched again.
+     *
+     * Runs automatically on startup too, but the manual entry point lets the
+     * user trigger it AFTER a fresh re-sync has repopulated the track rows
+     * (the startup pass runs before that and finds nothing to match).
+     *
+     * Returns the number of tracks restored.
+     */
+    suspend fun scanExistingSongs(): Int = musicRepository.rescanExternalDownloads()
 
     /**
      * Counts how many downloaded tracks still live in internal storage —

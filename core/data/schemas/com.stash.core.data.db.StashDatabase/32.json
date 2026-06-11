@@ -2,11 +2,11 @@
   "formatVersion": 1,
   "database": {
     "version": 32,
-    "identityHash": "76d32b1b20c0bb427effe12e8d52734f",
+    "identityHash": "d8481d915ca21268608df21220b393b0",
     "entities": [
       {
         "tableName": "tracks",
-        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `title` TEXT NOT NULL, `artist` TEXT NOT NULL, `album` TEXT NOT NULL, `album_artist` TEXT NOT NULL DEFAULT '', `duration_ms` INTEGER NOT NULL, `file_path` TEXT, `file_format` TEXT NOT NULL, `quality_kbps` INTEGER NOT NULL, `file_size_bytes` INTEGER NOT NULL, `source` TEXT NOT NULL, `spotify_uri` TEXT, `youtube_id` TEXT, `album_art_url` TEXT, `album_art_path` TEXT, `date_added` INTEGER NOT NULL, `last_played` INTEGER, `play_count` INTEGER NOT NULL, `is_downloaded` INTEGER NOT NULL, `canonical_title` TEXT NOT NULL, `canonical_artist` TEXT NOT NULL, `match_confidence` REAL NOT NULL, `match_dismissed` INTEGER NOT NULL, `match_flagged` INTEGER NOT NULL DEFAULT 0, `isrc` TEXT, `explicit` INTEGER, `music_video_type` TEXT, `yt_canonical_video_id` TEXT, `bits_per_sample` INTEGER, `sample_rate_hz` INTEGER, `spotify_saved_at` INTEGER, `ytmusic_saved_at` INTEGER, `stash_liked_at` INTEGER, `mbid` TEXT, `lastfm_user_playcount` INTEGER, `lastfm_listeners` INTEGER, `lastfm_user_loved` INTEGER NOT NULL DEFAULT 0, `loudness_lufs` REAL, `true_peak_dbfs` REAL, `loudness_measured_at` INTEGER, `is_streamable` INTEGER NOT NULL DEFAULT 0, `is_streamable_checked_at` INTEGER, `metadata_embedded_at` INTEGER, `lyrics_fetched_at` INTEGER)",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `title` TEXT NOT NULL, `artist` TEXT NOT NULL, `album` TEXT NOT NULL, `album_artist` TEXT NOT NULL DEFAULT '', `duration_ms` INTEGER NOT NULL, `file_path` TEXT, `file_format` TEXT NOT NULL, `quality_kbps` INTEGER NOT NULL, `file_size_bytes` INTEGER NOT NULL, `source` TEXT NOT NULL, `spotify_uri` TEXT, `youtube_id` TEXT, `pinned_youtube_video_id` TEXT, `album_art_url` TEXT, `album_art_path` TEXT, `date_added` INTEGER NOT NULL, `last_played` INTEGER, `play_count` INTEGER NOT NULL, `is_downloaded` INTEGER NOT NULL, `canonical_title` TEXT NOT NULL, `canonical_artist` TEXT NOT NULL, `match_confidence` REAL NOT NULL, `match_dismissed` INTEGER NOT NULL, `match_flagged` INTEGER NOT NULL DEFAULT 0, `isrc` TEXT, `explicit` INTEGER, `music_video_type` TEXT, `yt_canonical_video_id` TEXT, `bits_per_sample` INTEGER, `sample_rate_hz` INTEGER, `spotify_saved_at` INTEGER, `ytmusic_saved_at` INTEGER, `stash_liked_at` INTEGER, `mbid` TEXT, `lastfm_user_playcount` INTEGER, `lastfm_listeners` INTEGER, `lastfm_user_loved` INTEGER NOT NULL DEFAULT 0, `loudness_lufs` REAL, `true_peak_dbfs` REAL, `loudness_measured_at` INTEGER, `is_streamable` INTEGER NOT NULL DEFAULT 0, `is_streamable_checked_at` INTEGER, `metadata_embedded_at` INTEGER, `lyrics_fetched_at` INTEGER)",
         "fields": [
           {
             "fieldPath": "id",
@@ -82,6 +82,11 @@
           {
             "fieldPath": "youtubeId",
             "columnName": "youtube_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "pinnedYoutubeVideoId",
+            "columnName": "pinned_youtube_video_id",
             "affinity": "TEXT"
           },
           {
@@ -337,7 +342,7 @@
       },
       {
         "tableName": "playlists",
-        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `name` TEXT NOT NULL, `source` TEXT NOT NULL, `source_id` TEXT NOT NULL, `type` TEXT NOT NULL, `mix_number` INTEGER, `last_synced` INTEGER, `track_count` INTEGER NOT NULL, `is_active` INTEGER NOT NULL, `art_url` TEXT, `snapshot_id` TEXT, `sync_enabled` INTEGER NOT NULL DEFAULT 1, `date_added` INTEGER NOT NULL DEFAULT 0)",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `name` TEXT NOT NULL, `source` TEXT NOT NULL, `source_id` TEXT NOT NULL, `type` TEXT NOT NULL, `mix_number` INTEGER, `last_synced` INTEGER, `track_count` INTEGER NOT NULL, `is_active` INTEGER NOT NULL, `art_url` TEXT, `snapshot_id` TEXT, `sync_enabled` INTEGER NOT NULL DEFAULT 1, `date_added` INTEGER NOT NULL DEFAULT 0, `owner_id` TEXT)",
         "fields": [
           {
             "fieldPath": "id",
@@ -414,6 +419,11 @@
             "affinity": "INTEGER",
             "notNull": true,
             "defaultValue": "0"
+          },
+          {
+            "fieldPath": "ownerId",
+            "columnName": "owner_id",
+            "affinity": "TEXT"
           }
         ],
         "primaryKey": {
@@ -846,7 +856,7 @@
       },
       {
         "tableName": "remote_playlist_snapshots",
-        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `sync_id` INTEGER NOT NULL, `source` TEXT NOT NULL, `source_playlist_id` TEXT NOT NULL, `playlist_name` TEXT NOT NULL, `playlist_type` TEXT NOT NULL, `mix_number` INTEGER, `snapshot_id` TEXT, `track_count` INTEGER NOT NULL, `art_url` TEXT, `fetched_at` INTEGER NOT NULL, `partial` INTEGER NOT NULL, `expected_count` INTEGER)",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `sync_id` INTEGER NOT NULL, `source` TEXT NOT NULL, `source_playlist_id` TEXT NOT NULL, `playlist_name` TEXT NOT NULL, `playlist_type` TEXT NOT NULL, `mix_number` INTEGER, `snapshot_id` TEXT, `track_count` INTEGER NOT NULL, `art_url` TEXT, `fetched_at` INTEGER NOT NULL, `partial` INTEGER NOT NULL, `expected_count` INTEGER, `owner_id` TEXT)",
         "fields": [
           {
             "fieldPath": "id",
@@ -921,6 +931,11 @@
             "fieldPath": "expectedCount",
             "columnName": "expected_count",
             "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "ownerId",
+            "columnName": "owner_id",
+            "affinity": "TEXT"
           }
         ],
         "primaryKey": {
@@ -1778,73 +1793,11 @@
             "cache_key"
           ]
         }
-      },
-      {
-        "tableName": "spotify_resolution",
-        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`trackId` INTEGER NOT NULL, `status` TEXT NOT NULL, `spotifyUri` TEXT, `matchedIsrc` TEXT, `titleSim` REAL, `durDeltaSec` INTEGER, `resolvedAtMs` INTEGER NOT NULL, `expiresAtMs` INTEGER NOT NULL, `attempts` INTEGER NOT NULL, PRIMARY KEY(`trackId`))",
-        "fields": [
-          {
-            "fieldPath": "trackId",
-            "columnName": "trackId",
-            "affinity": "INTEGER",
-            "notNull": true
-          },
-          {
-            "fieldPath": "status",
-            "columnName": "status",
-            "affinity": "TEXT",
-            "notNull": true
-          },
-          {
-            "fieldPath": "spotifyUri",
-            "columnName": "spotifyUri",
-            "affinity": "TEXT"
-          },
-          {
-            "fieldPath": "matchedIsrc",
-            "columnName": "matchedIsrc",
-            "affinity": "TEXT"
-          },
-          {
-            "fieldPath": "titleSim",
-            "columnName": "titleSim",
-            "affinity": "REAL"
-          },
-          {
-            "fieldPath": "durDeltaSec",
-            "columnName": "durDeltaSec",
-            "affinity": "INTEGER"
-          },
-          {
-            "fieldPath": "resolvedAtMs",
-            "columnName": "resolvedAtMs",
-            "affinity": "INTEGER",
-            "notNull": true
-          },
-          {
-            "fieldPath": "expiresAtMs",
-            "columnName": "expiresAtMs",
-            "affinity": "INTEGER",
-            "notNull": true
-          },
-          {
-            "fieldPath": "attempts",
-            "columnName": "attempts",
-            "affinity": "INTEGER",
-            "notNull": true
-          }
-        ],
-        "primaryKey": {
-          "autoGenerate": false,
-          "columnNames": [
-            "trackId"
-          ]
-        }
       }
     ],
     "setupQueries": [
       "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
-      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '76d32b1b20c0bb427effe12e8d52734f')"
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'd8481d915ca21268608df21220b393b0')"
     ]
   }
 }
