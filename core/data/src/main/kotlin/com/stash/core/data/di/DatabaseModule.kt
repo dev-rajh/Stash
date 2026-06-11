@@ -131,4 +131,8 @@ object DatabaseModule {
     @Provides
     fun provideLastFmCacheDao(db: StashDatabase): com.stash.core.data.db.dao.LastFmCacheDao =
         db.lastFmCacheDao()
+
+    @Provides
+    fun provideSpotifyResolutionDao(db: StashDatabase): com.stash.core.data.db.dao.SpotifyResolutionDao =
+        db.spotifyResolutionDao()
 }
