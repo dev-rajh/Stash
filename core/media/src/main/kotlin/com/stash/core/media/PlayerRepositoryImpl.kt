@@ -23,6 +23,7 @@ import com.stash.core.media.streaming.ConnectivityMonitor
 import com.stash.core.media.streaming.StreamSourceRegistry
 import com.stash.core.media.streaming.StreamUrl
 import com.stash.core.media.streaming.StreamUrlCache
+import com.stash.core.media.streaming.YouTubeStreamResolver
 import com.stash.core.model.PlayerState
 import com.stash.core.model.RepeatMode
 import com.stash.core.model.Track
@@ -1268,8 +1269,25 @@ class PlayerRepositoryImpl @Inject constructor(
             allowYouTube = allowYouTube,
             allowYtDlp = allowYtDlp,
             allowAntra = allowAntra,
-        )?.also {
-            streamUrlCache.put(track.id, it)
+        )?.also { resolved ->
+            // Don't poison the shared cache with a PROVISIONAL lossy fallback.
+            // The queue-wide background fill resolves with allowAntra = false
+            // (one antra job is 60-120s + a quota single, too costly to spend
+            // across a whole queue). During a kennyy/squid outage that call
+            // falls through to a lossy YouTube URL. Caching it would make the
+            // next-up prefetch and a later foreground tap — both of which DO
+            // allow antra — defer to the cached youtube entry (prefetch's
+            // fresh-cache guard / the cache read above) and never give antra
+            // its chance, so the user hears AAC when FLAC was available. When
+            // antra WAS allowed and we still got youtube, the track is
+            // genuinely lossless-less: cache it so we don't re-run a 60-120s
+            // antra job on every play. Lossless results (kennyy/squid/antra)
+            // always cache — best available regardless of path.
+            val provisionalLossyFallback =
+                !allowAntra && resolved.origin == YouTubeStreamResolver.ORIGIN
+            if (!provisionalLossyFallback) {
+                streamUrlCache.put(track.id, resolved)
+            }
         } ?: return StreamRoutingResult.NotAvailable
 
         // YouTube *video* thumbnails (i.ytimg.com/vi/...) leak into
