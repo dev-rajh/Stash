@@ -375,6 +375,14 @@ interface TrackDao {
     @Query("SELECT * FROM tracks WHERE id = :trackId LIMIT 1")
     suspend fun getById(trackId: Long): TrackEntity?
 
+    /**
+     * Batch lookup by primary key. SQLite's `IN` does not preserve the
+     * order of [trackIds]; callers that need the original order (e.g.
+     * restoring a persisted playback queue) must re-sort the result.
+     */
+    @Query("SELECT * FROM tracks WHERE id IN (:trackIds)")
+    suspend fun getByIds(trackIds: List<Long>): List<TrackEntity>
+
     // ── Download tracking ────────────────────────────────────────────────
 
     /**
