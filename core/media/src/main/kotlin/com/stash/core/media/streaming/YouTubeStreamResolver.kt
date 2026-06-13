@@ -245,8 +245,16 @@ class YouTubeStreamResolver @Inject constructor(
         return secs * 1000L
     }
 
-    private companion object {
+    companion object {
         private const val TAG = "YouTubeStreamResolver"
+
+        /**
+         * `StreamUrl.origin` stamp for YouTube-extracted (lossy) results.
+         * Public so the player can recognise a lossy fallback — e.g. to
+         * avoid caching a provisional YouTube URL produced by an
+         * antra-disallowed speculative resolve. See
+         * [com.stash.core.media.PlayerRepositoryImpl.buildMediaItemForTrack].
+         */
         const val ORIGIN = "youtube"
 
         /**

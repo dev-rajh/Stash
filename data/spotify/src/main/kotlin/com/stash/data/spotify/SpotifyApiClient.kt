@@ -201,17 +201,29 @@ class SpotifyApiClient @Inject constructor(
     }
 
     /**
-     * Fetches the current user's playlists via the GraphQL `libraryV3` operation.
+     * Fetches one page of the user's library via the GraphQL `libraryV3`
+     * operation — playlists AND folder URIs (see [SpotifyLibraryPage]).
      *
      * Uses sp_dc-derived access token + client token (Prong 2).
      * The previous Web API endpoint (/v1/users/{id}/playlists) was removed
      * by Spotify in February 2026.
+     *
+     * @param folderUri When non-null, lists the CONTENTS of that folder
+     *   instead of the library root — the same persisted query the web
+     *   client uses when a sidebar folder is opened. Required because
+     *   libraryV3 is hierarchical: folder-filed playlists never appear at
+     *   the root (issues #48/#26/#80/#136).
      */
     suspend fun getUserPlaylistsPage(
         limit: Int = DEFAULT_LIMIT,
         offset: Int = 0,
-    ): LibraryPlaylistsPage = withContext(Dispatchers.IO) {
-        Log.d(TAG, "getUserPlaylists: limit=$limit, offset=$offset (via GraphQL libraryV3)")
+        folderUri: String? = null,
+    ): SpotifyLibraryPage = withContext(Dispatchers.IO) {
+        Log.d(
+            TAG,
+            "getUserPlaylists: limit=$limit, offset=$offset, " +
+                "folderUri=${folderUri ?: "<root>"} (via GraphQL libraryV3)",
+        )
 
         try {
             val variables = buildJsonObject {
@@ -221,6 +233,7 @@ class SpotifyApiClient @Inject constructor(
                 putJsonArray("features") { add("LIKED_SONGS"); add("YOUR_EPISODES") }
                 put("limit", limit)
                 put("offset", offset)
+                if (folderUri != null) put("folderUri", folderUri)
             }.toString()
 
             val responseJson = executeGraphQL(
@@ -230,19 +243,20 @@ class SpotifyApiClient @Inject constructor(
             )
 
             if (responseJson != null) {
-                val page = parseLibraryResponse(responseJson)
+                val page = parseLibraryPage(responseJson)
                 Log.d(
                     TAG,
-                    "getUserPlaylists: parsed ${page.playlists.size} playlists from ${page.rawItemCount} raw library item(s)",
+                    "getUserPlaylists: parsed ${page.playlists.size} playlists, " +
+                        "${page.folderUris.size} folders from libraryV3",
                 )
                 page
             } else {
                 Log.w(TAG, "getUserPlaylists: GraphQL returned null")
-                LibraryPlaylistsPage(emptyList(), 0)
+                SpotifyLibraryPage.EMPTY
             }
         } catch (e: Exception) {
             Log.e(TAG, "getUserPlaylists: GraphQL libraryV3 failed", e)
-            LibraryPlaylistsPage(emptyList(), 0)
+            SpotifyLibraryPage.EMPTY
         }
     }
 
