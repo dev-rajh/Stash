@@ -14,7 +14,8 @@
 
 ## Prerequisite & scope
 
-- **Land like-mirroring PR #187 (`feat/like-mirroring`) first.** It adds `LikeMirrorSection` / `LikeMirrorWarningDialog` / `BetaPill` and `mirror_likes_*` prefs. Task C3 places `LikeMirrorSection` into Accounts & Sync. **If #187 is not merged when this executes, skip the "Sync your likes" block in Task C3** (everything else is independent) and add it when #187 lands.
+- **Land like-mirroring PR #187 (`feat/like-mirroring`) first — recommended hard prerequisite for the WHOLE plan.** #187 provides two things this plan depends on: (1) the **public** `components/BetaPill.kt` (extracted from the currently-`private` `BetaPill` inside `SpotifyAutoSaveSection.kt:123`), used by `SettingsSectionLabel` in **Phase A**; and (2) `LikeMirrorSection` + `mirror_likes_*` prefs, used by **Task C3**.
+- **If you must start before #187 merges:** Task A1 **also extracts `BetaPill` to a public `components/BetaPill.kt`** (it will be a no-op merge-dup with #187 — reconcile on merge), AND Task C3 **skips the "Sync your likes" block**. Everything else is independent of #187. Do not start Phase A assuming the private `BetaPill` is reachable — it is not.
 - **Phase 1 only.** The `SettingsSearchField` renders but is non-functional (placeholder, see Task B2). Real cross-settings search is a separate Phase-2 plan — not in scope here.
 - **Behavior-preserving.** Do not change any control's logic or its `SettingsViewModel` callback. This is relocation + restyle. Do NOT touch the dead `heart_default_*` plumbing.
 
@@ -62,12 +63,14 @@ This module is **presentational Compose with no unit-test harness** (`SettingsVi
 
 > Each component is a stateless `@Composable` with a `@Preview`. Verify with `:feature:settings:compileDebugKotlin`. Visual correctness is confirmed in Task D2.
 
-### Task A1: Divider token + section label + group card
+### Task A1: Divider token + section label + group card + shared rows
 
 **Files:**
 - Create: `feature/settings/.../components/SettingsTheme.kt`
 - Create: `feature/settings/.../components/SettingsSectionLabel.kt`
 - Create: `feature/settings/.../components/SettingsGroupCard.kt`
+- Create: `feature/settings/.../components/SettingsValueRow.kt` (the relocated `StorageRow` — needed by both Library & Storage and About, so it lives in the kit, not a screen)
+- **Prerequisite check:** confirm `components/BetaPill.kt` exists as a public composable (from #187). If not, create it now by moving the `private fun BetaPill()` out of `SpotifyAutoSaveSection.kt:123` into a public `components/BetaPill.kt` (see Prerequisite & scope).
 
 - [ ] **Step 1: `SettingsTheme.kt`** — shared dims + divider:
 
@@ -156,10 +159,11 @@ fun SettingsGroupCard(
 }
 ```
 
-> Note: `GlassCard` already applies 16dp padding; rows should manage their own internal padding and stretch full width. If the nested padding looks wrong in Task D2, switch `SettingsGroupCard` to a bespoke `Surface` (copy `GlassCard`'s surface params) with `padding(0.dp)`. Decide during D2.
+> **Resolve the padding model now (not in D2).** `GlassCard` already applies 16dp padding, so a `SettingsGroupCard` whose rows ALSO pad will look doubly inset and the full-width dividers won't reach the card edge. Decide here, since all six Phase-C screens build on this primitive: make `SettingsGroupCard` a **bespoke `Surface`** copying `GlassCard`'s params (`color = extendedColors.glassBackground`, `border = BorderStroke(1.dp, extendedColors.glassBorder)`, `shape = shapes.large`) but with **zero outer padding**, so rows own their padding and dividers span edge-to-edge. Keep `GlassCard` for non-grouped one-off cards (e.g. Support banner is its own component).
 
-- [ ] **Step 4: Compile.** Run: `.\gradlew.bat :feature:settings:compileDebugKotlin` — expect BUILD SUCCESSFUL.
-- [ ] **Step 5: Commit** — `feat(settings): kit — divider token, section label, group card`
+- [ ] **Step 4: `SettingsValueRow.kt`** — relocate the existing private `StorageRow` (label left / value right, both `bodyMedium`) from `SettingsScreen.kt` into a public kit component `SettingsValueRow(label: String, value: String)`. Both Library & Storage (Task C4) and About (Task C6) use it.
+- [ ] **Step 5: Compile.** Run: `.\gradlew.bat :feature:settings:compileDebugKotlin` — expect BUILD SUCCESSFUL.
+- [ ] **Step 6: Commit** — `feat(settings): kit — divider token, section label, group card, value row`
 
 ### Task A2: Toggle row + nav row
 
@@ -210,9 +214,9 @@ Use `androidx.compose.material.icons.Icons` line-style vectors (`Icons.Rounded.*
 **Files:** Create `SettingsStatusRow.kt`, `SettingsAccountCard.kt`.
 
 - [ ] **Step 1: `SettingsStatusRow.kt`** — `name`, `status` ("active"), `dotColor` (default `cyanLight`). 7dp dot with a soft glow (`Modifier.shadow` or a `Box` blur substitute), name `bodyMedium onSurfaceVariant`, status `bodySmall textTertiary` end-aligned.
-- [ ] **Step 2: `SettingsAccountCard.kt`** — params: `serviceName`, `accentColor`, `authState: AuthState`, `onConnect`, `onDisconnect`, optional `extraContent: @Composable () -> Unit`. Header row: 30dp rounded badge tinted `accentColor.copy(alpha=.15f)` with an `accentColor` dot, name (`titleMedium`), connection line (`onSurfaceVariant`; green "Connected as …" when `AuthState.Connected`), trailing ghost button ("Connect"/"Disconnect"). If `extraContent != null`, render it below a hairline divider. This mirrors today's `AccountConnectionCard` API so the three existing account sections slot in unchanged.
+- [ ] **Step 2: `SettingsAccountCard.kt`** — params: `serviceName`, `accentColor`, `authState: AuthState`, `onConnect`, `onDisconnect`, optional `extraContent: (@Composable ColumnScope.() -> Unit)? = null` (match `AccountConnectionCard.kt:66` exactly so the existing `extraContent = { SpotifyAutoSaveSection(...) }` call sites drop in unchanged). Header row: 30dp rounded badge tinted `accentColor.copy(alpha=.15f)` with an `accentColor` dot, name (`titleMedium`), connection line (`onSurfaceVariant`; green "Connected as …" when `AuthState.Connected`), trailing ghost button ("Connect"/"Disconnect"). If `extraContent != null`, render it below a `HorizontalDivider(color = SettingsDivider)`.
 
-> Check `AccountConnectionCard.kt`'s current signature first and keep `SettingsAccountCard` API-compatible (same `extraContent` slot), so Task C3 is a drop-in.
+> **Decision:** rather than build a new `SettingsAccountCard`, the lower-risk path is to **keep using the existing `AccountConnectionCard`** (it already has the exact API + self-gating) and only restyle it if D2 shows it off-brand. If you keep `AccountConnectionCard`, skip building `SettingsAccountCard` and note it in the commit. Only Spotify + YouTube Music use it; **Last.fm does NOT** (see Task C3).
 
 - [ ] **Step 3: Compile + commit** — `feat(settings): kit — status row, account card`
 
@@ -304,7 +308,7 @@ class SettingsHubSummariesTest {
 
 **Files:** Create `SettingsHubScreen.kt`.
 
-- [ ] **Step 1: Implement** `SettingsHubScreen(viewModel: SettingsViewModel = hiltViewModel(), onOpenPlayback, onOpenAudioQuality, onOpenAccounts, onOpenLibraryStorage, onOpenAppearance, onOpenAbout, onDonate, onStar)`. Collect `uiState`; compute `summaries = settingsHubSummaries(uiState, BuildConfig.VERSION_NAME)`. Layout: title "Settings" → `SupportBanner(onDonate,onStar)` → `SettingsSearchField()` → `SettingsGroupCard(rows = [six SettingsNavRow(... summary, leadingIcon, onClick=onOpen…)])`. Reuse the screen's existing scroll container/background.
+- [ ] **Step 1: Implement** `SettingsHubScreen(viewModel: SettingsViewModel = hiltViewModel(), onOpenPlayback, onOpenAudioQuality, onOpenAccounts, onOpenLibraryStorage, onOpenAppearance, onOpenAbout, onDonate, onStar)`. Collect `uiState`. **Derive the version name the same way the current screen does — `feature/settings` has no `BuildConfig`** (buildConfig is not enabled). Copy the lookup at `SettingsScreen.kt:1607` (`LocalContext.current.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "…fallback…"`) and pass it in: `summaries = settingsHubSummaries(uiState, versionName)`. Layout: title "Settings" → `SupportBanner(onDonate,onStar)` → `SettingsSearchField()` → `SettingsGroupCard(rows = [six SettingsNavRow(... summary, leadingIcon, onClick=onOpen…)])`. Reuse the screen's existing scroll container/background.
 - [ ] **Step 2: Compile.** `.\gradlew.bat :feature:settings:compileDebugKotlin`
 - [ ] **Step 3: Commit** — `feat(settings): SettingsHubScreen`
 
@@ -332,28 +336,32 @@ class SettingsHubSummariesTest {
 
 **Files:** Create `SettingsAccountsScreen.kt`.
 
-- [ ] **Step 1:** `SettingsSectionLabel("Connections")` → the three existing self-gating sections, relocated intact inside `SettingsAccountCard`s (or keep `AccountConnectionCard` if `SettingsAccountCard` ended up API-identical): Spotify (`extraContent = SpotifyAutoSaveSection(...)`), YouTube Music (`extraContent = YouTubeHistorySyncSection(...)`), Last.fm (`LastFmSection(...)`). Then — **only if PR #187 merged** — `SettingsSectionLabel("Sync your likes", beta = true)` → `LikeMirrorSection(...)` with its existing uiState + callbacks and the warning-dialog hookup. Keep every callback as-is.
+- [ ] **Step 1:** `SettingsSectionLabel("Connections")` → relocate the three account sections intact, **matching how they're rendered today** (`SettingsScreen.kt:554-645`):
+  - **Spotify** — `AccountConnectionCard(serviceName="Spotify", …, extraContent = { SpotifyAutoSaveSection(...) })`.
+  - **YouTube Music** — `AccountConnectionCard(serviceName="YouTube Music", …, extraContent = { YouTubeHistorySyncSection(...) })`.
+  - **Last.fm** — NOT an account card. It's a bare `GlassCard { LastFmSection(...) }` with its own connect/finish/disconnect/drain UX and the inline `scrobbleDrainResult` text. Move it verbatim, GlassCard and all.
+  Then — **only if PR #187 merged** — `SettingsSectionLabel("Sync your likes", beta = true)` → `LikeMirrorSection(...)` with its existing uiState + callbacks and the warning-dialog hookup. Keep every callback as-is.
 - [ ] **Step 2: Compile + commit** — `feat(settings): Accounts & Sync category screen`
 
 ### Task C4: Library & Storage screen
 
 **Files:** Create `SettingsLibraryStorageScreen.kt`. Takes `onNavigateToLibraryHealth`, `onBack`.
 
-- [ ] **Step 1:** Relocate: Stash Mixes (Beta) toggle; Downloads network-rule group; Storage meter (`StorageRow`s) + download location + Export/Import backup buttons + Move-library; and `SettingsNavRow("Library Health", onClick = onNavigateToLibraryHealth)`. Keep the import-confirmation `AlertDialog` + its state with this screen (move it here). Preserve all callbacks.
+- [ ] **Step 1:** Relocate: Stash Mixes (Beta) toggle; Downloads network-rule group; Storage meter (`SettingsValueRow`s) + download location + Export/Import backup buttons + Move-library; and `SettingsNavRow("Library Health", onClick = onNavigateToLibraryHealth)`. Keep the import-confirmation `AlertDialog` + its state with this screen (move it here). Preserve all callbacks.
 - [ ] **Step 2: Compile + commit** — `feat(settings): Library & Storage category screen`
 
 ### Task C5: Appearance screen (T1 theme preview cards)
 
 **Files:** Create `SettingsAppearanceScreen.kt`.
 
-- [ ] **Step 1: Implement the T1 picker.** `SettingsSectionLabel("Theme")` → a `Row` of three tappable theme thumbnails (Dark / Light / Follow system). Each thumbnail is a small rounded preview rendered in that palette: Dark = `#06060C` + `onSurface`/`textTertiary` bars + `primary` progress; Light = real light tokens (`StashBackgroundLight #F6F3FF`, `StashTextPrimaryLight`, `StashTextSecondaryLight`) ; Follow-system = diagonal split of the two. Selected thumb gets a 2dp `primary` ring + a `primary` check badge. Tapping calls the existing theme callback (`onThemeModeChanged` / equivalent — find it in the current Appearance block) with the matching `ThemeMode`. Below: a one-line hint for Follow system.
+- [ ] **Step 1: Implement the T1 picker.** `SettingsSectionLabel("Theme")` → a `Row` of three tappable theme thumbnails (Dark / Light / Follow system). Each thumbnail is a small rounded preview rendered in that palette: Dark = `#06060C` + `onSurface`/`textTertiary` bars + `primary` progress; Light = real light tokens (`StashBackgroundLight #F6F3FF`, `StashTextPrimaryLight`, `StashTextSecondaryLight`) ; Follow-system = diagonal split of the two. Selected thumb gets a 2dp `primary` ring + a `primary` check badge. Tapping calls the existing theme callback — `onThemeChanged: (ThemeMode) -> Unit` (`SettingsScreen.kt:295`, invoked at `:1092` as `onClick = { onThemeChanged(mode) }`) — with the matching `ThemeMode`. Below: a one-line hint for Follow system.
 - [ ] **Step 2: Compile + commit** — `feat(settings): Appearance screen — theme preview cards`
 
 ### Task C6: About & Help screen
 
 **Files:** Create `SettingsAboutScreen.kt`. Takes `onNavigateToDiagnosticsPreview`, `onBack`.
 
-- [ ] **Step 1:** Relocate Diagnostics (Share diagnostics, Share latest crash report — with their enabled/subtitle logic) + About (Version, License `StorageRow`s; Check for updates). Wire the diagnostics-preview nav if present. Preserve callbacks.
+- [ ] **Step 1:** Relocate Diagnostics (Share diagnostics → `onNavigateToDiagnosticsPreview`, Share latest crash report → `onShareLatestCrashReport` — with their enabled/subtitle logic) + About (Version, License `SettingsValueRow`s; Check for updates). Preserve callbacks.
 - [ ] **Step 2: Compile + commit** — `feat(settings): About & Help category screen`
 
 ---
@@ -364,7 +372,7 @@ class SettingsHubSummariesTest {
 
 **Files:** Modify `SettingsScreen.kt` (delete), `StashNavHost.kt`.
 
-- [ ] **Step 1:** Remove the old stateless `SettingsScreen` composable + its now-unused private helpers that moved into screens (`SectionHeader`, `StorageRow` → move to a shared `components/` file if still used by multiple screens; keep them, don't duplicate). Delete `SettingsScreen.kt` if nothing remains, or reduce it to shared helpers.
+- [ ] **Step 1:** Remove the old stateless `SettingsScreen` composable. Its private `SectionHeader` is fully superseded by `SettingsSectionLabel` — **delete it**. Its private `StorageRow` was already relocated to the kit as `SettingsValueRow` (Task A1) — **delete the original**; update any remaining reference to use `SettingsValueRow`. Delete `SettingsScreen.kt` entirely once empty (the hub + category screens replace it).
 - [ ] **Step 2:** Ensure `composable<SettingsRoute>` hosts `SettingsHubScreen` and all six category composables are present (Task B1).
 - [ ] **Step 3: Compile the whole app.** `.\gradlew.bat :app:compileDebugKotlin` — expect BUILD SUCCESSFUL. Fix any dangling references (removed params, moved helpers).
 - [ ] **Step 4: Run the settings unit test** (the one that exists): `.\gradlew.bat :feature:settings:testDebugUnitTest --tests "com.stash.feature.settings.SettingsHubSummariesTest"` — green.
