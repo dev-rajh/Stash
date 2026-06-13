@@ -123,8 +123,12 @@ class LibraryViewModel @Inject constructor(
         val query = controls.searchQuery.trim().lowercase()
 
         // -- Map DAO projections to UI models --
-        val artists = allArtists.map { ArtistInfo(it.artist, it.trackCount, it.totalDurationMs, it.artUrl) }
-        val albums = allAlbums.map { AlbumInfo(it.album, it.artist, it.trackCount, it.artPath, it.artUrl) }
+        val artists = allArtists.map {
+            ArtistInfo(it.artist, it.trackCount, it.totalDurationMs, it.artUrl, it.latestAddedAt)
+        }
+        val albums = allAlbums.map {
+            AlbumInfo(it.album, it.artist, it.trackCount, it.artPath, it.artUrl, it.latestAddedAt)
+        }
 
         // -- Apply source filter --
         val sourceFiltered = when (controls.sourceFilter) {
@@ -172,14 +176,13 @@ class LibraryViewModel @Inject constructor(
             // silent no-op.
             SortOrder.MOST_PLAYED -> filteredPlaylists.sortedByDescending { it.trackCount }
         }
-        // Sort artists/albums — default by track count descending (most tracks first)
         val sortedArtists = when (controls.sortOrder) {
-            SortOrder.RECENT -> filteredArtists.sortedByDescending { it.trackCount }
+            SortOrder.RECENT -> filteredArtists.sortedByDescending { it.latestAddedAt }
             SortOrder.ALPHABETICAL -> filteredArtists.sortedBy { it.name.lowercase() }
             SortOrder.MOST_PLAYED -> filteredArtists.sortedByDescending { it.trackCount }
         }
         val sortedAlbums = when (controls.sortOrder) {
-            SortOrder.RECENT -> filteredAlbums.sortedByDescending { it.trackCount }
+            SortOrder.RECENT -> filteredAlbums.sortedByDescending { it.latestAddedAt }
             SortOrder.ALPHABETICAL -> filteredAlbums.sortedBy { it.name.lowercase() }
             SortOrder.MOST_PLAYED -> filteredAlbums.sortedByDescending { it.trackCount }
         }

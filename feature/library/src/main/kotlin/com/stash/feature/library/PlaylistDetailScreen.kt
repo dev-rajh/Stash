@@ -264,10 +264,19 @@ fun PlaylistDetailScreen(
                 }
 
                 // ── Track list ──────────────────────────────────────────
+                // Daily / Stash Mixes are stream-only discovery surfaces, so
+                // their non-downloaded tracks stay tappable (they stream). Every
+                // other playlist is local-first: a track not present in local
+                // storage is shown but dimmed and non-clickable, so the user can
+                // see it's part of the playlist without it reading as playable.
+                val streamOnlySurface = state.playlist?.type == PlaylistType.DAILY_MIX ||
+                    state.playlist?.type == PlaylistType.STASH_MIX
+
                 itemsIndexed(
                     items = state.tracks,
                     key = { _, track -> track.id },
                 ) { index, track ->
+                    val rowEnabled = streamOnlySurface || track.isDownloaded
                     DetailTrackRow(
                         track = track,
                         trackNumber = index + 1,
@@ -281,6 +290,7 @@ fun PlaylistDetailScreen(
                         selectionActive = selection.isActive,
                         selected = selection.isSelected(track.id),
                         onMoreClick = { selectedTrack = track },
+                        enabled = rowEnabled,
                     )
 
                     // Subtle divider between rows (skip after last item).

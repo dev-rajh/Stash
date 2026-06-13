@@ -105,16 +105,37 @@ class DownloadManagerDeferTest {
     )
 
     @Test
-    fun `registry-null + fallback-off returns Deferred`() = runTest {
-        // Lossless on, fallback off, registry returns null, NOT a Stash Mix track.
+    fun `registry-null + fallback-off returns Deferred when sources reachable`() = runTest {
+        // Lossless on, fallback off, registry returns null but sources WERE
+        // reachable (genuine no-match), NOT a Stash Mix track → defer.
         coEvery { losslessPrefs.enabledNow() } returns true
         coEvery { losslessPrefs.youtubeFallbackEnabledNow() } returns false
         coEvery { losslessRegistry.resolve(any()) } returns null
+        coEvery { losslessRegistry.hasReachableSource() } returns true
         coEvery { playlistDao.isTrackInStashMix(any()) } returns false
 
         val result = newSubject().downloadTrack(track = stubTrack(), preResolvedUrl = null)
 
         assertTrue("expected Deferred, got $result", result is TrackDownloadResult.Deferred)
+    }
+
+    @Test
+    fun `registry-null + fallback-off does NOT defer when all sources down`() = runTest {
+        // Lossless on, fallback off, registry returns null AND no source was
+        // reachable (outage). The strict-FLAC defer is bypassed so the track
+        // falls through to the YouTube pipeline instead of stranding.
+        coEvery { losslessPrefs.enabledNow() } returns true
+        coEvery { losslessPrefs.youtubeFallbackEnabledNow() } returns false
+        coEvery { losslessRegistry.resolve(any()) } returns null
+        coEvery { losslessRegistry.hasReachableSource() } returns false
+        coEvery { playlistDao.isTrackInStashMix(any()) } returns false
+        coEvery { albumMatchExecutor.findTrackInAlbum(any(), any(), any(), any()) } returns null
+        coEvery { searchExecutor.search(any(), any()) } returns emptyList()
+        coEvery { searchExecutor.searchYtDlpDirect(any(), any()) } returns emptyList()
+
+        val result = newSubject().downloadTrack(track = stubTrack(), preResolvedUrl = null)
+
+        assertFalse("must not defer when sources are down, got $result", result is TrackDownloadResult.Deferred)
     }
 
     @Test

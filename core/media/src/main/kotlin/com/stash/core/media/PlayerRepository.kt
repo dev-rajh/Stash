@@ -2,6 +2,7 @@ package com.stash.core.media
 
 import androidx.media3.common.MediaItem
 import com.stash.core.model.PlayerState
+import com.stash.core.model.SleepTimerState
 import com.stash.core.model.Track
 import com.stash.core.model.TrackItem
 import kotlinx.coroutines.flow.Flow
@@ -74,6 +75,13 @@ interface PlayerRepository {
      * (typically ~250 ms) while playback is active.
      */
     val currentPosition: Flow<Long>
+
+    /**
+     * Current sleep-timer state. [SleepTimerState.isActive] is `false` when no
+     * timer is armed. While a fixed-duration timer runs, [SleepTimerState.remainingMs]
+     * ticks down; playback is paused when it reaches zero.
+     */
+    val sleepTimer: StateFlow<SleepTimerState>
 
     /**
      * Hot SharedFlow of cascade-halt events. Emitted at most once per
@@ -162,6 +170,22 @@ interface PlayerRepository {
      * Playback continues uninterrupted.
      */
     suspend fun addToQueue(tracks: List<Track>)
+
+    /**
+     * Arm a sleep timer that pauses playback after [durationMs] milliseconds.
+     * Replaces any timer already running. A non-positive duration cancels the
+     * timer (equivalent to [cancelSleepTimer]).
+     */
+    fun startSleepTimer(durationMs: Long)
+
+    /**
+     * Arm a sleep timer that pauses playback when the currently-playing track
+     * finishes. Replaces any timer already running.
+     */
+    fun startSleepTimerEndOfTrack()
+
+    /** Cancel the active sleep timer, if any. No-op when none is armed. */
+    fun cancelSleepTimer()
 
     /** Toggle shuffle mode on/off. */
     suspend fun toggleShuffle()

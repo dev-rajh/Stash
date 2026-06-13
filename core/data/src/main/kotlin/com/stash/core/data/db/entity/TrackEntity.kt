@@ -81,6 +81,15 @@ data class TrackEntity(
     @ColumnInfo(name = "youtube_id")
     val youtubeId: String? = null,
 
+    /**
+     * User-approved YouTube video ID. When present, the download pipeline
+     * must use this exact video rather than re-running search/scoring on a
+     * later sync. This is set by the Failed Matches / Fix Match approval
+     * flow and cleared only by an explicit reset action.
+     */
+    @ColumnInfo(name = "pinned_youtube_video_id")
+    val pinnedYoutubeVideoId: String? = null,
+
     @ColumnInfo(name = "album_art_url")
     val albumArtUrl: String? = null,
 

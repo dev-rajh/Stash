@@ -22,6 +22,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.navigation.NavDestination.Companion.hasRoute
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
@@ -44,6 +45,7 @@ fun StashScaffold(
     val navController = rememberNavController()
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = navBackStackEntry?.destination?.route
+    val isNowPlayingRoute = navBackStackEntry?.destination?.hasRoute(NowPlayingRoute::class) == true
 
     // Whether a detail screen is currently in multi-select mode. Detail screens
     // signal this via `onSelectionModeChanged`; while it is true we hide the
@@ -99,12 +101,13 @@ fun StashScaffold(
         // 15+ where edge-to-edge is enforced. Reported via Twitter
         // (https://x.com/tekno_deha1/status/...).
         bottomBar = {
-            // While a screen is selecting, render no bottom chrome at all — the
-            // screen's own selection action bar (which handles its own nav insets)
-            // takes the bottom edge. This drops innerPadding.bottom to 0 so the
-            // content extends full-height behind that action bar.
-            if (!selectionActive) {
-                Column(modifier = Modifier.windowInsetsPadding(WindowInsets.navigationBars)) {
+            Column(modifier = Modifier.windowInsetsPadding(WindowInsets.navigationBars)) {
+                // The mini-player is redundant on the full-screen Now Playing
+                // route (the expanded player already shows the current track),
+                // so hide it there. The navigation bar, however, stays visible
+                // everywhere — including Now Playing — so the user can always
+                // jump to another tab without first dismissing the player.
+                if (!isNowPlayingRoute) {
                     MiniPlayer(
                         onExpand = {
                             navController.navigate(NowPlayingRoute) {
@@ -112,19 +115,19 @@ fun StashScaffold(
                             }
                         },
                     )
-
-                    StashBottomBar(
-                        currentRoute = currentRoute,
-                        onNavigate = { dest ->
-                            navController.navigate(dest.route) {
-                                popUpTo(navController.graph.findStartDestination().id) {
-                                    inclusive = false
-                                }
-                                launchSingleTop = true
-                            }
-                        },
-                    )
                 }
+
+                StashBottomBar(
+                    currentRoute = currentRoute,
+                    onNavigate = { dest ->
+                        navController.navigate(dest.route) {
+                            popUpTo(navController.graph.findStartDestination().id) {
+                                inclusive = false
+                            }
+                            launchSingleTop = true
+                        }
+                    },
+                )
             }
         },
     ) { innerPadding ->

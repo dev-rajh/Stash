@@ -3,6 +3,7 @@ package com.stash.feature.sync
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.foundation.layout.Arrangement
@@ -21,8 +22,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
@@ -37,6 +40,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -209,6 +213,8 @@ fun SyncScreen(
                             uiState = uiState,
                             onSyncModeChanged = viewModel::onSpotifySyncModeChanged,
                             onPlaylistToggled = viewModel::onTogglePlaylistSync,
+                            onRefreshPlaylists = viewModel::onSyncNow,
+                            onDownloadPlaylist = viewModel::onDownloadSinglePlaylist,
                         )
                     },
                 )
@@ -245,6 +251,7 @@ fun SyncScreen(
                             onSyncModeChanged = viewModel::onYoutubeSyncModeChanged,
                             onStudioOnlyChanged = viewModel::onYoutubeLikedStudioOnlyChanged,
                             onPlaylistToggled = viewModel::onTogglePlaylistSync,
+                            onRefreshPlaylists = viewModel::onSyncNow,
                         )
                     },
                 )
@@ -601,6 +608,7 @@ private fun SpotifySyncToggleRow(
     trackCount: Int,
     enabled: Boolean,
     onToggle: (Boolean) -> Unit,
+    onDownload: (() -> Unit)? = null,
 ) {
     Row(
         modifier = Modifier
@@ -622,6 +630,19 @@ private fun SpotifySyncToggleRow(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+        }
+        // Per-playlist "download now" affordance. Enables sync for just this
+        // playlist and kicks off an immediate (force) download — see
+        // SyncViewModel.onDownloadSinglePlaylist. Only shown when a handler
+        // is provided (Spotify custom playlists).
+        if (onDownload != null) {
+            IconButton(onClick = onDownload) {
+                Icon(
+                    imageVector = Icons.Filled.Download,
+                    contentDescription = "Download “$name” now",
+                    tint = MaterialTheme.colorScheme.primary,
+                )
+            }
         }
         Switch(
             checked = enabled,
@@ -706,6 +727,8 @@ private fun SpotifyExpandedContent(
     uiState: SyncUiState,
     onSyncModeChanged: (SyncMode) -> Unit,
     onPlaylistToggled: (Long, Boolean) -> Unit,
+    onRefreshPlaylists: () -> Unit,
+    onDownloadPlaylist: (Long) -> Unit,
 ) {
     val purple = MaterialTheme.colorScheme.primary
     if (uiState.spotifyPlaylists.isEmpty()) {
@@ -722,6 +745,12 @@ private fun SpotifyExpandedContent(
             mode = uiState.spotifySyncMode,
             onChange = onSyncModeChanged,
             accent = purple,
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        RefreshPlaylistsRow(
+            label = "Refresh Spotify playlists",
+            accent = purple,
+            onClick = onRefreshPlaylists,
         )
         Spacer(modifier = Modifier.height(8.dp))
 
@@ -796,14 +825,85 @@ private fun SpotifyExpandedContent(
                 color = purple,
                 fontWeight = FontWeight.SemiBold,
             )
+
+            var ownerFilter by remember { mutableStateOf(SpotifyOwnerFilter.ALL) }
+            // Only show the owner filter when there's actually a mix of
+            // owners — a single-owner library doesn't benefit from chips.
+            val distinctOwnerClasses = custom
+                .map { ownerClass(it.ownerId, uiState.currentSpotifyUserId) }
+                .distinct()
+            if (distinctOwnerClasses.size > 1) {
+                OwnerFilterChipRow(
+                    selected = ownerFilter,
+                    onSelect = { ownerFilter = it },
+                    accent = purple,
+                )
+            }
+            val ownerFiltered = if (ownerFilter == SpotifyOwnerFilter.ALL) {
+                custom
+            } else {
+                custom.filter {
+                    ownerClass(it.ownerId, uiState.currentSpotifyUserId) == ownerFilter
+                }
+            }
+
             SearchablePlaylistList(
-                items = custom,
+                items = ownerFiltered,
                 accent = purple,
                 name = { it.name },
                 trackCount = { it.trackCount },
                 enabled = { it.syncEnabled },
                 id = { it.id },
                 onPlaylistToggled = onPlaylistToggled,
+                onDownload = onDownloadPlaylist,
+            )
+        }
+    }
+}
+
+/**
+ * Owner buckets for the Spotify "Your Playlists" filter. [ALL] is the
+ * unfiltered default; the rest partition playlists by [ownerClass].
+ */
+private enum class SpotifyOwnerFilter(val label: String) {
+    ALL("All"),
+    MINE("Mine"),
+    OTHERS("Others"),
+    SPOTIFY("Spotify"),
+}
+
+/**
+ * Classify a playlist's owner relative to the signed-in user. Spotify-owned
+ * playlists report owner id `"spotify"`; everything matching the current
+ * user's id/username is "Mine"; the rest are "Others". A null/blank owner
+ * (e.g. rows synced before the v32 migration) falls into "Others" so it
+ * stays visible under any non-Mine filter rather than vanishing.
+ */
+private fun ownerClass(ownerId: String?, currentUserId: String?): SpotifyOwnerFilter = when {
+    ownerId.equals("spotify", ignoreCase = true) -> SpotifyOwnerFilter.SPOTIFY
+    ownerId != null && currentUserId != null && ownerId.equals(currentUserId, ignoreCase = true) ->
+        SpotifyOwnerFilter.MINE
+    else -> SpotifyOwnerFilter.OTHERS
+}
+
+@Composable
+private fun OwnerFilterChipRow(
+    selected: SpotifyOwnerFilter,
+    onSelect: (SpotifyOwnerFilter) -> Unit,
+    accent: Color,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+            .padding(top = 4.dp, bottom = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        SpotifyOwnerFilter.entries.forEach { option ->
+            FilterChip(
+                selected = selected == option,
+                onClick = { onSelect(option) },
+                label = { Text(option.label) },
             )
         }
     }
@@ -827,8 +927,10 @@ private fun <T> SearchablePlaylistList(
     enabled: (T) -> Boolean,
     id: (T) -> Long,
     onPlaylistToggled: (Long, Boolean) -> Unit,
+    onDownload: ((Long) -> Unit)? = null,
 ) {
     var query by remember { mutableStateOf("") }
+    var sort by remember { mutableStateOf(PlaylistListSort.NAME) }
     OutlinedTextField(
         value = query,
         onValueChange = { query = it },
@@ -855,12 +957,34 @@ private fun <T> SearchablePlaylistList(
             }
         } else null,
     )
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+            .padding(top = 4.dp, bottom = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        PlaylistListSort.entries.forEach { option ->
+            FilterChip(
+                selected = sort == option,
+                onClick = { sort = option },
+                label = { Text(option.label) },
+            )
+        }
+    }
     val filtered = if (query.isBlank()) {
         items
     } else {
         items.filter { name(it).contains(query.trim(), ignoreCase = true) }
     }
-    if (filtered.isEmpty()) {
+    val ordered = when (sort) {
+        PlaylistListSort.NAME -> filtered.sortedBy { name(it).lowercase() }
+        PlaylistListSort.TRACKS -> filtered.sortedByDescending { trackCount(it) }
+        PlaylistListSort.ENABLED -> filtered.sortedWith(
+            compareByDescending<T> { enabled(it) }.thenBy { name(it).lowercase() },
+        )
+    }
+    if (ordered.isEmpty()) {
         Text(
             text = "No playlists matching \u201C${query.trim()}\u201D",
             style = MaterialTheme.typography.bodySmall,
@@ -868,12 +992,13 @@ private fun <T> SearchablePlaylistList(
             modifier = Modifier.padding(vertical = 8.dp),
         )
     } else {
-        filtered.forEach { playlist ->
+        ordered.forEach { playlist ->
             SpotifySyncToggleRow(
                 name = name(playlist),
                 trackCount = trackCount(playlist),
                 enabled = enabled(playlist),
                 onToggle = { onPlaylistToggled(id(playlist), it) },
+                onDownload = onDownload?.let { handler -> { handler(id(playlist)) } },
             )
         }
     }
@@ -923,6 +1048,7 @@ private fun YouTubeExpandedContent(
     onSyncModeChanged: (SyncMode) -> Unit,
     onStudioOnlyChanged: (Boolean) -> Unit,
     onPlaylistToggled: (Long, Boolean) -> Unit,
+    onRefreshPlaylists: () -> Unit,
 ) {
     val accent = MaterialTheme.colorScheme.primary
     val hasPlaylists = uiState.youTubePlaylists.isNotEmpty()
@@ -947,6 +1073,12 @@ private fun YouTubeExpandedContent(
             enabled = uiState.youtubeLikedStudioOnly,
             onChange = onStudioOnlyChanged,
             accent = accent,
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        RefreshPlaylistsRow(
+            label = "Refresh YouTube playlists",
+            accent = accent,
+            onClick = onRefreshPlaylists,
         )
         Spacer(modifier = Modifier.height(8.dp))
 
@@ -1004,6 +1136,53 @@ private fun YouTubeExpandedContent(
                 enabled = { it.syncEnabled },
                 id = { it.id },
                 onPlaylistToggled = onPlaylistToggled,
+            )
+        }
+    }
+}
+
+private enum class PlaylistListSort(val label: String) {
+    NAME("A-Z"),
+    TRACKS("Tracks"),
+    ENABLED("Enabled"),
+}
+
+@Composable
+private fun RefreshPlaylistsRow(
+    label: String,
+    accent: Color,
+    onClick: () -> Unit,
+) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick),
+        color = Color.Transparent,
+        shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(1.dp, accent.copy(alpha = 0.25f)),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Icon(
+                imageVector = Icons.Filled.Sync,
+                contentDescription = null,
+                tint = accent,
+            )
+            Text(
+                text = label,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.weight(1f),
+            )
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
     }

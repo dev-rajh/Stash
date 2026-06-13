@@ -63,11 +63,19 @@ object DatabaseModule {
                 StashDatabase.MIGRATION_29_30,
                 StashDatabase.MIGRATION_30_31,
                 StashDatabase.MIGRATION_31_32,
+                StashDatabase.MIGRATION_32_33,
             )
-            // No fallbackToDestructiveMigration() — if a migration is missing,
-            // the app will crash on startup instead of silently wiping the
+            // No fallbackToDestructiveMigration() — if an UPGRADE migration is
+            // missing, the app crashes on startup instead of silently wiping the
             // user's entire library. This forces us to write proper migrations
             // for every schema change. The crash is preferable to data loss.
+            //
+            // Downgrades are different: they only happen when an OLDER build opens
+            // a DB a NEWER build already upgraded (dev/test rollback, or a user
+            // sideloading an older APK). The old code physically can't read the
+            // newer schema, so data loss is unavoidable — recreating the DB beats
+            // a hard crash-loop on every launch.
+            .fallbackToDestructiveMigrationOnDowngrade(dropAllTables = true)
             .build()
     }
 

@@ -47,9 +47,14 @@ class ListeningRecorderSkipTest {
             MutableSharedFlow<StreamingHaltedEvent>().asSharedFlow()
         override val userMessages: SharedFlow<String> =
             MutableSharedFlow<String>().asSharedFlow()
+        override val sleepTimer: StateFlow<com.stash.core.model.SleepTimerState> =
+            MutableStateFlow(com.stash.core.model.SleepTimerState())
         fun set(state: PlayerState) {
             flow.value = state
         }
+        override fun startSleepTimer(durationMs: Long) = Unit
+        override fun startSleepTimerEndOfTrack() = Unit
+        override fun cancelSleepTimer() = Unit
         override suspend fun play() = Unit
         override suspend fun pause() = Unit
         override suspend fun skipNext() = Unit

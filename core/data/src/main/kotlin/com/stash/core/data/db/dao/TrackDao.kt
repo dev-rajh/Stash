@@ -21,6 +21,7 @@ data class ArtistSummary(
     val trackCount: Int,
     val totalDurationMs: Long,
     val artUrl: String?,
+    val latestAddedAt: Long,
 )
 
 /**
@@ -63,6 +64,7 @@ data class AlbumSummary(
     val trackCount: Int,
     val artPath: String?,
     val artUrl: String?,
+    val latestAddedAt: Long,
 )
 
 /**
@@ -140,6 +142,18 @@ data class DownloadedFileRef(
     val id: Long,
     @androidx.room.ColumnInfo(name = "file_path")
     val filePath: String?,
+)
+
+/**
+ * Minimal projection for external-library rescan (B-06). Only includes
+ * fields needed to map a disk file back to an existing track row and
+ * restore its download state.
+ */
+data class ExternalRescanCandidate(
+    val id: Long,
+    val artist: String,
+    val album: String,
+    val title: String,
 )
 
 /**
@@ -1244,7 +1258,8 @@ interface TrackDao {
         SELECT artist,
                COUNT(*) AS trackCount,
                SUM(duration_ms) AS totalDurationMs,
-               album_art_url AS artUrl
+               album_art_url AS artUrl,
+               MAX(date_added) AS latestAddedAt
         FROM tracks
         WHERE is_downloaded = 1 OR (:includeStreamable AND is_streamable = 1)
         GROUP BY artist
@@ -1287,7 +1302,8 @@ interface TrackDao {
                ) AS artist,
                COUNT(*) AS trackCount,
                MAX(t.album_art_path) AS artPath,
-               MAX(t.album_art_url) AS artUrl
+               MAX(t.album_art_url) AS artUrl,
+               MAX(t.date_added) AS latestAddedAt
         FROM tracks t
         WHERE t.album != ''
           AND (t.is_downloaded = 1 OR (:includeStreamable AND t.is_streamable = 1))
@@ -1306,6 +1322,17 @@ interface TrackDao {
     /** Set the YouTube video ID for a track so future syncs don't re-queue it. */
     @Query("UPDATE tracks SET youtube_id = :youtubeId WHERE id = :trackId")
     suspend fun updateYoutubeId(trackId: Long, youtubeId: String)
+
+    /** Persist a manual match choice and mirror it to the active youtube_id. */
+    @Query(
+        """
+        UPDATE tracks
+        SET youtube_id = :youtubeId,
+            pinned_youtube_video_id = :youtubeId
+        WHERE id = :trackId
+        """
+    )
+    suspend fun pinYoutubeVideoId(trackId: Long, youtubeId: String)
 
     /**
      * Backfill duration_ms when the existing row has 0 (no duration yet —
@@ -1581,6 +1608,21 @@ interface TrackDao {
         """
     )
     suspend fun getDownloadedFileRefs(): List<DownloadedFileRef>
+
+    /**
+     * Returns tracks currently marked as not downloaded. Used by the
+     * external-folder rescan to restore `is_downloaded` + `file_path`
+     * after reinstall/data-clear scenarios where files still exist on
+     * disk but DB download flags were lost.
+     */
+    @Query(
+        """
+        SELECT id, artist, album, title
+        FROM tracks
+        WHERE is_downloaded = 0
+        """
+    )
+    suspend fun getExternalRescanCandidates(): List<ExternalRescanCandidate>
 
     /**
      * Bulk-reset rows to undownloaded state. Companion to

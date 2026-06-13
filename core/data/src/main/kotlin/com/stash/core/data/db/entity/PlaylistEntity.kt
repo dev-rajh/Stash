@@ -71,4 +71,14 @@ data class PlaylistEntity(
      */
     @ColumnInfo(name = "date_added", defaultValue = "0")
     val dateAdded: Instant = Instant.now(),
+
+    /**
+     * Owner identity for service-sourced playlists (Spotify user id /
+     * username, or `"spotify"` for Spotify-generated playlists). Null for
+     * local/imported playlists or rows created before the v31→v32
+     * migration. Drives the Sync tab's "Mine / Others / Spotify" owner
+     * filter — see [com.stash.feature.sync.SyncViewModel].
+     */
+    @ColumnInfo(name = "owner_id")
+    val ownerId: String? = null,
 )

@@ -20,6 +20,8 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
@@ -102,6 +104,11 @@ class SpotifyApiClient @Inject constructor(
             "daylist",
         )
     }
+
+    data class LibraryPlaylistsPage(
+        val playlists: List<SpotifyPlaylistItem>,
+        val rawItemCount: Int,
+    )
 
     // ── Client Credentials Token Cache ──────────────────────────────────
 
@@ -207,7 +214,7 @@ class SpotifyApiClient @Inject constructor(
      *   libraryV3 is hierarchical: folder-filed playlists never appear at
      *   the root (issues #48/#26/#80/#136).
      */
-    suspend fun getUserPlaylists(
+    suspend fun getUserPlaylistsPage(
         limit: Int = DEFAULT_LIMIT,
         offset: Int = 0,
         folderUri: String? = null,
@@ -732,7 +739,7 @@ class SpotifyApiClient @Inject constructor(
                     val refreshedToken = getClientCredentialsToken() ?: return null
                     Log.d(TAG, "tryGetPlaylistTracksViaWebApi: retrying with refreshed token")
                     val retryRequest = Request.Builder()
-                        .url(url!!)
+                        .url(url)
                         .get()
                         .header("Authorization", "Bearer $refreshedToken")
                         .header("Accept", "application/json")
@@ -1026,6 +1033,150 @@ class SpotifyApiClient @Inject constructor(
     }
 
     // ── Response parsing (GraphQL) ──────────────────────────────────────
+
+    /**
+     * Parses the `libraryV3` GraphQL response into [SpotifyPlaylistItem] objects.
+     */
+    internal fun parseLibraryResponse(responseJson: JsonObject): LibraryPlaylistsPage {
+        return try {
+            val items = responseJson["data"]
+                ?.jsonObject?.get("me")
+                ?.jsonObject?.get("libraryV3")
+                ?.jsonObject?.get("items")
+                ?.jsonArray
+
+            if (items == null) {
+                Log.w(TAG, "parseLibraryResponse: could not find data.me.libraryV3.items")
+                Log.d(TAG, "parseLibraryResponse: top-level keys: ${responseJson.keys}")
+                val dataKeys = responseJson["data"]?.jsonObject?.keys
+                Log.d(TAG, "parseLibraryResponse: data keys: $dataKeys")
+                return LibraryPlaylistsPage(emptyList(), 0)
+            }
+
+            Log.d(TAG, "parseLibraryResponse: found ${items.size} library items")
+
+            val playlistsById = linkedMapOf<String, SpotifyPlaylistItem>()
+            // Folder diagnostics: the recursion below is shape-agnostic and
+            // will pick up Playlist nodes at any nesting depth, so playlists
+            // filed inside folders are recognized AS LONG AS the libraryV3
+            // response actually inlines them. If folder-nested playlists go
+            // missing in the field, this counter being > 0 while child counts
+            // stay flat points at the query (folder contents not expanded)
+            // rather than the parser. See test "extracts playlists nested
+            // inside folders".
+            var folderNodeCount = 0
+            items.forEach { element ->
+                try {
+                    folderNodeCount += countFolderNodes(element)
+                    collectPlaylistsFromLibraryNode(element, playlistsById)
+                } catch (e: Exception) {
+                    Log.w(TAG, "parseLibraryResponse: failed to parse library node", e)
+                }
+            }
+            if (folderNodeCount > 0) {
+                Log.i(
+                    TAG,
+                    "parseLibraryResponse: saw $folderNodeCount folder node(s); " +
+                        "${playlistsById.size} playlists collected (incl. any folder-nested)",
+                )
+            }
+            LibraryPlaylistsPage(
+                playlists = playlistsById.values.toList(),
+                rawItemCount = items.size,
+            ).also { page ->
+                Log.d(
+                    TAG,
+                    "parseLibraryResponse: parsed ${page.playlists.size} playlists total from ${page.rawItemCount} raw item(s)",
+                )
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "parseLibraryResponse: failed to parse response", e)
+            LibraryPlaylistsPage(emptyList(), 0)
+        }
+    }
+
+    private fun collectPlaylistsFromLibraryNode(
+        element: JsonElement,
+        playlistsById: MutableMap<String, SpotifyPlaylistItem>,
+    ) {
+        when (element) {
+            is JsonObject -> {
+                extractPlaylistFromDataNode(element["data"]?.jsonObject)?.let { playlist ->
+                    playlistsById.putIfAbsent(playlist.id, playlist)
+                }
+                element.values.forEach { child ->
+                    collectPlaylistsFromLibraryNode(child, playlistsById)
+                }
+            }
+            is JsonArray -> element.forEach { child ->
+                collectPlaylistsFromLibraryNode(child, playlistsById)
+            }
+            else -> Unit
+        }
+    }
+
+    /**
+     * Counts `__typename == "Folder"` nodes anywhere in a library item's
+     * subtree. Diagnostic only — drives the folder-vs-query log in
+     * [parseLibraryResponse].
+     */
+    private fun countFolderNodes(element: JsonElement): Int = when (element) {
+        is JsonObject -> {
+            val isFolder = element["data"]?.jsonObject
+                ?.get("__typename")?.jsonPrimitive?.contentOrNull == "Folder"
+            (if (isFolder) 1 else 0) + element.values.sumOf { countFolderNodes(it) }
+        }
+        is JsonArray -> element.sumOf { countFolderNodes(it) }
+        else -> 0
+    }
+
+    private fun extractPlaylistFromDataNode(data: JsonObject?): SpotifyPlaylistItem? {
+        if (data == null) return null
+
+        val dataTypeName = data["__typename"]?.jsonPrimitive?.contentOrNull
+        if (dataTypeName != "Playlist") return null
+
+        val uri = data["uri"]?.jsonPrimitive?.contentOrNull ?: return null
+        if (!uri.startsWith("spotify:playlist:")) return null
+
+        val playlistId = uri.removePrefix("spotify:playlist:")
+        val name = data["name"]?.jsonPrimitive?.contentOrNull ?: "Untitled"
+
+        val ownerData = data["ownerV2"]?.jsonObject?.get("data")?.jsonObject
+        val ownerId = ownerData?.get("username")?.jsonPrimitive?.contentOrNull
+            ?: ownerData?.get("id")?.jsonPrimitive?.contentOrNull
+            ?: ""
+        val ownerName = ownerData?.get("name")?.jsonPrimitive?.contentOrNull
+
+        val imageUrl = data["images"]
+            ?.jsonObject?.get("items")
+            ?.jsonArray?.firstOrNull()
+            ?.jsonObject?.get("sources")
+            ?.jsonArray?.firstOrNull()
+            ?.jsonObject?.get("url")
+            ?.jsonPrimitive?.contentOrNull
+
+        val images = if (imageUrl != null) {
+            listOf(SpotifyImage(url = imageUrl))
+        } else {
+            null
+        }
+
+        val totalCount = data["content"]
+            ?.jsonObject?.get("totalCount")
+            ?.jsonPrimitive?.intOrNull ?: 0
+
+        return SpotifyPlaylistItem(
+            id = playlistId,
+            name = name,
+            owner = SpotifyOwner(id = ownerId, display_name = ownerName),
+            images = images,
+            tracks = SpotifyTracksRef(total = totalCount),
+        ).also {
+            Log.d(TAG, "parseLibraryResponse: playlist '${it.name}' " +
+                "(id=${it.id}, owner=${it.owner.id}, tracks=$totalCount)")
+        }
+    }
 
     /**
      * Parses the `fetchPlaylist` GraphQL response into [SpotifyTrackItem]s.

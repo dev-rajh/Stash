@@ -42,6 +42,16 @@ interface MusicRepository {
     /** Tracks belonging to a playlist. */
     fun getTracksByPlaylist(playlistId: Long): Flow<List<Track>>
 
+    /**
+     * Every (non-removed, non-blocked) member track of a playlist, regardless
+     * of download / stream state or the streaming preference. Unlike
+     * [getTracksByPlaylist] — which hides non-downloaded tracks in Offline
+     * mode — this always returns the full membership so the Playlist Detail
+     * screen can render all songs and dim/disable the ones not present in
+     * local storage.
+     */
+    fun getAllPlaylistTracks(playlistId: Long): Flow<List<Track>>
+
     /** Distinct artists with track counts and durations. */
     fun getAllArtists(): Flow<List<ArtistSummary>>
 
@@ -275,6 +285,14 @@ interface MusicRepository {
      * @return The number of orphaned tracks cleaned up.
      */
     suspend fun cleanOrphanedMixTracks(): Int
+
+    /**
+     * Re-scan the configured external download folder and restore download
+     * state for matching tracks whose files already exist on disk.
+     *
+     * Returns the number of rows restored.
+     */
+    suspend fun rescanExternalDownloads(): Int
 
     // ── Download queue cleanup ────────────────────────────────────────────
 

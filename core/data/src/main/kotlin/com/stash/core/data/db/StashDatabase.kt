@@ -783,30 +783,13 @@ abstract class StashDatabase : RoomDatabase() {
         }
 
         /**
-         * v28 → v29 (v0.9.38 / library-health-phase1): rewrite every
-         * legacy `download_queue.failure_type = 'DOWNLOAD_ERROR'` row
-         * to `'UNKNOWN'`.
-         *
-         * Phase 1 of the library-health epic deletes the `DOWNLOAD_ERROR`
-         * constant from [com.stash.core.model.download.DownloadFailureType]
-         * in favour of a richer failure-type vocabulary
-         * (UNKNOWN + classifier-emitted variants). Without this migration
-         * the converter's `valueOf(it)` call in
-         * [com.stash.core.data.db.converter.Converters.fromFailureType]
-         * would crash with `IllegalArgumentException` the first time Room
-         * read a legacy `'DOWNLOAD_ERROR'` row. Room guarantees migrations
-         * run before any DAO read on the upgraded schema, so once this
-         * migration ships the converter only ever sees valid enum names.
-         *
-         * UPDATE-in-place is safe because `failure_type` is a TEXT column
-         * (storing the enum `.name`), so swapping one literal for another
-         * needs no DDL.
+         * v28 -> v29: persist user-approved manual YouTube matches. A
+         * non-null value means the matcher must skip search and use that
+         * exact video ID on future sync/download attempts.
          */
         val MIGRATION_28_29 = object : Migration(28, 29) {
             override fun migrate(db: SupportSQLiteDatabase) {
-                db.execSQL(
-                    "UPDATE download_queue SET failure_type = 'UNKNOWN' WHERE failure_type = 'DOWNLOAD_ERROR'"
-                )
+                db.execSQL("ALTER TABLE tracks ADD COLUMN pinned_youtube_video_id TEXT")
             }
         }
 
@@ -833,27 +816,39 @@ abstract class StashDatabase : RoomDatabase() {
         }
 
         /**
+         * v31 → v32: add owner_id to playlists so the Sync tab can filter
+         * Spotify playlists by owner (Mine / Others / Spotify). Nullable —
+         * existing rows backfill to NULL and are re-populated on the next
+         * sync from the Spotify owner data.
+         */
+        val MIGRATION_31_32 = object : Migration(31, 32) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE playlists ADD COLUMN owner_id TEXT DEFAULT NULL")
+                db.execSQL("ALTER TABLE remote_playlist_snapshots ADD COLUMN owner_id TEXT DEFAULT NULL")
+            }
+        }
+        /**
          * v31 → v32: add the `spotify_resolution` side-table that caches the
          * outcome of resolving a local track to a Spotify URI (positive /
          * negative / transient), so the antra Spotify-URI resolver doesn't
          * re-search Spotify on every play. Purely additive — keyed by trackId.
          */
-        val MIGRATION_31_32 = object : Migration(31, 32) {
+        val MIGRATION_32_33 = object : Migration(32, 33) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL(
                     """
-                    CREATE TABLE IF NOT EXISTS spotify_resolution (
-                        trackId INTEGER NOT NULL PRIMARY KEY,
-                        status TEXT NOT NULL,
-                        spotifyUri TEXT,
-                        matchedIsrc TEXT,
-                        titleSim REAL,
-                        durDeltaSec INTEGER,
-                        resolvedAtMs INTEGER NOT NULL,
-                        expiresAtMs INTEGER NOT NULL,
-                        attempts INTEGER NOT NULL DEFAULT 1
-                    )
-                    """.trimIndent()
+            CREATE TABLE IF NOT EXISTS spotify_resolution (
+                trackId INTEGER NOT NULL PRIMARY KEY,
+                status TEXT NOT NULL,
+                spotifyUri TEXT,
+                matchedIsrc TEXT,
+                titleSim REAL,
+                durDeltaSec INTEGER,
+                resolvedAtMs INTEGER NOT NULL,
+                expiresAtMs INTEGER NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 1
+            )
+            """.trimIndent()
                 )
             }
         }

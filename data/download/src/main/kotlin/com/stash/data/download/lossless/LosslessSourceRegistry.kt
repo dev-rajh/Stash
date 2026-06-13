@@ -77,6 +77,18 @@ class LosslessSourceRegistry @Inject constructor(
     }
 
     /**
+     * Whether at least one lossless source is currently usable — credentials
+     * set, toggled on, and not circuit-broken (the same gate [resolve] uses
+     * to decide whether to even try a source). Lets callers tell "no source
+     * matched the track" (sources reachable, all returned null) apart from
+     * "every lossless source is down/unconfigured" (nothing reachable), so a
+     * transient outage can fall through to the YouTube pipeline instead of
+     * deferring forever under strict-FLAC. See [DownloadManager].
+     */
+    suspend fun hasReachableSource(): Boolean =
+        orderedSources().any { runCatching { it.isEnabled() }.getOrDefault(false) }
+
+    /**
      * All registered sources, in user-configured priority order. Sources
      * not mentioned in the prefs go last in registration order.
      * Useful for the Settings → Lossless Sources screen rendering.
