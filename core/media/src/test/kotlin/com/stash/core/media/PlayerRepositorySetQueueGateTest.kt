@@ -78,6 +78,7 @@ class PlayerRepositorySetQueueGateTest {
             streamUrlCache = streamUrlCache,
             connectivity = connectivity,
             trackDao = trackDao,
+            playbackResumer = PlaybackResumer(playbackStateStore, trackDao),
         )
         repo.filePathExistsOnDisk = { true }
 

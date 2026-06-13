@@ -16,6 +16,7 @@ import androidx.media3.session.SessionToken
 import com.stash.core.common.constants.StashConstants
 import com.stash.core.data.db.dao.TrackDao
 import com.stash.core.data.db.entity.TrackEntity
+import com.stash.core.data.mapper.toDomain
 import com.stash.core.data.prefs.StreamingPreference
 import com.stash.core.data.repository.MusicRepository
 import com.stash.core.media.service.StashPlaybackService
@@ -23,6 +24,7 @@ import com.stash.core.media.streaming.ConnectivityMonitor
 import com.stash.core.media.streaming.StreamSourceRegistry
 import com.stash.core.media.streaming.StreamUrl
 import com.stash.core.media.streaming.StreamUrlCache
+import com.stash.core.media.streaming.YouTubeStreamResolver
 import com.stash.core.model.PlayerState
 import com.stash.core.model.RepeatMode
 import com.stash.core.model.SleepTimerState
@@ -90,6 +92,7 @@ class PlayerRepositoryImpl @Inject constructor(
     private val streamUrlCache: StreamUrlCache,
     private val connectivity: ConnectivityMonitor,
     private val trackDao: TrackDao,
+    private val playbackResumer: PlaybackResumer,
 ) : PlayerRepository {
 
     /**
@@ -294,6 +297,15 @@ class PlayerRepositoryImpl @Inject constructor(
     @Volatile
     internal var tapResolveEpoch: Long = -1L
 
+    /**
+     * Last queue id-list + shuffle state persisted to [PlaybackStateStore].
+     * Used to avoid rewriting the comma-joined queue string on every 250 ms
+     * position tick — the queue only needs re-saving when its contents or
+     * shuffle state actually change.
+     */
+    private var lastSavedQueueIds: List<Long>? = null
+    private var lastSavedShuffle: Boolean? = null
+
     private val _userMessages = kotlinx.coroutines.flow.MutableSharedFlow<String>(
         extraBufferCapacity = 4,
         onBufferOverflow = kotlinx.coroutines.channels.BufferOverflow.DROP_OLDEST,
@@ -392,7 +404,17 @@ class PlayerRepositoryImpl @Inject constructor(
         ensureController()?.seekTo(positionMs)
     }
 
-    override suspend fun setQueue(tracks: List<Track>, startIndex: Int) {
+    override suspend fun setQueue(tracks: List<Track>, startIndex: Int) =
+        setQueueInternal(tracks, startIndex, startPositionMs = 0L)
+
+    /**
+     * Backing implementation for [setQueue] that also accepts a start
+     * position. Kept private (not on the interface) so the public
+     * [setQueue] signature — and every test that stubs/verifies it with
+     * argument matchers — stays unchanged. [resumeLastQueue] uses this to
+     * continue from the saved position.
+     */
+    private suspend fun setQueueInternal(tracks: List<Track>, startIndex: Int, startPositionMs: Long) {
         // Any prior background fill belongs to a previous queue; kill it
         // so its addMediaItem calls can't pollute the new one.
         queueBuildJob?.cancel()
@@ -495,7 +517,7 @@ class PlayerRepositoryImpl @Inject constructor(
         // ExoPlayer into STATE_BUFFERING, which computeIsBuffering passes
         // through, so there is no visible gap.
         tapResolveEpoch = -1L
-        controller.setMediaItems(listOf(startItem), /* startIndex = */ 0, /* startPositionMs = */ 0L)
+        controller.setMediaItems(listOf(startItem), /* startIndex = */ 0, startPositionMs)
         controller.prepare()
         controller.play()
 
@@ -569,6 +591,32 @@ class PlayerRepositoryImpl @Inject constructor(
                 throw e
             } catch (e: Exception) {
                 Log.w(TAG, "setQueue: background fill failed", e)
+            }
+        }
+    }
+
+    override fun resumeLastQueue() {
+        // Fire-and-forget on the repository scope so a no-UI trampoline
+        // activity can finish immediately while resolution + playback
+        // continue. Reuses setQueue, so offline and online queues both work
+        // with the same proven resolution + background-fill path.
+        scope.launch {
+            val plan = playbackResumer.buildResumePlan()
+            if (plan != null) {
+                val tracks = plan.tracks.map { it.toDomain() }
+                ensureController()?.shuffleModeEnabled = plan.isShuffled
+                setQueueInternal(tracks, plan.startIndex, plan.positionMs)
+                return@launch
+            }
+            // No persisted queue yet — fall back to the most recently played
+            // (or most recently added) single track, matching the service's
+            // onPlaybackResumption fallback.
+            val fallback = trackDao.getLastPlayedTrack()
+                ?: trackDao.getRecentlyAdded(1).first().firstOrNull()
+            if (fallback != null) {
+                setQueueInternal(listOf(fallback.toDomain()), startIndex = 0, startPositionMs = 0L)
+            } else {
+                Log.i(TAG, "resumeLastQueue: nothing to resume")
             }
         }
     }
@@ -1277,8 +1325,25 @@ class PlayerRepositoryImpl @Inject constructor(
             allowYouTube = allowYouTube,
             allowYtDlp = allowYtDlp,
             allowAntra = allowAntra,
-        )?.also {
-            streamUrlCache.put(track.id, it)
+        )?.also { resolved ->
+            // Don't poison the shared cache with a PROVISIONAL lossy fallback.
+            // The queue-wide background fill resolves with allowAntra = false
+            // (one antra job is 60-120s + a quota single, too costly to spend
+            // across a whole queue). During a kennyy/squid outage that call
+            // falls through to a lossy YouTube URL. Caching it would make the
+            // next-up prefetch and a later foreground tap — both of which DO
+            // allow antra — defer to the cached youtube entry (prefetch's
+            // fresh-cache guard / the cache read above) and never give antra
+            // its chance, so the user hears AAC when FLAC was available. When
+            // antra WAS allowed and we still got youtube, the track is
+            // genuinely lossless-less: cache it so we don't re-run a 60-120s
+            // antra job on every play. Lossless results (kennyy/squid/antra)
+            // always cache — best available regardless of path.
+            val provisionalLossyFallback =
+                !allowAntra && resolved.origin == YouTubeStreamResolver.ORIGIN
+            if (!provisionalLossyFallback) {
+                streamUrlCache.put(track.id, resolved)
+            }
         } ?: return StreamRoutingResult.NotAvailable
 
         // YouTube *video* thumbnails (i.ytimg.com/vi/...) leak into
@@ -1703,6 +1768,24 @@ class PlayerRepositoryImpl @Inject constructor(
                     positionMs = newState.positionMs,
                     queueIndex = newState.currentIndex,
                 )
+            }
+        }
+
+        // Persist the full queue so Bluetooth/Android Auto resumption can
+        // restore it (next/prev working) rather than a single track. Only
+        // re-save when the queue contents or shuffle state change — not on
+        // every position tick. Persists the LOGICAL queue (newState.queue,
+        // same list the saved currentIndex points into) — the raw timeline
+        // is a sparse resolved-only subset during streaming and would
+        // resume into a queue with most tracks missing.
+        val queueIds = newState.queue.map { it.id }
+        if (queueIds != lastSavedQueueIds || newState.isShuffleEnabled != lastSavedShuffle) {
+            lastSavedQueueIds = queueIds
+            lastSavedShuffle = newState.isShuffleEnabled
+            if (queueIds.isNotEmpty()) {
+                scope.launch {
+                    playbackStateStore.saveQueue(queueIds, newState.isShuffleEnabled)
+                }
             }
         }
     }
