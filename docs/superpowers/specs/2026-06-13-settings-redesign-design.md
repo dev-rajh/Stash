@@ -17,9 +17,19 @@ Settings is a single ~1,970-line composable (`feature/settings/.../SettingsScree
 
 ## Non-goals
 
-- **No behavior changes.** Every existing control keeps its current function and wiring. This is a re-organize + re-skin, not a logic change.
-- No new settings beyond what exists today (the just-shipped "Sync your likes" mirror toggles are included; they live under Accounts & Sync).
+- **No behavior changes.** Every existing control keeps its current function and wiring. This is a re-organize + re-skin, not a logic change. (One row — "Sync your likes" — is *new* behavior that arrives via a separate feature; see Prerequisite.)
+- No new settings invented by this redesign beyond re-homing what exists.
 - The theme picker is a visual upgrade only (same three options: Light / Dark / Follow system).
+
+## Prerequisite / dependency
+
+The **like-mirroring feature** (PR #187, branch `feat/like-mirroring`) is **built and on-device-verified but NOT yet merged to `master`** as of 2026-06-13. It introduces, in `feature/settings`, the `LikeMirrorSection` + `LikeMirrorWarningDialog` composables, the extracted `BetaPill`, and `mirror_likes_spotify`/`mirror_likes_youtube` prefs in `LikePreferences`. This redesign **places that `LikeMirrorSection` into the Accounts & Sync screen** — it does not build it.
+
+Ordering rule for the implementation plan:
+- **Land PR #187 first.** Then this redesign re-homes `LikeMirrorSection` into Accounts & Sync verbatim.
+- If this redesign is implemented before #187 merges, **omit "Sync your likes" from the Accounts & Sync IA** and add it when #187 lands. Everything else in the spec is independent of #187.
+
+Do **not** repurpose the vestigial `heart_default_*` prefs for mirroring: their UI was removed (`SettingsScreen.kt:968` comment; the `onHeartDefault*` callbacks + `SettingsUiState` fields are dead-plumbed with no render site), and like-mirroring decision #4 forbids it (they default `true` and would auto-enable Spotify writes for existing users). Cleaning up the dead `heart_default_*` plumbing is **out of scope** here (leave it).
 
 ## Approved decisions
 
@@ -40,7 +50,7 @@ Hub (top → bottom): **Support banner** · **Search** · six category rows.
 |---|---|---|
 | **Playback** | Online · Cellular off | Online/Offline mode (segmented); Stream on cellular; Stream via YouTube (fallback); Force antra only (test) |
 | **Audio & Quality** | Lossless · Max 24/192 · EQ on | Download quality tier; Lossless downloads toggle; Lossless quality (Max/Hi-Res/CD); Sources & routing health (kennyy/squid) + antra account; YouTube fallback; Advanced; **Equalizer ›** |
-| **Accounts & Sync** | Spotify · YouTube · Last.fm | Spotify (connect + Auto-save liked); YouTube Music (connect + Send plays); Last.fm (connect); **Sync your likes** (Spotify / YT Music mirror toggles) |
+| **Accounts & Sync** | Spotify · YouTube · Last.fm | Spotify (connect + Auto-save liked); YouTube Music (connect + Send plays); Last.fm (connect); **Sync your likes** (`LikeMirrorSection`, *from like-mirroring PR #187 — see Prerequisite*) |
 | **Library & Storage** | 20.8 GB · 1,171 tracks | Stash Mixes (Beta); Downloads — network rules; Storage used + download location; Export/Import backup; Move library; **Library Health ›** |
 | **Appearance** | Follow system | Theme — Light / Dark / Follow system |
 | **About & Help** | v0.9.51 | Share diagnostics; Share latest crash report; Version · License; Check for updates |
@@ -53,7 +63,8 @@ Sub-screens that themselves drill further (kept as nested routes, not inlined): 
 
 Design tokens come straight from `core/ui/.../theme/Color.kt` + `Type.kt` (dark theme):
 
-- **Background** `#06060C`; **glass card** = `rgba(255,255,255,0.04)` fill, `1dp` `rgba(255,255,255,0.06)` border, `shapes.large` radius (existing `GlassCard`); **divider** ≈ `rgba(255,255,255,0.045)` hairline.
+- **Background** `#06060C`; **glass card** = `rgba(255,255,255,0.04)` fill (`StashGlassBackground` `0x0AFFFFFF`), `1dp` `rgba(255,255,255,0.06)` border (`StashGlassBorder` `0x0FFFFFFF`), `shapes.large` radius (existing `GlassCard`).
+- **Row divider:** no divider token exists in `Color.kt` today. Add a new hairline token (~`6%` white) or reuse `StashGlassBorder` for inter-row dividers inside a group card — the plan picks one; do not assume an existing divider colour.
 - **Text** primary `#E8E8F0`, secondary `#A0A0B8`, tertiary `#606078`.
 - **Accent** purple `#8B5CF6` (switches, selected radio, primary button), light `#A78BFA` (group labels).
 - **Type:** Space Grotesk (SemiBold/Bold) for the screen title, group labels, and account/service names; Inter (Regular/Medium) for row titles, subtitles, values.
@@ -71,12 +82,12 @@ Reusable components (new, in `feature/settings/components/`):
 - **`SettingsAccountCard`** — service dot badge, name, "Connected as …", ghost Disconnect, optional nested `extraContent` (auto-save / send-plays toggles, Beta pill).
 - **`SupportBanner`** — purple→cyan gradient-edged card, title + one-line pitch + Donate (filled) / Star (ghost).
 - **`SettingsSearchField`** — glass pill with search glyph.
-- **`BetaPill`** — already extracted (from the like-mirroring work).
+- **`BetaPill`** — extracted by like-mirroring PR #187 (arrives with that branch, not built here).
 
 ## Per-screen layout
 
 - **Hub** (`SettingsHubScreen`): title "Settings" → `SupportBanner` → `SettingsSearchField` → one `SettingsGroupCard` of six `SettingsNavRow`s with line-marks + live current-state subtitles. Each row navigates to its category route.
-- **Playback:** "Mode" label → Online/Offline `SettingsSegmented`; "Streaming" label → group of toggle rows (cellular, YT fallback, force-antra test).
+- **Playback:** "Mode" label → Online/Offline `SettingsSegmented`; "Streaming" label → group of toggle rows (cellular, YT fallback, force-antra test). **Note:** today the entire Playback section is gated behind `StashConstants.STREAMING_ENGINE_ENABLED` (`SettingsScreen.kt:452`; currently `true`). The hub must handle the flag-off case — hide the Playback row (or show it empty) when the flag is false — and the plan must preserve that gate.
 - **Audio & Quality:** "Lossless" label → toggle + quality `SettingsPickerRow`s with size/min metadata; "Sources" label → `SettingsStatusRow`s (kennyy/squid) + antra account nav + Advanced nav; "Effects" label → Equalizer nav row. (Download-quality tier sits at the top under its own label.)
 - **Accounts & Sync:** "Connections" → `SettingsAccountCard`s for Spotify / YouTube Music (nested auto-save / send-plays) + Last.fm; "Sync your likes" label + Beta → mirror toggles.
 - **Library & Storage:** Stash Mixes toggle; "Downloads" network picker; "Storage" meter + location + backup buttons + move library; Library Health nav row.
@@ -85,11 +96,12 @@ Reusable components (new, in `feature/settings/components/`):
 
 ## Architecture notes (for the implementation plan)
 
-- **Navigation:** add a nested settings nav graph (or sibling routes) — `settings/hub` + one route per category — wired through `StashNavHost`. The hub navigates; the bottom-nav "Settings" tab lands on the hub.
+- **Navigation:** add the category routes (`SettingsRoute` → the hub; one route per category) to `StashNavHost`. The bottom-nav "Settings" tab lands on the hub. Reuse the **existing shared-ViewModel pattern** already in `StashNavHost.kt:150-169`: child routes resolve the Settings `ViewModel` via `navController.getBackStackEntry(SettingsRoute)` + `hiltViewModel(settingsEntry)` (the Equalizer/LibraryHealth drill-ins already do this). Each category screen scopes its `SettingsViewModel` to the hub's back-stack entry so all screens share one state holder.
 - **Decomposition:** split `SettingsScreen.kt` into `SettingsHubScreen` + six `Settings<Category>Screen` files + the component kit. This is the maintainability win (1,970-line file → focused files).
-- **State:** the existing `SettingsViewModel` (30-flow `combine`) can be reused; each screen collects the same `uiState` and reads its slice, OR the combine is split per-screen. The plan picks one — reuse-whole is lower-risk for a first pass. The hub's current-state subtitles derive from `uiState` (e.g. lossless tier, storage bytes, theme, connection states).
-- **Search:** the search field is part of the approved hub. Real cross-settings search (index → jump to the owning screen/row) is non-trivial; the plan may **phase** it — ship the hub + interiors first, land search as a follow-up — or stub the field initially. Flag for planning.
-- **Preserved behavior:** every control keeps its existing callback into `SettingsViewModel`. "Sync your likes" (just built) moves verbatim into Accounts & Sync.
+- **State:** reuse the existing `SettingsViewModel` (30-flow `combine`) whole — each category screen collects the same `uiState` and reads its slice (lower-risk than splitting the combine for a first pass). The hub's current-state subtitles derive from `uiState` (lossless tier, storage bytes, theme, connection states).
+- **Self-gating sub-composables move intact:** `SpotifyAutoSaveSection`, `YouTubeHistorySyncSection`, and `LastFmSection` already render their own disconnected/empty/loading states; they relocate into the Accounts & Sync screen unchanged, so the plan does not re-derive those states.
+- **Search:** **phased.** Phase 1 ships the hub + six interiors; the `SettingsSearchField` renders but real cross-settings search (index → jump to owning screen/row) lands as **Phase 2**. Phase 1 may show the field disabled/placeholder or omit it — the plan decides the Phase-1 treatment, but search logic is explicitly not in Phase 1 scope.
+- **Preserved behavior:** every *existing* control keeps its existing callback into `SettingsViewModel` — verbatim re-home. The lone exception is the new "Sync your likes" row, which is not existing behavior; it arrives via like-mirroring PR #187 (see Prerequisite) and is simply placed here.
 
 ## Out of scope
 
@@ -100,4 +112,6 @@ Reusable components (new, in `feature/settings/components/`):
 ## Open items to confirm at spec review
 
 1. **Theme picker:** T1 (preview cards) is the chosen direction; confirm vs T2 (live preview + segmented).
-2. **Settings search:** in the first implementation pass, or phased as a follow-up?
+2. **Like-mirroring ordering:** confirm PR #187 lands before this redesign (so "Sync your likes" is present), versus implementing the redesign first and adding that row later.
+
+*(Settings search resolved: phased — Phase 1 hub + interiors, search logic Phase 2. See Architecture notes.)*
