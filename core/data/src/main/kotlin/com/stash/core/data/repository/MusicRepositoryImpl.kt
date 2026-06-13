@@ -265,6 +265,15 @@ class MusicRepositoryImpl @Inject constructor(
             trackDao.getByPlaylist(playlistId, includeStreamable = enabled)
         }.map { entities -> entities.map { it.toDomain() } }
 
+    // Playlist Detail shows the FULL membership and dims the non-downloaded
+    // rows itself, so it must not be filtered by streaming mode. Passing
+    // includeStreamable = true makes the DAO's availability predicate a no-op
+    // (every non-removed, non-blocked member row passes), independent of the
+    // streaming preference.
+    override fun getAllPlaylistTracks(playlistId: Long): Flow<List<Track>> =
+        trackDao.getByPlaylist(playlistId, includeStreamable = true)
+            .map { entities -> entities.map { it.toDomain() } }
+
     override fun getAllArtists(): Flow<List<ArtistSummary>> =
         trackDao.getAllArtists(includeStreamable = false)
 

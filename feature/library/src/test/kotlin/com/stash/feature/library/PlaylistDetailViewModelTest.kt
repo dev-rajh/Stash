@@ -252,6 +252,7 @@ class PlaylistDetailViewModelTest {
 
     private fun musicRepoMock(): MusicRepository = mock {
         on { getTracksByPlaylist(any()) } doReturn flowOf(emptyList())
+        on { getAllPlaylistTracks(any()) } doReturn flowOf(emptyList())
         on { getUserCreatedPlaylists() } doReturn flowOf(emptyList())
         onBlocking { queueDownload(any()) } doReturn true
         onBlocking {

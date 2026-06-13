@@ -825,27 +825,30 @@ abstract class StashDatabase : RoomDatabase() {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE playlists ADD COLUMN owner_id TEXT DEFAULT NULL")
                 db.execSQL("ALTER TABLE remote_playlist_snapshots ADD COLUMN owner_id TEXT DEFAULT NULL")
+            }
+        }
+        /**
          * v31 → v32: add the `spotify_resolution` side-table that caches the
          * outcome of resolving a local track to a Spotify URI (positive /
          * negative / transient), so the antra Spotify-URI resolver doesn't
          * re-search Spotify on every play. Purely additive — keyed by trackId.
          */
-        val MIGRATION_31_32 = object : Migration(31, 32) {
+        val MIGRATION_32_33 = object : Migration(32, 33) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL(
                     """
-                    CREATE TABLE IF NOT EXISTS spotify_resolution (
-                        trackId INTEGER NOT NULL PRIMARY KEY,
-                        status TEXT NOT NULL,
-                        spotifyUri TEXT,
-                        matchedIsrc TEXT,
-                        titleSim REAL,
-                        durDeltaSec INTEGER,
-                        resolvedAtMs INTEGER NOT NULL,
-                        expiresAtMs INTEGER NOT NULL,
-                        attempts INTEGER NOT NULL DEFAULT 1
-                    )
-                    """.trimIndent()
+            CREATE TABLE IF NOT EXISTS spotify_resolution (
+                trackId INTEGER NOT NULL PRIMARY KEY,
+                status TEXT NOT NULL,
+                spotifyUri TEXT,
+                matchedIsrc TEXT,
+                titleSim REAL,
+                durDeltaSec INTEGER,
+                resolvedAtMs INTEGER NOT NULL,
+                expiresAtMs INTEGER NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 1
+            )
+            """.trimIndent()
                 )
             }
         }

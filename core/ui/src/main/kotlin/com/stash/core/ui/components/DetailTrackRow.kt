@@ -27,6 +27,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
@@ -59,6 +60,11 @@ import com.stash.core.ui.util.formatDuration
  * @param selected          Whether this row is currently selected (drives the checkbox).
  * @param onMoreClick       Optional callback for a trailing overflow (three-dot) button,
  *                          shown only when selection is inactive.
+ * @param enabled           When false, the row is dimmed and its tap / long-press
+ *                          are disabled — used for tracks that are part of a
+ *                          playlist but not present in local storage. The trailing
+ *                          overflow (⋮) button stays active so the track can still
+ *                          be downloaded. Defaults to true.
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -74,6 +80,7 @@ fun DetailTrackRow(
     selectionActive: Boolean = false,
     selected: Boolean = false,
     onMoreClick: (() -> Unit)? = null,
+    enabled: Boolean = true,
 ) {
     val extendedColors = StashTheme.extendedColors
     val primaryColor = MaterialTheme.colorScheme.primary
@@ -89,10 +96,23 @@ fun DetailTrackRow(
         modifier = Modifier
             .fillMaxWidth()
             .background(rowBackground)
-            .combinedClickable(
-                onClick = onClick,
-                onLongClick = onLongPress,
+            .then(
+                // Disabled rows (e.g. not in local storage) drop their tap and
+                // long-press entirely so the song reads as "part of the playlist
+                // but unavailable" rather than a dead tap target.
+                if (enabled) {
+                    Modifier.combinedClickable(
+                        onClick = onClick,
+                        onLongClick = onLongPress,
+                    )
+                } else {
+                    Modifier
+                }
             )
+            // Dim the whole row when disabled. The trailing ⋮ button keeps its
+            // own click handler, so it stays usable (e.g. to queue a download)
+            // even though it inherits the dimmed appearance.
+            .alpha(if (enabled) 1f else 0.4f)
             .padding(horizontal = 20.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {

@@ -281,6 +281,7 @@ class MixOfflineTapGuardTest {
     ): PlaylistDetailViewModel {
         val musicRepo = mock<MusicRepository> {
             on { getTracksByPlaylist(playlistId) } doReturn flowOf(tracks)
+            on { getAllPlaylistTracks(playlistId) } doReturn flowOf(tracks)
             onBlocking { getPlaylistWithTracks(playlistId) } doReturn playlist
             on { getUserCreatedPlaylists() } doReturn flowOf(emptyList())
         }

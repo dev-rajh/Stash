@@ -105,7 +105,7 @@ class PlaylistDetailViewModel @Inject constructor(
      */
     val uiState: StateFlow<PlaylistDetailUiState> = combine(
         _playlist,
-        musicRepository.getTracksByPlaylist(playlistId).withSearchFilter(_searchQuery),
+        musicRepository.getAllPlaylistTracks(playlistId).withSearchFilter(_searchQuery),
         playerRepository.playerState,
         _searchQuery,
         _showSearch,
@@ -174,27 +174,36 @@ class PlaylistDetailViewModel @Inject constructor(
      * filtered out.
      */
     fun playTrack(trackId: Long) {
-        // ── Stream-only tap guard ──
-        // Stream-only tracks (isStreamable + !isDownloaded) have no local audio
-        // and require both Online mode AND a live connection. The player's
-        // offline master-gate silently skips them in Offline mode, so bail out
-        // early with a Snackbar so the user knows *why* nothing happened.
-        // Downloaded tracks always play (local file works offline). Stream-only
-        // tracks online (streaming on + connected) go through normal play.
         viewModelScope.launch {
-            val tapped = uiState.value.tracks.firstOrNull { it.id == trackId }
-            if (tapped != null && tapped.isStreamable && !tapped.isDownloaded) {
-                if (!streamingPreference.current()) {
-                    // Offline mode: the player's offline master-gate would
-                    // silently skip a stream-only track. Tell the user how to
-                    // play it instead of enqueuing something that can't play.
-                    _userMessages.tryEmit("Switch to Online mode to play this track")
-                    return@launch
+            val tapped = uiState.value.tracks.firstOrNull { it.id == trackId } ?: return@launch
+
+            if (isStreamOnlySurface()) {
+                // ── Stream-only tap guard (Daily / Stash Mixes) ──
+                // Stream-only tracks (isStreamable + !isDownloaded) have no
+                // local audio and require both Online mode AND a live
+                // connection. The player's offline master-gate silently skips
+                // them in Offline mode, so bail out early with a Snackbar so
+                // the user knows *why* nothing happened. Downloaded tracks
+                // always play (local file works offline).
+                if (tapped.isStreamable && !tapped.isDownloaded) {
+                    if (!streamingPreference.current()) {
+                        // Offline mode: the player's offline master-gate would
+                        // silently skip a stream-only track. Tell the user how
+                        // to play it instead of enqueuing something that can't.
+                        _userMessages.tryEmit("Switch to Online mode to play this track")
+                        return@launch
+                    }
+                    if (!connectivityMonitor.isConnected()) {
+                        _userMessages.tryEmit("Online only — connect to play this track")
+                        return@launch
+                    }
                 }
-                if (!connectivityMonitor.isConnected()) {
-                    _userMessages.tryEmit("Online only — connect to play this track")
-                    return@launch
-                }
+            } else {
+                // ── Local-first playlists ──
+                // Non-downloaded rows are shown but dimmed and non-clickable in
+                // the UI (the song is part of the playlist but not in local
+                // storage). Guard here too so a stray tap can't enqueue one.
+                if (!tapped.isDownloaded) return@launch
             }
 
             _tappedTrackId.value = trackId
@@ -212,19 +221,38 @@ class PlaylistDetailViewModel @Inject constructor(
     /**
      * The subset of [uiState] tracks that can actually be enqueued right now.
      *
-     * - **Streaming mode on:** every track. Stream-only tracks resolve via
-     *   Kennyy inside [PlayerRepository.setQueue].
-     * - **Offline mode (streaming off):** downloaded-only, so we never enqueue
-     *   items the player's offline master-gate would silently skip.
+     * **Stream-only surfaces (Daily / Stash Mixes)** — streaming-mode aware:
+     * - Streaming on: every track (stream-only ones resolve via Kennyy inside
+     *   [PlayerRepository.setQueue]).
+     * - Offline mode: downloaded-only, so we never enqueue items the player's
+     *   offline master-gate would silently skip. The per-tap guard in
+     *   [playTrack] surfaces "Switch to Online mode…" for an explicit tap.
      *
-     * A Stash Mix still renders its full track list offline (TrackDao's
-     * STASH_MIX visibility exemption), but tapping a stream-only mix track in
-     * Offline mode is handled by the per-tap guard in [playTrack], which
-     * surfaces "Switch to Online mode to play this track" rather than enqueuing
-     * something the player can't play.
+     * **Local-first playlists (everything else)** — downloaded-only, always.
+     * Non-downloaded rows are shown but disabled in the UI, so Play All /
+     * Shuffle skip them regardless of streaming mode.
      */
-    private suspend fun playableTracks(): List<Track> =
-        queuePlayableTracks(uiState.value.tracks, streamingPreference.current())
+    private suspend fun playableTracks(): List<Track> {
+        val tracks = uiState.value.tracks
+        return if (isStreamOnlySurface()) {
+            queuePlayableTracks(tracks, streamingPreference.current())
+        } else {
+            // Local-first playlists: only downloaded tracks are playable; the
+            // non-downloaded rows are disabled in the UI, so Play All / Shuffle
+            // skip them rather than enqueuing something that can't play.
+            tracks.filter { it.isDownloaded }
+        }
+    }
+
+    /**
+     * Daily and Stash Mixes are inherently online discovery surfaces — their
+     * tracks are stream-only by design. They keep the streaming tap/queue
+     * behaviour; every other playlist type is treated as local-first, where
+     * non-downloaded tracks are shown but disabled.
+     */
+    private fun isStreamOnlySurface(): Boolean =
+        uiState.value.playlist?.type
+            .let { it == PlaylistType.DAILY_MIX || it == PlaylistType.STASH_MIX }
 
     /**
      * Shuffles the playlist and begins playback. Streaming mode shuffles all
