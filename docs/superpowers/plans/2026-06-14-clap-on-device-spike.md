@@ -48,7 +48,7 @@ All spike artifacts live under `spike/clap/` (desktop) and `app/src/androidTest/
 
 **On-device (Android), throwaway instrumented test in the `app` module:**
 - `app/src/androidTest/assets/clapspike/` — `clap_audio.int8.onnx`, `clap_text.int8.onnx`, the 20 WAV clips, `ground_truth.json`, `query_tokens.json`.
-- `app/src/androidTest/kotlin/com/stash/app/clapspike/ClapSpikeOnnx.kt` — minimal ONNX Runtime wrapper: `embedAudio(FloatArray): FloatArray`, `embedTextTokens(LongArray): FloatArray`, plus `cosine()`.
+- `app/src/androidTest/kotlin/com/stash/app/clapspike/ClapSpikeOnnx.kt` — minimal ONNX Runtime wrapper: `embedAudio(FloatArray): FloatArray`, `embedTextTokens(ids: LongArray, mask: LongArray): FloatArray` (two args — the `query_tokens.json` from Task 4 carries both `input_ids` and `attention_mask`), plus `cosine()`.
 - `app/src/androidTest/kotlin/com/stash/app/clapspike/WavReader.kt` — read a 48 kHz mono PCM WAV asset into a `FloatArray`.
 - `app/src/androidTest/kotlin/com/stash/app/clapspike/ClapSpikeTest.kt` — the instrumented harness: times embeds, builds the cosine matrix, asserts it matches ground truth, logs everything.
 
@@ -237,18 +237,22 @@ Under `[libraries]`:
 onnxruntime-android = { group = "com.microsoft.onnxruntime", name = "onnxruntime-android", version.ref = "onnxruntime" }
 ```
 
-- [ ] **Step 2: Wire it as a test-only dependency**
+- [ ] **Step 2: Wire it (and the instrumented-test runner) as test-only dependencies**
 
-In `app/build.gradle.kts` dependencies block:
+The `app` module currently has **no** `androidTest` dependencies wired, and the harness in Task 8 uses `@RunWith(AndroidJUnit4::class)`, `InstrumentationRegistry`, and Truth's `assertThat`. Mirror the working pattern from `data/download/build.gradle.kts` (the `testInstrumentationRunner` is already set in `app/build.gradle.kts` `defaultConfig`, so only deps are needed). In the `app/build.gradle.kts` dependencies block:
 ```kotlin
 androidTestImplementation(libs.onnxruntime.android)
+androidTestImplementation(libs.androidx.test.core)        // already in the catalog
+androidTestImplementation("androidx.test:runner:1.6.2")   // AndroidJUnitRunner
+androidTestImplementation("androidx.test.ext:junit:1.2.1") // AndroidJUnit4
+androidTestImplementation(libs.truth)                     // already in the catalog
 ```
 Test-only on purpose — the spike must not bloat the shipping APK.
 
 - [ ] **Step 3: Sync/compile check**
 
 Run: `./gradlew :app:compileDebugAndroidTestKotlin`
-Expected: BUILD SUCCESSFUL (resolves the new dependency). No device needed yet.
+Expected: BUILD SUCCESSFUL (resolves the new dependencies; `AndroidJUnit4` / `InstrumentationRegistry` / `assertThat` all resolve). No device needed yet.
 
 - [ ] **Step 4: Commit**
 
@@ -328,7 +332,7 @@ git commit -m "spike: onnxruntime wrapper + wav reader for on-device harness"
 1. Load both sessions + all 20 WAVs + `ground_truth.json` + `query_tokens.json`.
 2. **Warm up** (one throwaway `embedAudio` to exclude one-time session/init cost), then **time** each clip's `embedAudio` with `SystemClock.elapsedRealtimeNanos()`; log per-clip ms and the **median** (exit criterion #2). Multiply median ×3 and log it as the projected per-track time (production mean-pools 3 windows).
 3. Build the on-device NxN cosine matrix; log it with genre labels.
-4. **Assert correctness:** every on-device clip vector is within tolerance of the ground-truth vector (`cosine(device, desktop) > 0.999`). This is the one real assertion — it proves the Android numbers aren't garbage. A loose `1e-2` abs tolerance on the matrix entries accommodates int8/runtime differences.
+4. **Assert correctness:** every on-device clip vector is within tolerance of the ground-truth vector (`cosine(device, desktop) > 0.999`). This is the one real assertion — it proves the Android numbers aren't garbage. A loose `1e-2` abs tolerance on the matrix entries accommodates int8/runtime differences. **Note:** the ground truth is computed from int8 ONNX on desktop x86; cross-architecture int8 kernels (x86 vs ARM) can diverge slightly more than fp32, so if `0.999` proves too tight on a run whose cosine matrix still clearly separates genres, relax the per-vector gate (e.g. to `0.99`) rather than reading a correct-but-borderline run as a failure. Record whatever gate value the run actually needed in findings.
 5. Embed the 3 query token sets; log query×clip cosines and the top-3 clips per query.
 6. Log a one-line **PASS/FAIL summary** per exit criterion.
 
