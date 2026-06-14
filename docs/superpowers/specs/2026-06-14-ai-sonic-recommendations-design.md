@@ -109,7 +109,7 @@ New Room table `track_embedding`:
 |---|---|---|
 | `track_id` | INTEGER PK | FK → `tracks.id`, `onDelete = CASCADE` |
 | `vector` | BLOB | 512 × float32 = 2048 bytes |
-| `model_version` | INTEGER | bump to trigger lazy re-embed on model swap |
+| `model_version` | INTEGER | monotonically-increasing; bump to trigger lazy re-embed on model swap. The integer ↔ actual ONNX checkpoint/quantization mapping lives in one stable constant (alongside `ClapModelProvider`) so any future model swap reliably bumps it. |
 | `status` | TEXT | `ok` / `failed` (un-embeddable file) |
 | `created_at` | INTEGER | epoch ms |
 
@@ -145,6 +145,8 @@ Gates all embedding work. If the model isn't present, embedding workers no-op an
 - Centroids are computed from a **stable daily snapshot** (see Determinism below).
 
 **Cold-start guard:** below a threshold of embedded *played* tracks (e.g. `< N`), there is no reliable fingerprint — fall back to today's tag/affinity discovery and form centroids once enough signal exists.
+
+**Streamed-only libraries:** centroids and the candidate-steering seed (`track.getSimilar` on nearest-sounding library tracks) are built **only from embedded tracks**. In a library that's mostly streamed-only (few local audio files → few vectors), the cold-start guard governs: until enough embedded played tracks exist, discovery stays on the existing tag/affinity path and the sonic steering simply doesn't engage. No streamed-only track is ever required to have a vector for the loop to function.
 
 ### The discovery loop (shared by both modes)
 
@@ -252,7 +254,7 @@ The ranking is the part that matters and it is pure math, so it tests cleanly. M
 
 ## Open questions
 
-1. **Module placement** — new `data:embedding` Gradle module vs. folding `ClapEmbedder` into `core:data`. Decide in the plan based on dependency weight (ONNX Runtime AAR).
+1. **Module placement** — new `data:embedding` Gradle module vs. folding `ClapEmbedder` into `core:data`. Decide in the plan based on dependency weight (ONNX Runtime AAR). The plan must also confirm **where the ffmpeg dependency the preprocessing reuses actually lives** (download/remux path vs. a media module) so the new code depends on it cleanly rather than duplicating it.
 2. **Exact CLAP checkpoint + quantization** — pinned by the Phase-0 spike results (size/speed), not in advance.
 3. **Centroid count `k` and cold-start threshold `N`** — start with small defaults (k ≈ 2–4, N ≈ a few dozen embedded played tracks); tune against on-device results.
 4. **Sonic term: all builtins vs. one dedicated sonic mix** — engine change is identical; recipe wiring decided in the plan.
