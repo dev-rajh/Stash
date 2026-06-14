@@ -51,7 +51,7 @@ import torch.nn.functional as F
 
 import laion_clap
 
-CKPT = "music_audioset_epoch_15_esc_90.pt"
+CKPT = "music_audioset_epoch_15_esc_90.14.pt"
 HERE = os.path.dirname(os.path.abspath(__file__))
 AUDIO_ONNX = os.path.join(HERE, "clap_audio.onnx")
 TEXT_ONNX = os.path.join(HERE, "clap_text.onnx")

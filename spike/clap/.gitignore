@@ -1,0 +1,7 @@
+# Throwaway spike artifacts — never commit these (large binaries / generated).
+.venv/
+__pycache__/
+*.pt
+*.onnx
+fixtures/
+device_run.txt
