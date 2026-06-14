@@ -56,11 +56,20 @@ class ClapSpikeTest {
     // Use the *test* (androidTest APK) context — that's where clapspike/ assets live.
     private val context: Context = InstrumentationRegistry.getInstrumentation().context
 
+    // The *target* app context (com.stash.app.debug) — its data/cache dir is
+    // fully materialized (the app is installed), unlike the test APK's, so model
+    // extraction writes here.
+    private val targetContext: Context =
+        InstrumentationRegistry.getInstrumentation().targetContext
+
     @Test
     fun measureClapOnDevice() {
         // ── 1. Load models + fixtures ───────────────────────────────────────
-        val audioModel = readAsset("clapspike/clap_audio.int8.onnx")
-        val textModel = readAsset("clapspike/clap_text.int8.onnx")
+        // Extract the (large) model assets to cache files and open by PATH, so
+        // ORT mmaps them into native memory instead of forcing a multi-hundred-MB
+        // Java byte[] through the app heap (OutOfMemoryError otherwise).
+        val audioModelPath = extractAssetToCache("clapspike/clap_audio.int8.onnx")
+        val textModelPath = extractAssetToCache("clapspike/clap_text.int8.onnx")
 
         val groundTruth = JSONObject(readAssetText("clapspike/ground_truth.json"))
         val clipNames = groundTruth.getJSONArray("clips").let { arr ->
@@ -74,7 +83,7 @@ class ClapSpikeTest {
         Log.i(tag, "Loaded ${clipNames.size} clips: $clipNames")
         Log.i(tag, "Genres: $genres")
 
-        ClapSpikeOnnx(audioModel, textModel).use { onnx ->
+        ClapSpikeOnnx(audioModelPath, textModelPath).use { onnx ->
             // Decode all WAV clips up front (decode cost excluded from timing).
             val pcmByClip = clipNames.associateWith { name ->
                 readAsset("clapspike/$name.wav").let { WavReader.read(it.inputStream()) }
@@ -167,6 +176,20 @@ class ClapSpikeTest {
 
     private fun readAsset(path: String): ByteArray =
         context.assets.open(path).use(InputStream::readBytes)
+
+    /**
+     * Stream an asset to a cache file and return its absolute path. Used for the
+     * large .onnx models so ORT can mmap them by path (native memory) instead of
+     * holding the whole model in a Java byte[] (heap OOM for big fp32 models).
+     */
+    private fun extractAssetToCache(path: String): String {
+        targetContext.cacheDir.mkdirs()
+        val outFile = java.io.File(targetContext.cacheDir, path.substringAfterLast('/'))
+        context.assets.open(path).use { input ->
+            outFile.outputStream().use { output -> input.copyTo(output, bufferSize = 1 shl 20) }
+        }
+        return outFile.absolutePath
+    }
 
     private fun readAssetText(path: String): String =
         context.assets.open(path).use { it.readBytes().toString(Charsets.UTF_8) }

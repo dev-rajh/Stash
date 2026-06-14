@@ -19,14 +19,17 @@ import kotlin.math.sqrt
  *  - text  model: inputs "input_ids" + "attention_mask"  int64 [1, seqLen]
  *                 output tensor "embed"        float32 [1, 512]
  *
- * The constructor takes the raw model bytes (the test reads them from the
- * androidTest APK assets) so this class has no Android/asset dependency itself.
+ * The constructor takes FILE PATHS to the two .onnx models (the test extracts
+ * them from the androidTest APK assets to cache files first). ORT memory-maps a
+ * model opened by path into NATIVE memory, so a large (e.g. 285 MB fp32) model
+ * never has to fit in the Dalvik/ART Java heap — loading the bytes as a Java
+ * `byte[]` blows the app heap (OutOfMemoryError) for models this size.
  */
-class ClapSpikeOnnx(audioModel: ByteArray, textModel: ByteArray) : Closeable {
+class ClapSpikeOnnx(audioModelPath: String, textModelPath: String) : Closeable {
 
     private val env: OrtEnvironment = OrtEnvironment.getEnvironment()
-    private val audioSession: OrtSession = env.createSession(audioModel, OrtSession.SessionOptions())
-    private val textSession: OrtSession = env.createSession(textModel, OrtSession.SessionOptions())
+    private val audioSession: OrtSession = env.createSession(audioModelPath, OrtSession.SessionOptions())
+    private val textSession: OrtSession = env.createSession(textModelPath, OrtSession.SessionOptions())
 
     /** Embed one 10s window: [pcm] length must be 480000. Returns a 512-dim vector. */
     fun embedAudio(pcm: FloatArray): FloatArray {

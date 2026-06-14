@@ -4,4 +4,8 @@ __pycache__/
 *.pt
 *.onnx
 fixtures/
+source_clips/
 device_run.txt
+*_out.txt
+*_err.txt
+clapspike_run.log
