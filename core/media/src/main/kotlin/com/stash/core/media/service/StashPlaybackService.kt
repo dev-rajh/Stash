@@ -80,6 +80,13 @@ class StashPlaybackService : MediaLibraryService() {
     @Inject lateinit var playbackResumer: PlaybackResumer
     @Inject lateinit var resumeStreamResolver: ResumeStreamResolver
 
+    /**
+     * Shared, interceptor-bearing OkHttp client (carries `AmzCaptchaInterceptor`).
+     * Used by [StashMediaSourceFactory] to stream amz-origin items through an
+     * authed [androidx.media3.datasource.okhttp.OkHttpDataSource].
+     */
+    @Inject lateinit var okHttpClient: okhttp3.OkHttpClient
+
     companion object {
         /** Custom command action for toggling shuffle mode. */
         const val COMMAND_TOGGLE_SHUFFLE = "com.stash.TOGGLE_SHUFFLE"
@@ -236,6 +243,15 @@ class StashPlaybackService : MediaLibraryService() {
                     null
                 }
             },
+            // amz-origin http(s) items stream through an authed OkHttpDataSource
+            // (shared client carries AmzCaptchaInterceptor) so the x-captcha-token
+            // header rides every range request and is re-minted mid-stream.
+            isAmzOrigin = { item ->
+                val scheme = item.localConfiguration?.uri?.scheme?.lowercase()
+                val origin = item.mediaMetadata.extras?.getString(EXTRA_STREAM_ORIGIN)
+                (scheme == "http" || scheme == "https") && origin == "amz"
+            },
+            amzHttpClient = okHttpClient,
         )
 
         val player = ExoPlayer.Builder(this)
