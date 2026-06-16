@@ -57,6 +57,46 @@ class LosslessSourceRegistryTest {
     }
 
     @Test
+    fun `default priority places amz last among lossless`() = runTest {
+        // DEFAULT_PRIORITY = [squid_qobuz, kennyy_qobuz, amz]; verify the
+        // registry honours it and amz lands after both Qobuz proxies.
+        coEvery { prefs.priorityOrderNow() } returns
+            LosslessSourcePreferences.DEFAULT_PRIORITY
+
+        val amz = fakeSource("amz", flacResult("amz"))
+        val kennyy = fakeSource("kennyy_qobuz", flacResult("kennyy_qobuz"))
+        val squid = fakeSource("squid_qobuz", flacResult("squid_qobuz"))
+
+        // Pass them in a deliberately scrambled set so ordering can only
+        // come from the priority list, not registration order.
+        val registry = LosslessSourceRegistry(linkedSetOf(amz, kennyy, squid), prefs, healthGate)
+
+        val orderedIds = registry.orderedSources().map { it.id }
+        assertThat(orderedIds).containsExactly("squid_qobuz", "kennyy_qobuz", "amz").inOrder()
+    }
+
+    @Test
+    fun `amz wins only after both qobuz proxies miss`() = runTest {
+        coEvery { prefs.priorityOrderNow() } returns
+            LosslessSourcePreferences.DEFAULT_PRIORITY
+        coEvery { prefs.minQualityNow() } returns LosslessSourcePreferences.MinQuality.ANY
+        coEvery { healthGate.isDegraded(any()) } returns false
+
+        val amzResult = flacResult("amz")
+        val squid = fakeSource("squid_qobuz", null) // miss
+        val kennyy = fakeSource("kennyy_qobuz", null) // miss
+        val amz = fakeSource("amz", amzResult)
+
+        val registry = LosslessSourceRegistry(linkedSetOf(squid, kennyy, amz), prefs, healthGate)
+        val result = registry.resolve(query)
+
+        assertThat(result).isEqualTo(amzResult)
+        coVerify(exactly = 1) { squid.resolve(any()) }
+        coVerify(exactly = 1) { kennyy.resolve(any()) }
+        coVerify(exactly = 1) { amz.resolve(any()) }
+    }
+
+    @Test
     fun `no source resolves when all are degraded`() = runTest {
         acceptAnyQuality()
         val kennyy = fakeSource("kennyy_qobuz", flacResult("kennyy_qobuz"))
