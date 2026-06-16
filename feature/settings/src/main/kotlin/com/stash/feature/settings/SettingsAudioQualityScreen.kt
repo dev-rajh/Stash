@@ -66,6 +66,7 @@ fun SettingsAudioQualityScreen(
     onBack: () -> Unit,
     onNavigateToEqualizer: () -> Unit,
     onNavigateToSquidWtfCaptcha: () -> Unit,
+    onNavigateToArcodConnect: () -> Unit,
     modifier: Modifier = Modifier,
     viewModel: SettingsViewModel = hiltViewModel(),
 ) {
@@ -125,6 +126,18 @@ fun SettingsAudioQualityScreen(
                         LosslessRoutingStatus(
                             squidStatus = uiState.squidCaptchaStatus,
                             onSolveCaptcha = onNavigateToSquidWtfCaptcha,
+                        )
+
+                        // ARCOD — independent Qobuz lossless (3rd source).
+                        // Connect via Google login in an in-app WebView.
+                        SettingsNavRow(
+                            title = if (uiState.arcodConnected) {
+                                "ARCOD — connected"
+                            } else {
+                                "Connect ARCOD"
+                            },
+                            subtitle = "Independent Qobuz lossless (3rd source)",
+                            onClick = onNavigateToArcodConnect,
                         )
 
                         // -- Lossless quality picker --------------------------

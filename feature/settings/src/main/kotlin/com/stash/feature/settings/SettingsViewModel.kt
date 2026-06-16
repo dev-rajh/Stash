@@ -38,6 +38,7 @@ import com.stash.data.download.files.MoveLibraryState
 import com.stash.data.download.lossless.AggregatorRateLimiter
 import com.stash.data.download.lossless.LosslessQualityTier
 import com.stash.data.download.lossless.LosslessSourcePreferences
+import com.stash.data.download.lossless.arcod.ArcodCredentialStore
 import com.stash.data.download.lossless.qobuz.QobuzSource
 import com.stash.feature.settings.components.squidCaptchaStatus
 import com.stash.core.data.repository.MusicRepository
@@ -50,6 +51,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -92,6 +94,7 @@ class SettingsViewModel @Inject constructor(
     private val losslessPrefs: LosslessSourcePreferences,
     private val losslessRateLimiter: AggregatorRateLimiter,
     private val qobuzSource: QobuzSource,
+    private val arcodCredentialStore: ArcodCredentialStore,
     private val likePreferences: LikePreferences,
     private val trackDao: TrackDao,
     private val settingsDeepLinkController: com.stash.core.data.navigation.SettingsDeepLinkController,
@@ -240,6 +243,7 @@ class SettingsViewModel @Inject constructor(
         stashMixPreference.enabled,
         likePreferences.mirrorLikesSpotify,
         likePreferences.mirrorLikesYtMusic,
+        arcodCredentialStore.accessToken,
     ) { values ->
         @Suppress("UNCHECKED_CAST")
         val spotifyAuth = values[0] as AuthState
@@ -271,6 +275,7 @@ class SettingsViewModel @Inject constructor(
         val stashMixesEnabled = values[26] as Boolean
         val mirrorLikesSpotify = values[27] as Boolean
         val mirrorLikesYtMusic = values[28] as Boolean
+        val arcodConnected = !(values[29] as String?).isNullOrBlank()
 
         val lastFmState: LastFmAuthState = local.lastFmAuthOverride
             ?: when {
@@ -320,6 +325,7 @@ class SettingsViewModel @Inject constructor(
             autoSavedCountLast7Days = autoSavedCount7d,
             mirrorLikesSpotify = mirrorLikesSpotify,
             mirrorLikesYtMusic = mirrorLikesYtMusic,
+            arcodConnected = arcodConnected,
             pendingMirrorWarning = local.pendingMirrorWarning,
             youtubeFallbackEnabled = youtubeFallbackEnabled,
             hasCrashReport = local.hasCrashReport,
@@ -926,6 +932,35 @@ class SettingsViewModel @Inject constructor(
     fun onYoutubeFallbackChanged(value: Boolean) {
         viewModelScope.launch {
             losslessPrefs.setYoutubeFallbackEnabled(value)
+        }
+    }
+
+    // -- ARCOD connect -------------------------------------------------------
+
+    /**
+     * Live "is ARCOD connected" flag, derived from the presence of a
+     * non-blank access token in [ArcodCredentialStore]. Drives the
+     * "Connect ARCOD" / "ARCOD — connected" row label. Also surfaced into
+     * [SettingsUiState.arcodConnected] via the main `combine`; exposed
+     * standalone for callers that only need this one bit.
+     */
+    val arcodConnected: StateFlow<Boolean> =
+        arcodCredentialStore.accessToken
+            .map { !it.isNullOrBlank() }
+            .stateIn(
+                scope = viewModelScope,
+                started = SharingStarted.WhileSubscribed(5_000),
+                initialValue = false,
+            )
+
+    /**
+     * Persists the Supabase session harvested from the ARCOD connect
+     * WebView's localStorage. The ARCOD source/interceptor read it back
+     * from [ArcodCredentialStore] reactively, so no further wiring is needed.
+     */
+    fun onArcodConnected(accessToken: String, refreshToken: String, expiresAtMs: Long) {
+        viewModelScope.launch {
+            arcodCredentialStore.save(accessToken, refreshToken, expiresAtMs)
         }
     }
 
