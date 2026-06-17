@@ -74,7 +74,12 @@ class StreamSourceRegistry @Inject constructor(
         allowYtDlp: Boolean = true,
     ): StreamUrl? {
         val resolvers = buildList<Pair<String, suspend (TrackEntity) -> StreamUrl?>> {
-            if (streamingPreference.isForceYouTubeFallback()) {
+            if (streamingPreference.isForceArcodOnly()) {
+                // Test toggle: ARCOD ONLY — skip kennyy/squid/YouTube so the
+                // ARCOD path can be exercised even when the Qobuz proxies are
+                // healthy. Takes precedence over forceYouTubeFallback.
+                add("arcod" to arcod::resolve)
+            } else if (streamingPreference.isForceYouTubeFallback()) {
                 // Test toggle: skip the lossless sources, forcing the
                 // YouTube fallback path. Still gated by allowYouTube so the
                 // background-fill keeps resolving nothing (matching a genuine

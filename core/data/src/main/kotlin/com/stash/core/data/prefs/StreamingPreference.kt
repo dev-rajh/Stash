@@ -48,6 +48,7 @@ class StreamingPreference @Inject constructor(
     private val cellularKey = booleanPreferencesKey("streaming_on_cellular")
     private val qualityKey = stringPreferencesKey("streaming_quality_tier")
     private val forceYouTubeFallbackKey = booleanPreferencesKey("force_youtube_fallback")
+    private val forceArcodOnlyKey = booleanPreferencesKey("force_arcod_only")
     // Retained only so [purgeRetiredKeys] can delete it from existing
     // installs; the antra source was removed (see fix/remove-antra).
     private val forceAntraOnlyKey = booleanPreferencesKey("force_antra_only")
@@ -75,9 +76,22 @@ class StreamingPreference @Inject constructor(
         prefs[forceYouTubeFallbackKey] ?: false
     }
 
+    /**
+     * Test-only toggle. When `true`, both the streaming and download
+     * registries route through ARCOD ONLY (skip kennyy/squid/YouTube) — so
+     * the ARCOD source can be exercised on demand even when the Qobuz proxies
+     * are healthy. Default `false` (normal use). Takes precedence over
+     * [forceYouTubeFallback].
+     */
+    val forceArcodOnly: Flow<Boolean> = context.streamingDataStore.data.map { prefs ->
+        prefs[forceArcodOnlyKey] ?: false
+    }
+
     suspend fun current(): Boolean = enabled.first()
 
     suspend fun isForceYouTubeFallback(): Boolean = forceYouTubeFallback.first()
+
+    suspend fun isForceArcodOnly(): Boolean = forceArcodOnly.first()
 
     suspend fun setEnabled(value: Boolean) {
         context.streamingDataStore.edit { it[enabledKey] = value }
@@ -89,6 +103,10 @@ class StreamingPreference @Inject constructor(
 
     suspend fun setForceYouTubeFallback(value: Boolean) {
         context.streamingDataStore.edit { it[forceYouTubeFallbackKey] = value }
+    }
+
+    suspend fun setForceArcodOnly(value: Boolean) {
+        context.streamingDataStore.edit { it[forceArcodOnlyKey] = value }
     }
 
     suspend fun setStreamQuality(tier: StreamQualityTier) {

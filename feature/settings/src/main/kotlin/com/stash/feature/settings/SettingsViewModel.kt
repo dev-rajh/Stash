@@ -170,6 +170,18 @@ class SettingsViewModel @Inject constructor(
         streamingPreference.setForceYouTubeFallback(v)
     }
 
+    /** Test toggle: route streaming + downloads through ARCOD only. */
+    val forceArcodOnly: kotlinx.coroutines.flow.StateFlow<Boolean> =
+        streamingPreference.forceArcodOnly.stateIn(
+            scope = viewModelScope,
+            started = kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5_000),
+            initialValue = false,
+        )
+
+    fun setForceArcodOnly(v: Boolean) = viewModelScope.launch {
+        streamingPreference.setForceArcodOnly(v)
+    }
+
     /** Internal mutable UI state that is combined with token-manager flows. */
     private val _localState = MutableStateFlow(LocalState())
 

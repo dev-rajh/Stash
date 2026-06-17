@@ -12,6 +12,9 @@ class LosslessSourceRegistryTest {
 
     private val prefs: LosslessSourcePreferences = mockk()
     private val healthGate: LosslessSourceHealthGate = mockk()
+    private val streamingPreference: com.stash.core.data.prefs.StreamingPreference = mockk {
+        coEvery { isForceArcodOnly() } returns false
+    }
 
     private val query = TrackQuery(artist = "A", title = "B")
 
@@ -48,7 +51,7 @@ class LosslessSourceRegistryTest {
         coEvery { healthGate.isDegraded("squid_qobuz") } returns false
 
         // priorityOrder empty → registration order; ensure kennyy is tried first.
-        val registry = LosslessSourceRegistry(linkedSetOf(kennyy, squid), prefs, healthGate)
+        val registry = LosslessSourceRegistry(linkedSetOf(kennyy, squid), prefs, healthGate, streamingPreference)
         val result = registry.resolve(query)
 
         assertThat(result).isEqualTo(squidResult)
@@ -63,7 +66,7 @@ class LosslessSourceRegistryTest {
         val squid = fakeSource("squid_qobuz", flacResult("squid_qobuz"))
         coEvery { healthGate.isDegraded(any()) } returns true
 
-        val registry = LosslessSourceRegistry(linkedSetOf(kennyy, squid), prefs, healthGate)
+        val registry = LosslessSourceRegistry(linkedSetOf(kennyy, squid), prefs, healthGate, streamingPreference)
 
         assertThat(registry.resolve(query)).isNull()
         coVerify(exactly = 0) { kennyy.resolve(any()) }
@@ -80,7 +83,7 @@ class LosslessSourceRegistryTest {
         val squid = fakeSource("squid_qobuz", flacResult("squid_qobuz"))
         val kennyy = fakeSource("kennyy_qobuz", flacResult("kennyy_qobuz"))
 
-        val registry = LosslessSourceRegistry(linkedSetOf(arcod, kennyy, squid), prefs, healthGate)
+        val registry = LosslessSourceRegistry(linkedSetOf(arcod, kennyy, squid), prefs, healthGate, streamingPreference)
 
         val orderedIds = registry.orderedSources().map { it.id }
         assertThat(orderedIds).containsExactly("squid_qobuz", "kennyy_qobuz", "arcod").inOrder()

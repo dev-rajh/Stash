@@ -32,6 +32,7 @@ fun SettingsPlaybackScreen(
     val streamingEnabled by viewModel.streamingEnabled.collectAsStateWithLifecycle()
     val streamOnCellular by viewModel.streamOnCellular.collectAsStateWithLifecycle()
     val forceYouTubeFallback by viewModel.forceYouTubeFallback.collectAsStateWithLifecycle()
+    val forceArcodOnly by viewModel.forceArcodOnly.collectAsStateWithLifecycle()
 
     SettingsScaffold(title = "Playback", onBack = onBack, modifier = modifier) {
         if (StashConstants.STREAMING_ENGINE_ENABLED) {
@@ -59,6 +60,14 @@ fun SettingsPlaybackScreen(
                             subtitle = "Skip the lossless sources (Qobuz) and stream everything via YouTube. Turn this on if lossless playback is down or only playing short clips.",
                             checked = forceYouTubeFallback,
                             onCheckedChange = viewModel::setForceYouTubeFallback,
+                        )
+                    },
+                    {
+                        SettingsToggleRow(
+                            title = "Force ARCOD only (test)",
+                            subtitle = "Route streaming and downloads through ARCOD alone — no Qobuz proxies, no YouTube. For testing the ARCOD source. Turn off after testing.",
+                            checked = forceArcodOnly,
+                            onCheckedChange = viewModel::setForceArcodOnly,
                         )
                     },
                 ),

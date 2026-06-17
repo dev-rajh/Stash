@@ -1,6 +1,7 @@
 package com.stash.data.download.lossless
 
 import android.util.Log
+import com.stash.core.data.prefs.StreamingPreference
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -25,6 +26,7 @@ class LosslessSourceRegistry @Inject constructor(
     private val sources: Set<@JvmSuppressWildcards LosslessSource>,
     private val prefs: LosslessSourcePreferences,
     private val healthGate: LosslessSourceHealthGate,
+    private val streamingPreference: StreamingPreference,
 ) {
 
     /**
@@ -35,7 +37,13 @@ class LosslessSourceRegistry @Inject constructor(
      * Path ii of the source-priority model).
      */
     suspend fun resolve(query: TrackQuery): SourceResult? {
-        val ordered = orderedSources()
+        // Test toggle: ARCOD ONLY — filter the chain to arcod so a forced
+        // download exercises ARCOD even when the Qobuz proxies are healthy.
+        val ordered = if (streamingPreference.isForceArcodOnly()) {
+            orderedSources().filter { it.id == "arcod" }
+        } else {
+            orderedSources()
+        }
         val minQuality = prefs.minQualityNow()
 
         for (source in ordered) {
