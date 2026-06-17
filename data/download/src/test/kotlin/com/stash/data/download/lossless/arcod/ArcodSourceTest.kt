@@ -31,7 +31,7 @@ class ArcodSourceTest {
     private val credentialStore: ArcodCredentialStore = mockk()
     private val rateLimiter: AggregatorRateLimiter = mockk(relaxUnitFun = true)
 
-    private fun source() = ArcodSource(client, credentialStore, rateLimiter)
+    private fun source() = ArcodSource(client, credentialStore, rateLimiter, ArcodJobGate())
 
     private fun query(
         artist: String = "Radiohead",

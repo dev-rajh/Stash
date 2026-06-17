@@ -103,18 +103,22 @@ class AggregatorRateLimiter @Inject constructor() {
         )
 
         // ARCOD (Qobuz-DL proxy via arcod.xyz) runs one operator-paid Qobuz
-        // account behind a Supabase-gated job queue, so it is even more
-        // bandwidth-fragile than kennyy. Stay deliberately conservative:
-        // 1 token / 2s (~30/min ceiling), burst 2. ARCOD's 429 is a genuine
-        // over-rate signal (account/IP cap), NOT an expected concurrency reply,
-        // so leave rateLimitTripsBreaker at its default (true) — sustained 429s
-        // mean we're structurally over budget and should cool down hard.
+        // account behind a Supabase-gated job queue, with a per-account ~50
+        // downloads/hour cap. Stay deliberately conservative: 1 token / 2s,
+        // burst 2. CRITICAL: ARCOD's 429 = "you hit the hourly cap, slow down"
+        // — that's NORMAL operation against a quota, NOT a health failure. So
+        // `rateLimitTripsBreaker = false`: a 429 applies the backoff but must
+        // NOT trip the breaker. (Tripping it disabled ARCOD for 10 min on a
+        // real sync, so every track fell through to yt-dlp — verified on-device
+        // 2026-06-16.) Only genuine failures (5xx/network via reportFailure)
+        // trip the breaker.
         configs["arcod"] = Config(
             tokensPerSecond = 1.0 / 2.0,   // 1 token / 2 seconds
             burstCapacity = 2.0,
-            backoff429Ms = 60_000L,        // 1 min pause on 429
+            backoff429Ms = 60_000L,        // 1 min pause on 429 (cap hit)
             circuitBreakAfter = 5,
             circuitBreakDurationMs = 10 * 60_000L, // 10 min
+            rateLimitTripsBreaker = false,
         )
     }
 

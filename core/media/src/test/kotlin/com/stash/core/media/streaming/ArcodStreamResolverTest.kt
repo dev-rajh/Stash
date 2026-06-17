@@ -6,6 +6,7 @@ import com.stash.data.download.lossless.arcod.ArcodAlbum
 import com.stash.data.download.lossless.arcod.ArcodClient
 import com.stash.data.download.lossless.arcod.ArcodImage
 import com.stash.data.download.lossless.arcod.ArcodJob
+import com.stash.data.download.lossless.arcod.ArcodJobGate
 import com.stash.data.download.lossless.arcod.ArcodNamed
 import com.stash.data.download.lossless.arcod.ArcodTrackItem
 import io.mockk.coEvery
@@ -18,7 +19,7 @@ class ArcodStreamResolverTest {
 
     private val client: ArcodClient = mockk()
 
-    private fun resolver() = ArcodStreamResolver(client)
+    private fun resolver() = ArcodStreamResolver(client, ArcodJobGate())
 
     private fun stubTrack(): TrackEntity = TrackEntity(
         id = 7L,

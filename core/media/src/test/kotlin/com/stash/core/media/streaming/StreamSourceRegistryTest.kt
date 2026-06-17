@@ -17,7 +17,10 @@ class StreamSourceRegistryTest {
     private val qobuz: QobuzStreamResolver = mockk()
     private val arcod: ArcodStreamResolver = mockk()
     private val youtube: YouTubeStreamResolver = mockk()
-    private val streamingPreference: StreamingPreference = mockk()
+    private val streamingPreference: StreamingPreference = mockk {
+        // Default: neither test toggle on. Individual tests override as needed.
+        coEvery { isForceArcodOnly() } returns false
+    }
 
     private fun registry() = StreamSourceRegistry(kennyy, qobuz, arcod, youtube, streamingPreference)
 
@@ -106,6 +109,26 @@ class StreamSourceRegistryTest {
         coVerify { qobuz.resolve(track) }
         coVerify { arcod.resolve(track) }
         coVerify(exactly = 0) { youtube.resolve(any(), any()) }
+    }
+
+    /**
+     * ARCOD is slow + job-based + quota-capped, so it must NOT run on the
+     * speculative queue-wide background fill (allowYtDlp = false) — only on
+     * foreground/next-up resolves. Otherwise one playlist tap fans out a render
+     * job per queue track and blows the operator's hourly cap.
+     */
+    @Test
+    fun resolve_background_fill_skips_arcod() = runTest {
+        coEvery { streamingPreference.isForceYouTubeFallback() } returns false
+        coEvery { kennyy.resolve(any()) } returns null
+        coEvery { qobuz.resolve(any()) } returns null
+        // arcod intentionally unstubbed — it must NOT be consulted.
+        coEvery { youtube.resolve(any(), any()) } returns null
+        val track = stubTrack()
+
+        registry().resolve(track, allowYouTube = true, allowYtDlp = false)
+
+        coVerify(exactly = 0) { arcod.resolve(any()) }
     }
 
     /**

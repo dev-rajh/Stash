@@ -33,6 +33,7 @@ class ArcodSource @Inject constructor(
     private val client: ArcodClient,
     private val credentialStore: ArcodCredentialStore,
     private val rateLimiter: AggregatorRateLimiter,
+    private val jobGate: ArcodJobGate,
 ) : LosslessSource {
 
     override val id: String = SOURCE_ID
@@ -43,8 +44,12 @@ class ArcodSource @Inject constructor(
      * Usable only when the user has connected an ARCOD session AND the source
      * isn't currently circuit-broken from repeated failures.
      */
-    override suspend fun isEnabled(): Boolean =
-        credentialStore.isConnected() && !rateLimiter.stateOf(id).isCircuitBroken
+    override suspend fun isEnabled(): Boolean {
+        val connected = credentialStore.isConnected()
+        val broken = rateLimiter.stateOf(id).isCircuitBroken
+        Log.d(TAG, "isEnabled: connected=$connected circuitBroken=$broken")
+        return connected && !broken
+    }
 
     override suspend fun rateLimitState(): RateLimitState = rateLimiter.stateOf(id)
 
@@ -93,37 +98,41 @@ class ArcodSource @Inject constructor(
                 releaseDate = album.releaseDate ?: "",
                 tracksCount = album.tracksCount ?: 1,
             )
-            val job = client.createJob(request) ?: run {
-                Log.d(TAG, "createJob returned null for track ${item.id}")
-                rateLimiter.reportFailure(id)
-                return null
-            }
 
-            // 5. Poll until the render completes (or times out).
-            val completed = client.pollStatus(job.id) ?: run {
-                Log.d(TAG, "pollStatus returned null for job ${job.id}")
-                rateLimiter.reportFailure(id)
-                return null
-            }
+            // The create→poll→url render lifecycle runs under the shared
+            // ArcodJobGate so at most ONE ARCOD job is in flight app-wide (a
+            // library sync's parallel download workers would otherwise fire
+            // dozens at once and blow the operator's hourly cap).
+            val resolved = jobGate.withJob {
+                val job = client.createJob(request) ?: run {
+                    Log.d(TAG, "createJob returned null for track ${item.id}")
+                    rateLimiter.reportFailure(id)
+                    return@withJob null
+                }
+                val completed = client.pollStatus(job.id) ?: run {
+                    Log.d(TAG, "pollStatus returned null for job ${job.id}")
+                    rateLimiter.reportFailure(id)
+                    return@withJob null
+                }
+                val dl = client.downloadUrlFrom(completed) ?: run {
+                    Log.d(TAG, "completed job ${job.id} had no download url")
+                    rateLimiter.reportFailure(id)
+                    return@withJob null
+                }
+                rateLimiter.reportSuccess(id)
+                ResolvedJob(dl, job.id)
+            } ?: return null
 
-            // 6. Extract the open, short-lived download URL.
-            val url = client.downloadUrlFrom(completed) ?: run {
-                Log.d(TAG, "completed job ${job.id} had no download url")
-                rateLimiter.reportFailure(id)
-                return null
-            }
-
-            rateLimiter.reportSuccess(id)
             SourceResult(
                 sourceId = id,
-                downloadUrl = url,
+                downloadUrl = resolved.url,
                 // dl.arcod.xyz serves the file openly (no auth) — no headers.
                 downloadHeaders = emptyMap(),
                 // Codec is FLAC; the real bit-depth/sample-rate is filled by the
                 // post-download probe (AudioDurationExtractor), so leave 0s here.
                 format = AudioFormat(codec = "flac", bitrateKbps = 0, sampleRateHz = 0, bitsPerSample = 0),
                 confidence = match.confidence,
-                sourceTrackId = job.id,
+                sourceTrackId = resolved.jobId,
                 coverArtUrl = album.image?.large,
             )
         } catch (e: ArcodRateLimitedException) {
@@ -141,6 +150,9 @@ class ArcodSource @Inject constructor(
             null
         }
     }
+
+    /** The completed-job outcome carried out of the [ArcodJobGate] block. */
+    private data class ResolvedJob(val url: String, val jobId: String)
 
     companion object {
         const val SOURCE_ID = "arcod"

@@ -4,6 +4,7 @@ import android.util.Log
 import com.stash.core.data.db.entity.TrackEntity
 import com.stash.data.download.lossless.TrackQuery
 import com.stash.data.download.lossless.arcod.ArcodClient
+import com.stash.data.download.lossless.arcod.ArcodJobGate
 import com.stash.data.download.lossless.arcod.ArcodJobRequest
 import com.stash.data.download.lossless.arcod.ArcodMatcher
 import javax.inject.Inject
@@ -36,6 +37,7 @@ import kotlinx.coroutines.CancellationException
 @Singleton
 class ArcodStreamResolver @Inject constructor(
     private val client: ArcodClient,
+    private val jobGate: ArcodJobGate,
 ) {
     suspend fun resolve(track: TrackEntity): StreamUrl? {
         Log.d(TAG, "resolve attempt id=${track.id} title='${track.title}'")
@@ -67,18 +69,23 @@ class ArcodStreamResolver @Inject constructor(
                 releaseDate = item.album?.releaseDate ?: "",
                 tracksCount = item.album?.tracksCount ?: 1,
             )
-            val job = client.createJob(request) ?: run {
-                Log.d(TAG, "createJob_null id=${track.id} trackId=${item.id}")
-                return null
-            }
-            val completed = client.pollStatus(job.id) ?: run {
-                Log.d(TAG, "poll_failed id=${track.id} jobId=${job.id}")
-                return null
-            }
-            val url = client.downloadUrlFrom(completed) ?: run {
-                Log.d(TAG, "no_url id=${track.id} jobId=${job.id}")
-                return null
-            }
+            // create→poll→url runs under the shared ArcodJobGate: at most ONE
+            // ARCOD render job in flight app-wide (download + stream combined),
+            // so a queue tap can't fan out dozens of concurrent jobs.
+            val url = jobGate.withJob {
+                val job = client.createJob(request) ?: run {
+                    Log.d(TAG, "createJob_null id=${track.id} trackId=${item.id}")
+                    return@withJob null
+                }
+                val completed = client.pollStatus(job.id) ?: run {
+                    Log.d(TAG, "poll_failed id=${track.id} jobId=${job.id}")
+                    return@withJob null
+                }
+                client.downloadUrlFrom(completed) ?: run {
+                    Log.d(TAG, "no_url id=${track.id} jobId=${job.id}")
+                    return@withJob null
+                }
+            } ?: return null
             Log.d(TAG, "resolved id=${track.id} origin=$ORIGIN")
             StreamUrl(
                 url = url,

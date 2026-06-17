@@ -77,8 +77,12 @@ class StreamSourceRegistry @Inject constructor(
             if (streamingPreference.isForceArcodOnly()) {
                 // Test toggle: ARCOD ONLY — skip kennyy/squid/YouTube so the
                 // ARCOD path can be exercised even when the Qobuz proxies are
-                // healthy. Takes precedence over forceYouTubeFallback.
-                add("arcod" to arcod::resolve)
+                // healthy. Takes precedence over forceYouTubeFallback. Still
+                // gated by allowYtDlp so the speculative background fill
+                // resolves NOTHING (matching forceYt) — without this, flipping
+                // the toggle and tapping a playlist fans out a render job per
+                // queue track and blows the operator's hourly cap.
+                if (allowYtDlp) add("arcod" to arcod::resolve)
             } else if (streamingPreference.isForceYouTubeFallback()) {
                 // Test toggle: skip the lossless sources, forcing the
                 // YouTube fallback path. Still gated by allowYouTube so the
@@ -88,7 +92,14 @@ class StreamSourceRegistry @Inject constructor(
             } else {
                 add("kennyy" to kennyy::resolve)
                 add("squid" to qobuz::resolve)
-                add("arcod" to arcod::resolve)
+                // ARCOD is a slow, job-based, quota-capped source. Like the
+                // slow yt-dlp path, it must run ONLY on foreground/next-up
+                // resolves (allowYtDlp = true), NEVER on the speculative
+                // queue-wide background fill (allowYtDlp = false) — otherwise
+                // one playlist tap fans out a render job per queue track and
+                // blows the operator's hourly cap. (Reuses allowYtDlp as the
+                // "this is a real, intentional resolve" signal.)
+                if (allowYtDlp) add("arcod" to arcod::resolve)
                 if (allowYouTube) add("youtube" to { t: TrackEntity -> youtube.resolve(t, allowYtDlp) })
             }
         }
