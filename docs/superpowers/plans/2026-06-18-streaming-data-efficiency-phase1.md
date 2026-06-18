@@ -59,14 +59,24 @@ import io.mockk.coEvery
 import io.mockk.mockk
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
+import org.junit.Before
 import org.junit.runner.RunWith
 import org.junit.Test
 import org.robolectric.RobolectricTestRunner
+import java.io.File
 
 @RunWith(RobolectricTestRunner::class)
 class StreamingQualityPreferencesTest {
 
     private val context: Context = ApplicationProvider.getApplicationContext()
+
+    // The extension-property DataStore is a single shared instance for the
+    // whole test process — delete its backing file before each test so
+    // writes from one case don't bleed into another (the established
+    // :data:download pattern, e.g. LosslessSourcePreferences tests).
+    @Before fun clean() {
+        File(context.filesDir, "datastore/streaming_quality_preferences.preferences_pb").delete()
+    }
 
     private fun newPrefs(downloadTier: LosslessQualityTier): StreamingQualityPreferences {
         val lossless = mockk<LosslessSourcePreferences>()
@@ -109,7 +119,7 @@ class StreamingQualityPreferencesTest {
 }
 ```
 
-> Note: the existing `:data:download` test setup uses Robolectric + a real DataStore. If the existing tests in that module use a temp-file DataStore helper, mirror that pattern instead of the default extension-property store so tests don't share state.
+> Note: the extension-property DataStore is process-wide, so the `@Before` file-delete above is **required** — without it the write-then-read tests are order-dependent and flaky. This is the same isolation pattern the existing `LosslessSourcePreferences` tests in this module use (delete the `.preferences_pb` file in setup), not a temp-file helper.
 
 - [ ] **Step 2: Run the test to verify it fails**
 
@@ -332,7 +342,7 @@ git commit -m "refactor(lossless): thread optional requestedQuality through Qobu
 
 Mirror Task 2 exactly. `KennyySource.kt:136-140` is the same `tier = losslessPrefs.qualityTierNow(); requestedQuality = tier.qobuzCode; apiClient.getFileUrl(best.first.id, requestedQuality)` shape.
 
-- [ ] **Step 1: Write the failing tests** — same two cases as Task 2, adapted to `KennyySourceTest` fixtures (`KennyyApiClient.getFileUrl(id, quality)` — note Kennyy's client takes 2 args, no `tokenCountry`).
+- [ ] **Step 1: Write the failing tests** — same two cases as Task 2, adapted to `KennyySourceTest` fixtures. **Critical arity difference:** `KennyyApiClient.getFileUrl(id, quality)` takes **2 args** (no `tokenCountry`), so the stub/verify must be 2-arg, e.g. `coEvery { apiClient.getFileUrl(42L, any()) } returns ...` and `coVerify { apiClient.getFileUrl(42L, QobuzQuality.FLAC_CD) }`. Do not copy Task 2's 3-arg form.
 - [ ] **Step 2: Run → FAIL**
 
 Run: `./gradlew :data:download:testDebugUnitTest --tests "com.stash.data.download.lossless.kennyy.KennyySourceTest" --no-daemon`
