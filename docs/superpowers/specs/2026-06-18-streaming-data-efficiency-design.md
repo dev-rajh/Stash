@@ -108,7 +108,7 @@ Setting cellular = CD yields ~5× less cellular data with no audible loss. This 
 ## 5. Phase 2 — Cellular data budget (self-metered + YouTube fallback)
 
 ### 5.1 Metering
-- Attach a counting `TransferListener` to the **streaming** `DataSource.Factory` built in `StashMediaSourceFactory` (download path untouched).
+- Attach a counting `TransferListener` to the `DataSource.Factory` that serves **lossless streaming** bytes. **Important:** in `StashMediaSourceFactory`, only YouTube-origin items go through `streamingFactory` (the refresh chain); **lossless Kennyy/Squid streams play through the plain `localFactory` (`DefaultMediaSourceFactory`).** Since the budget exists to meter FLAC (the dominant cost), the Phase 2 plan must identify where the lossless stream's `DataSource.Factory` is built and attach the listener there — wrapping both factory paths is the safe choice so neither lossless nor YT-fallback cellular bytes are missed. (Download path untouched.)
 - On `onBytesTransferred`, add bytes **only when `ConnectivityMonitor.isCellular()`** is true.
 - Accurate to actual streamed bytes; no permissions. Reads slightly under carrier counters (no TLS/retransmit overhead) — acceptable for a *protective* budget (under-counting → falls back marginally early). Settings copy says "approximate."
 
@@ -152,7 +152,7 @@ User taps track (Online mode)
 ## 7. Open items / risks (self-critique)
 
 - **Save Data vs cellular=CD redundancy:** functionally overlapping. Kept because the user chose it and it's a recognizable one-tap affordance; mitigated by visibly disabling the per-network pickers when Save Data is on.
-- **`streamQuality` (LOSSLESS|HQ_LOSSY):** verify whether it's actually consumed today; decide to fold into the new tiers or leave untouched. Must not regress lossless-vs-lossy intent.
+- **`streamQuality` (LOSSLESS|HQ_LOSSY):** RESOLVED — confirmed stored-but-unused today (`KennyyStreamResolver` KDoc states it explicitly; no production read). Leave it untouched in Phase 1; no regression risk.
 - **Metering fidelity:** self-metering undercounts vs carrier; documented as approximate.
 - **Re-buffering on skip:** ExoPlayer buffer-ahead can fetch slightly more than played; secondary optimization (buffer trim on cellular) deferred — not in scope.
 - **`streamOnCellular=false` precedence:** preserved as a hard gate above the new tier/budget logic, so existing "no cellular streaming" users see no behavior change.
