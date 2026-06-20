@@ -59,7 +59,26 @@ class AmzApiClientTest {
 
         val request = server.takeRequest()
         assertThat(request.path).endsWith("/track")
-        assertThat(request.body.readUtf8()).contains("\"asin\":\"B07K7VJXVG\"")
+        val body = request.body.readUtf8()
+        assertThat(body).contains("\"asin\":\"B07K7VJXVG\"")
+        // No explicit tier → the proxy default ("best", native max quality).
+        assertThat(body).contains("\"tier\":\"best\"")
+    }
+
+    @Test fun `track sends the requested tier in the body`() = runTest {
+        server.enqueue(MockResponse().setResponseCode(200).setBody(TRACK_JSON))
+
+        client.track("B07K7VJXVG", tier = "hd")
+
+        // Data-saver / per-network tier (e.g. cellular Hi-Res -> amz "hd")
+        // must reach the wire, not the hardcoded "best".
+        assertThat(server.takeRequest().body.readUtf8()).contains("\"tier\":\"hd\"")
+    }
+
+    @Test fun `streamUrl encodes the requested tier`() {
+        client.baseUrl = "https://amz.squid.wtf/api"
+        assertThat(client.streamUrl("B07K7VJXVG", tier = "ultrahd"))
+            .isEqualTo("https://amz.squid.wtf/api/stream?asin=B07K7VJXVG&country=US&tier=ultrahd")
     }
 
     @Test fun `track parses drm key and resolves relative stream url to absolute`() = runTest {

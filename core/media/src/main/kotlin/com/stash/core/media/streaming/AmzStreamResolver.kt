@@ -41,9 +41,14 @@ import kotlin.coroutines.cancellation.CancellationException
 class AmzStreamResolver @Inject constructor(
     private val client: AmzApiClient,
     private val fileProvider: com.stash.data.download.lossless.amz.AmzStreamFileProvider,
+    private val qualityPolicy: StreamQualityPolicy,
 ) {
     suspend fun resolve(track: TrackEntity): StreamUrl? {
         Log.d(TAG, "resolve attempt id=${track.id} title='${track.title}'")
+        // Per-network streaming tier (Save Data → CD; cellular → cellularTier;
+        // Wi-Fi → wifiTier), mapped to amz's wire tier. CD maps to amz `high`
+        // (256 AAC) — the data-saver floor for metered streaming.
+        val amzTier = qualityPolicy.streamingTier().amzTier
         val query = TrackQuery(
             artist = track.artist,
             title = track.title,
@@ -60,7 +65,7 @@ class AmzStreamResolver @Inject constructor(
                 Log.d(TAG, "no_match id=${track.id}")
                 return null
             }
-            val amz = client.track(match.item.asin) ?: run {
+            val amz = client.track(match.item.asin, amzTier) ?: run {
                 Log.d(TAG, "no_meta id=${track.id} asin=${match.item.asin}")
                 return null
             }
@@ -74,7 +79,7 @@ class AmzStreamResolver @Inject constructor(
                 Log.d(TAG, "no_drm_key id=${track.id} asin=${meta.asin}")
                 return null
             }
-            val encryptedUrl = amz.streamUrl ?: client.streamUrl(meta.asin)
+            val encryptedUrl = amz.streamUrl ?: client.streamUrl(meta.asin, amzTier)
             val localFile = fileProvider.resolveLocalFile(meta.asin, encryptedUrl, key) ?: run {
                 Log.d(TAG, "decrypt_failed id=${track.id} asin=${meta.asin}")
                 return null

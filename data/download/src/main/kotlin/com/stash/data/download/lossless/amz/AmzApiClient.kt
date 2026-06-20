@@ -83,11 +83,13 @@ class AmzApiClient @Inject constructor(
      *
      * @throws AmzRateLimitedException on HTTP 429.
      */
-    suspend fun track(asin: String): AmzTrack? = withContext(Dispatchers.IO) {
+    suspend fun track(asin: String, tier: String = DEFAULT_TIER): AmzTrack? = withContext(Dispatchers.IO) {
         val body = buildString {
             append("{\"asin\":")
             append(jsonString(asin))
-            append(",\"tier\":\"best\",\"country\":\"US\"}")
+            append(",\"tier\":")
+            append(jsonString(tier))
+            append(",\"country\":\"US\"}")
         }
         val raw = post("$baseUrl/track", body) ?: return@withContext null
         runCatching {
@@ -126,9 +128,10 @@ class AmzApiClient @Inject constructor(
      * fetched. The ASIN is URL-encoded defensively (ASINs are normally
      * `[A-Z0-9]{10}`, but never trust the upstream shape).
      */
-    fun streamUrl(asin: String): String {
+    fun streamUrl(asin: String, tier: String = DEFAULT_TIER): String {
         val encoded = URLEncoder.encode(asin, "UTF-8")
-        return "$baseUrl/stream?asin=$encoded&country=US&tier=best"
+        val encodedTier = URLEncoder.encode(tier, "UTF-8")
+        return "$baseUrl/stream?asin=$encoded&country=US&tier=$encodedTier"
     }
 
     /** JSON-encode [value] to a quoted, escaped JSON string literal. */
@@ -170,6 +173,12 @@ class AmzApiClient @Inject constructor(
 
     companion object {
         const val DEFAULT_BASE_URL: String = "https://amz.squid.wtf/api"
+
+        /**
+         * Wire `tier` used when a caller doesn't specify one. `best` asks the
+         * proxy for the highest available master (native max quality per track).
+         */
+        const val DEFAULT_TIER: String = "best"
         private const val TAG = "AmzApiClient"
         // Same UA/Referer the captcha mint uses, so search/track/stream
         // present a consistent browser-like identity to the proxy.

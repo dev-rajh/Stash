@@ -21,8 +21,12 @@ class AmzStreamResolverTest {
 
     private val client: AmzApiClient = mockk()
     private val fileProvider: AmzStreamFileProvider = mockk()
+    private val qualityPolicy: StreamQualityPolicy = mockk {
+        // Default: Wi-Fi Hi-Res tier (amz "hd") unless a test overrides.
+        coEvery { streamingTier() } returns com.stash.data.download.lossless.LosslessQualityTier.HI_RES
+    }
 
-    private fun resolver() = AmzStreamResolver(client, fileProvider)
+    private fun resolver() = AmzStreamResolver(client, fileProvider, qualityPolicy)
 
     /**
      * Writes a real (header-only) FLAC file whose STREAMINFO encodes
@@ -91,7 +95,7 @@ class AmzStreamResolverTest {
     @Test
     fun resolve_returnsDecryptedLocalFileUrl_onHappyPath() = runTest {
         coEvery { client.search(any(), any()) } returns listOf(searchItem())
-        coEvery { client.track("B00ASIN001") } returns amzTrack()
+        coEvery { client.track("B00ASIN001", any()) } returns amzTrack()
         val decrypted = flacFile(sampleRate = 96000, bits = 24)
         stubDecryptTo(decrypted)
 
@@ -117,7 +121,7 @@ class AmzStreamResolverTest {
     @Test
     fun resolve_passesEncryptedUrlAndKeyToProvider() = runTest {
         coEvery { client.search(any(), any()) } returns listOf(searchItem())
-        coEvery { client.track("B00ASIN001") } returns amzTrack(
+        coEvery { client.track("B00ASIN001", any()) } returns amzTrack(
             streamUrl = "https://amz.squid.wtf/api/stream?asin=B00ASIN001&tier=best",
         )
         stubDecryptTo()
@@ -134,9 +138,23 @@ class AmzStreamResolverTest {
     }
 
     @Test
+    fun resolve_requestsTheStreamingPolicyTier() = runTest {
+        // Save Data / cellular → CD tier, which maps to amz "high" (data saver).
+        coEvery { qualityPolicy.streamingTier() } returns
+            com.stash.data.download.lossless.LosslessQualityTier.CD
+        coEvery { client.search(any(), any()) } returns listOf(searchItem())
+        coEvery { client.track("B00ASIN001", "high") } returns amzTrack()
+        stubDecryptTo()
+
+        resolver().resolve(stubTrack())
+
+        io.mockk.coVerify { client.track("B00ASIN001", "high") }
+    }
+
+    @Test
     fun resolve_fallsBackToCover_whenCoverCdnNull() = runTest {
         coEvery { client.search(any(), any()) } returns listOf(searchItem())
-        coEvery { client.track("B00ASIN001") } returns amzTrack(coverCdn = null)
+        coEvery { client.track("B00ASIN001", any()) } returns amzTrack(coverCdn = null)
         stubDecryptTo()
 
         val result = resolver().resolve(stubTrack())
@@ -147,7 +165,7 @@ class AmzStreamResolverTest {
     @Test
     fun resolve_returnsNull_whenNoDecryptionKey() = runTest {
         coEvery { client.search(any(), any()) } returns listOf(searchItem())
-        coEvery { client.track("B00ASIN001") } returns AmzTrack(
+        coEvery { client.track("B00ASIN001", any()) } returns AmzTrack(
             meta = trackMeta(),
             decryptionKey = null, // can't decrypt → unplayable
             streamUrl = "https://amz.squid.wtf/api/stream?asin=B00ASIN001",
@@ -160,7 +178,7 @@ class AmzStreamResolverTest {
     @Test
     fun resolve_returnsNull_whenProviderFails() = runTest {
         coEvery { client.search(any(), any()) } returns listOf(searchItem())
-        coEvery { client.track("B00ASIN001") } returns amzTrack()
+        coEvery { client.track("B00ASIN001", any()) } returns amzTrack()
         coEvery { fileProvider.resolveLocalFile(any(), any(), any()) } returns null
 
         assertThat(resolver().resolve(stubTrack())).isNull()
@@ -191,7 +209,7 @@ class AmzStreamResolverTest {
     @Test
     fun resolve_returnsNull_whenTrackMetaNull() = runTest {
         coEvery { client.search(any(), any()) } returns listOf(searchItem())
-        coEvery { client.track("B00ASIN001") } returns null
+        coEvery { client.track("B00ASIN001", any()) } returns null
 
         assertThat(resolver().resolve(stubTrack())).isNull()
     }
