@@ -40,6 +40,7 @@ import kotlin.coroutines.cancellation.CancellationException
 @Singleton
 class AmzStreamResolver @Inject constructor(
     private val client: AmzApiClient,
+    private val fileProvider: com.stash.data.download.lossless.amz.AmzStreamFileProvider,
 ) {
     suspend fun resolve(track: TrackEntity): StreamUrl? {
         Log.d(TAG, "resolve attempt id=${track.id} title='${track.title}'")
@@ -64,11 +65,25 @@ class AmzStreamResolver @Inject constructor(
                 return null
             }
             val meta = amz.meta
-            Log.d(TAG, "resolved id=${track.id} origin=$ORIGIN asin=${meta.asin}")
+            // amz serves CENC-encrypted CMAF — it can't be progressively
+            // streamed. Decrypt the whole track to a local cache file
+            // (ffmpeg -decryption_key) and hand the player a file:// URL, which
+            // plays via the default/local factory like a downloaded track. The
+            // per-track AES key is mandatory; without it the bytes are unplayable.
+            val key = amz.decryptionKey ?: run {
+                Log.d(TAG, "no_drm_key id=${track.id} asin=${meta.asin}")
+                return null
+            }
+            val encryptedUrl = amz.streamUrl ?: client.streamUrl(meta.asin)
+            val localFile = fileProvider.resolveLocalFile(meta.asin, encryptedUrl, key) ?: run {
+                Log.d(TAG, "decrypt_failed id=${track.id} asin=${meta.asin}")
+                return null
+            }
+            Log.d(TAG, "resolved id=${track.id} origin=$ORIGIN asin=${meta.asin} -> ${localFile.name}")
             StreamUrl(
-                url = amz.streamUrl ?: client.streamUrl(meta.asin),
-                // amz /api/stream URL is stable; auth is the x-captcha-token
-                // header (interceptor-refreshed), not a signed-URL expiry.
+                url = "file://${localFile.absolutePath}",
+                // Local decrypted file — never expires from the caller's
+                // caching standpoint (auth/signing don't apply to a local path).
                 expiresAtMs = Long.MAX_VALUE,
                 codec = "flac",
                 coverArtUrl = meta.coverCdn ?: meta.cover,

@@ -4,16 +4,26 @@ import com.google.common.truth.Truth.assertThat
 import com.stash.core.data.db.entity.TrackEntity
 import com.stash.data.download.lossless.amz.AmzApiClient
 import com.stash.data.download.lossless.amz.AmzSearchItem
+import com.stash.data.download.lossless.amz.AmzStreamFileProvider
 import com.stash.data.download.lossless.amz.AmzTrack
 import com.stash.data.download.lossless.amz.AmzTrackMeta
 import io.mockk.coEvery
 import io.mockk.mockk
+import java.io.File
 import kotlinx.coroutines.test.runTest
 import org.junit.Test
 
 class AmzStreamResolverTest {
 
     private val client: AmzApiClient = mockk()
+    private val fileProvider: AmzStreamFileProvider = mockk()
+
+    private fun resolver() = AmzStreamResolver(client, fileProvider)
+
+    /** Default: provider decrypts to this local file for any asin. */
+    private fun stubDecryptTo(path: String = "/data/cache/amz_stream/B00ASIN001.flac") {
+        coEvery { fileProvider.resolveLocalFile(any(), any(), any()) } returns File(path)
+    }
 
     private fun stubTrack(): TrackEntity = TrackEntity(
         id = 7L,
@@ -56,38 +66,82 @@ class AmzStreamResolverTest {
     )
 
     @Test
-    fun resolve_returnsStreamUrl_onHappyPath() = runTest {
+    fun resolve_returnsDecryptedLocalFileUrl_onHappyPath() = runTest {
         coEvery { client.search(any(), any()) } returns listOf(searchItem())
         coEvery { client.track("B00ASIN001") } returns amzTrack()
-        val resolver = AmzStreamResolver(client)
+        val decrypted = File("/data/cache/amz_stream/B00ASIN001.flac")
+        stubDecryptTo(decrypted.path)
 
-        val result = resolver.resolve(stubTrack())
+        val result = resolver().resolve(stubTrack())
 
         assertThat(result).isNotNull()
         assertThat(result!!.origin).isEqualTo("amz")
-        assertThat(result.url).isEqualTo("https://amz.squid.wtf/api/stream?asin=B00ASIN001")
+        // amz can't be progressively streamed — the resolver decrypts to a
+        // local cache file and returns a file:// URL (plays via localFactory).
+        // absolutePath keeps this assertion host-platform-agnostic.
+        assertThat(result.url).isEqualTo("file://${decrypted.absolutePath}")
         assertThat(result.codec).isEqualTo("flac")
         assertThat(result.coverArtUrl).isEqualTo("https://cdn.example/cover_cdn.jpg")
         assertThat(result.expiresAtMs).isEqualTo(Long.MAX_VALUE)
     }
 
     @Test
+    fun resolve_passesEncryptedUrlAndKeyToProvider() = runTest {
+        coEvery { client.search(any(), any()) } returns listOf(searchItem())
+        coEvery { client.track("B00ASIN001") } returns amzTrack(
+            streamUrl = "https://amz.squid.wtf/api/stream?asin=B00ASIN001&tier=best",
+        )
+        stubDecryptTo()
+
+        resolver().resolve(stubTrack())
+
+        io.mockk.coVerify {
+            fileProvider.resolveLocalFile(
+                "B00ASIN001",
+                "https://amz.squid.wtf/api/stream?asin=B00ASIN001&tier=best",
+                "8164fe2db5ebd498c8265b3e873462c1",
+            )
+        }
+    }
+
+    @Test
     fun resolve_fallsBackToCover_whenCoverCdnNull() = runTest {
         coEvery { client.search(any(), any()) } returns listOf(searchItem())
         coEvery { client.track("B00ASIN001") } returns amzTrack(coverCdn = null)
-        val resolver = AmzStreamResolver(client)
+        stubDecryptTo()
 
-        val result = resolver.resolve(stubTrack())
+        val result = resolver().resolve(stubTrack())
 
         assertThat(result!!.coverArtUrl).isEqualTo("https://amazon.example/cover.jpg")
     }
 
     @Test
+    fun resolve_returnsNull_whenNoDecryptionKey() = runTest {
+        coEvery { client.search(any(), any()) } returns listOf(searchItem())
+        coEvery { client.track("B00ASIN001") } returns AmzTrack(
+            meta = trackMeta(),
+            decryptionKey = null, // can't decrypt → unplayable
+            streamUrl = "https://amz.squid.wtf/api/stream?asin=B00ASIN001",
+            codec = "flac",
+        )
+
+        assertThat(resolver().resolve(stubTrack())).isNull()
+    }
+
+    @Test
+    fun resolve_returnsNull_whenProviderFails() = runTest {
+        coEvery { client.search(any(), any()) } returns listOf(searchItem())
+        coEvery { client.track("B00ASIN001") } returns amzTrack()
+        coEvery { fileProvider.resolveLocalFile(any(), any(), any()) } returns null
+
+        assertThat(resolver().resolve(stubTrack())).isNull()
+    }
+
+    @Test
     fun resolve_returnsNull_whenNoCandidates() = runTest {
         coEvery { client.search(any(), any()) } returns emptyList()
-        val resolver = AmzStreamResolver(client)
 
-        assertThat(resolver.resolve(stubTrack())).isNull()
+        assertThat(resolver().resolve(stubTrack())).isNull()
     }
 
     @Test
@@ -101,17 +155,15 @@ class AmzStreamResolverTest {
                 primaryArtistName = "Unrelated Band",
             ),
         )
-        val resolver = AmzStreamResolver(client)
 
-        assertThat(resolver.resolve(stubTrack())).isNull()
+        assertThat(resolver().resolve(stubTrack())).isNull()
     }
 
     @Test
     fun resolve_returnsNull_whenTrackMetaNull() = runTest {
         coEvery { client.search(any(), any()) } returns listOf(searchItem())
         coEvery { client.track("B00ASIN001") } returns null
-        val resolver = AmzStreamResolver(client)
 
-        assertThat(resolver.resolve(stubTrack())).isNull()
+        assertThat(resolver().resolve(stubTrack())).isNull()
     }
 }
