@@ -90,6 +90,10 @@ data class AmzTrack(
     val decryptionKey: String?,
     val streamUrl: String?,
     val codec: String?,
+    /** Stated stream bitrate in bits-per-second (FLAC has none in STREAMINFO). */
+    val bitrateBps: Int? = null,
+    /** Stated sample rate in Hz (advisory; the decrypted FLAC is authoritative). */
+    val sampleRateHz: Int? = null,
 )
 
 /**

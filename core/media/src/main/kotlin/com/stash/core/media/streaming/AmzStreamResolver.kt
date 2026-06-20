@@ -79,13 +79,23 @@ class AmzStreamResolver @Inject constructor(
                 Log.d(TAG, "decrypt_failed id=${track.id} asin=${meta.asin}")
                 return null
             }
-            Log.d(TAG, "resolved id=${track.id} origin=$ORIGIN asin=${meta.asin} -> ${localFile.name}")
+            // Read the true bit-depth/sample-rate from the decrypted FLAC's
+            // STREAMINFO so Now Playing shows "24-bit / 96 kHz" instead of a
+            // bare "FLAC". amz's /api/track reports bitDepth=null, so the file
+            // is the authoritative source; the API stream object supplies the
+            // bitrate (not stored in FLAC) and a sample-rate fallback.
+            val flac = com.stash.data.download.lossless.amz.FlacStreamInfo.read(localFile)
+            Log.d(TAG, "resolved id=${track.id} origin=$ORIGIN asin=${meta.asin} -> ${localFile.name} " +
+                "(${flac?.bitsPerSample ?: "?"}bit/${flac?.sampleRateHz ?: amz.sampleRateHz ?: "?"}Hz)")
             StreamUrl(
                 url = "file://${localFile.absolutePath}",
                 // Local decrypted file — never expires from the caller's
                 // caching standpoint (auth/signing don't apply to a local path).
                 expiresAtMs = Long.MAX_VALUE,
-                codec = "flac",
+                codec = amz.codec ?: "flac",
+                bitsPerSample = flac?.bitsPerSample,
+                sampleRateHz = flac?.sampleRateHz ?: amz.sampleRateHz,
+                bitrateKbps = amz.bitrateBps?.let { it / 1000 },
                 coverArtUrl = meta.coverCdn ?: meta.cover,
                 origin = ORIGIN,
             )

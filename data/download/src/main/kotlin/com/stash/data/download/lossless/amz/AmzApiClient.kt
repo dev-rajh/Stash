@@ -98,6 +98,8 @@ class AmzApiClient @Inject constructor(
                 decryptionKey = resp.drm?.key?.takeIf { it.isNotBlank() },
                 streamUrl = resp.stream?.url?.let { resolveStreamUrl(it) },
                 codec = resp.stream?.codec,
+                bitrateBps = resp.stream?.bitrate?.takeIf { it > 0 },
+                sampleRateHz = resp.stream?.sampleRate?.takeIf { it > 0 },
             )
         }.getOrElse { e ->
             Log.w(TAG, "track parse failed", e)

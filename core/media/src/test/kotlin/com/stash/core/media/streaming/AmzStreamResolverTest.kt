@@ -11,18 +11,39 @@ import io.mockk.coEvery
 import io.mockk.mockk
 import java.io.File
 import kotlinx.coroutines.test.runTest
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
 
 class AmzStreamResolverTest {
+
+    @get:Rule val tmp = TemporaryFolder()
 
     private val client: AmzApiClient = mockk()
     private val fileProvider: AmzStreamFileProvider = mockk()
 
     private fun resolver() = AmzStreamResolver(client, fileProvider)
 
-    /** Default: provider decrypts to this local file for any asin. */
-    private fun stubDecryptTo(path: String = "/data/cache/amz_stream/B00ASIN001.flac") {
-        coEvery { fileProvider.resolveLocalFile(any(), any(), any()) } returns File(path)
+    /**
+     * Writes a real (header-only) FLAC file whose STREAMINFO encodes
+     * [sampleRate]/[bits] so the resolver can read back the true quality.
+     */
+    private fun flacFile(sampleRate: Int = 96000, bits: Int = 24, channels: Int = 2): File {
+        val h = ByteArray(8 + 34)
+        h[0] = 'f'.code.toByte(); h[1] = 'L'.code.toByte(); h[2] = 'a'.code.toByte(); h[3] = 'C'.code.toByte()
+        h[4] = 0x00; h[5] = 0x00; h[6] = 0x00; h[7] = 0x22
+        h[18] = ((sampleRate ushr 12) and 0xFF).toByte()
+        h[19] = ((sampleRate ushr 4) and 0xFF).toByte()
+        val ch = (channels - 1) and 0x07
+        val b = (bits - 1) and 0x1F
+        h[20] = (((sampleRate and 0x0F) shl 4) or (ch shl 1) or ((b ushr 4) and 0x01)).toByte()
+        h[21] = ((b and 0x0F) shl 4).toByte()
+        return File(tmp.root, "B00ASIN001.flac").apply { writeBytes(h) }
+    }
+
+    /** Default: provider decrypts to a real crafted FLAC for any asin. */
+    private fun stubDecryptTo(file: File = flacFile()) {
+        coEvery { fileProvider.resolveLocalFile(any(), any(), any()) } returns file
     }
 
     private fun stubTrack(): TrackEntity = TrackEntity(
@@ -63,14 +84,16 @@ class AmzStreamResolverTest {
         decryptionKey = "8164fe2db5ebd498c8265b3e873462c1",
         streamUrl = streamUrl,
         codec = "flac",
+        bitrateBps = 3_332_448,
+        sampleRateHz = 96000,
     )
 
     @Test
     fun resolve_returnsDecryptedLocalFileUrl_onHappyPath() = runTest {
         coEvery { client.search(any(), any()) } returns listOf(searchItem())
         coEvery { client.track("B00ASIN001") } returns amzTrack()
-        val decrypted = File("/data/cache/amz_stream/B00ASIN001.flac")
-        stubDecryptTo(decrypted.path)
+        val decrypted = flacFile(sampleRate = 96000, bits = 24)
+        stubDecryptTo(decrypted)
 
         val result = resolver().resolve(stubTrack())
 
@@ -83,6 +106,12 @@ class AmzStreamResolverTest {
         assertThat(result.codec).isEqualTo("flac")
         assertThat(result.coverArtUrl).isEqualTo("https://cdn.example/cover_cdn.jpg")
         assertThat(result.expiresAtMs).isEqualTo(Long.MAX_VALUE)
+        // Real quality read from the decrypted FLAC's STREAMINFO (the API
+        // reports bitDepth=null) so Now Playing shows "24-bit / 96 kHz", not
+        // a bare "FLAC". Bitrate comes from the /api/track stream object.
+        assertThat(result.bitsPerSample).isEqualTo(24)
+        assertThat(result.sampleRateHz).isEqualTo(96000)
+        assertThat(result.bitrateKbps).isEqualTo(3332)
     }
 
     @Test
