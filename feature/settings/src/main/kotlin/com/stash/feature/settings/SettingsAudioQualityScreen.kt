@@ -42,6 +42,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.stash.core.ui.components.GlassCard
 import com.stash.data.download.lossless.LosslessQualityTier
 import com.stash.feature.settings.components.AudioQualityPicker
+import com.stash.feature.settings.components.BetaPill
 import com.stash.feature.settings.components.LosslessRoutingStatus
 import com.stash.feature.settings.components.SettingsNavRow
 import com.stash.feature.settings.components.SettingsPickerRow
@@ -219,9 +220,11 @@ fun SettingsAudioQualityScreen(
                                 Spacer(modifier = Modifier.height(8.dp))
                                 SettingsToggleRow(
                                     title = "Save Data",
-                                    subtitle = "Force CD quality on every network to minimize data.",
+                                    subtitle = "Request the lowest streaming quality on every network " +
+                                        "to minimize data. Not every source honors this yet.",
                                     checked = uiState.streamingSaveData,
                                     onCheckedChange = viewModel::onStreamingSaveDataChanged,
+                                    titleTrailing = { BetaPill() },
                                 )
                             }
                         }
