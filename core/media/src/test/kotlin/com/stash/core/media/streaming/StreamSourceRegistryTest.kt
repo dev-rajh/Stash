@@ -153,24 +153,27 @@ class StreamSourceRegistryTest {
     }
 
     /**
-     * ARCOD is slow + job-based + quota-capped, so it must NOT run on the
-     * speculative queue-wide background fill (allowYtDlp = false) — only on
-     * foreground/next-up resolves. Otherwise one playlist tap fans out a render
-     * job per queue track and blows the operator's hourly cap.
+     * Both slow sources — ARCOD (job-based, quota-capped) AND amz (whole-file
+     * decrypt, single-flight) — must NOT run on the speculative queue-wide
+     * background fill (allowYtDlp = false); only on foreground/next-up resolves.
+     * Otherwise the fill stalls on their latency and starves the fast YouTube
+     * fallback, leaving the timeline too sparse to skip through or auto-advance.
+     * The fast path (kennyy, squid, youtube) is what populates the timeline.
      */
     @Test
-    fun resolve_background_fill_skips_arcod() = runTest {
+    fun resolve_background_fill_skips_arcod_and_amz() = runTest {
         coEvery { streamingPreference.isForceYouTubeFallback() } returns false
         coEvery { kennyy.resolve(any()) } returns null
         coEvery { qobuz.resolve(any()) } returns null
-        // arcod intentionally unstubbed — it must NOT be consulted.
-        coEvery { amz.resolve(any()) } returns null
+        // arcod + amz intentionally unstubbed — neither must be consulted.
         coEvery { youtube.resolve(any(), any()) } returns null
         val track = stubTrack()
 
         registry().resolve(track, allowYouTube = true, allowYtDlp = false)
 
         coVerify(exactly = 0) { arcod.resolve(any()) }
+        coVerify(exactly = 0) { amz.resolve(any()) }
+        coVerify { youtube.resolve(track, allowYtDlp = false) }
     }
 
     /**
