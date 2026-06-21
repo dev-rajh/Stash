@@ -854,10 +854,15 @@ class PlayerRepositoryImpl @Inject constructor(
     }
 
     /**
-     * Swap the URI of the timeline slot matching [next] in place, preserving its
-     * mediaId / metadata / extras so listeners observe a pure URI swap. Returns
-     * `true` if the slot was found and refreshed, `false` if [next] isn't in the
-     * controller's timeline (the caller then inserts it — see [insertNextMediaItem]).
+     * Swap the timeline slot matching [next] in place to the freshly-[resolved]
+     * stream. Updates the URI AND the quality/origin extras — the slot was
+     * usually a provisional YouTube AAC item from the background fill, and the
+     * prefetch upgrades it to lossless; without refreshing
+     * [EXTRA_STREAM_ORIGIN]/codec/bit-depth Now Playing would keep showing the
+     * stale "via YT" / AAC badge even though the audio is now FLAC. Preserves
+     * mediaId and the rest of the metadata. Returns `true` if the slot was
+     * found and refreshed, `false` if [next] isn't in the controller's timeline
+     * (the caller then inserts it — see [insertNextMediaItem]).
      */
     private fun refreshControllerMediaItem(
         controller: MediaController,
@@ -869,8 +874,18 @@ class PlayerRepositoryImpl @Inject constructor(
             val item = controller.getMediaItemAt(i)
             val itemTrackId = item.mediaMetadata.extras?.getLong(EXTRA_TRACK_ID) ?: continue
             if (itemTrackId == next.id) {
+                val newExtras = Bundle(item.mediaMetadata.extras ?: Bundle()).apply {
+                    resolved.codec?.let { putString(EXTRA_STREAM_CODEC, it) }
+                    resolved.bitsPerSample?.let { putInt(EXTRA_STREAM_BIT_DEPTH, it) }
+                    resolved.sampleRateHz?.let { putInt(EXTRA_STREAM_SAMPLE_RATE, it) }
+                    resolved.bitrateKbps?.let { putInt(EXTRA_STREAM_BITRATE, it) }
+                    resolved.origin?.let { putString(EXTRA_STREAM_ORIGIN, it) }
+                }
                 val refreshed = item.buildUpon()
                     .setUri(resolved.url)
+                    .setMediaMetadata(
+                        item.mediaMetadata.buildUpon().setExtras(newExtras).build(),
+                    )
                     .build()
                 controller.replaceMediaItem(i, refreshed)
                 return true
