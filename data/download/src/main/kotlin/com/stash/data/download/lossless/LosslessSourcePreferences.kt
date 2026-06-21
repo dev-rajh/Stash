@@ -298,14 +298,19 @@ class LosslessSourcePreferences @Inject constructor(
          *    no captcha gate — outages uncorrelated with squid.wtf)
          * 3. arcod — Qobuz Hi-Res FLAC via arcod.xyz, an independent third
          *    Qobuz-DL operator (per-user Supabase session, job-based render).
-         *    Ranked LAST among lossless — the final lossless attempt before
-         *    the chain falls through to the YouTube/yt-dlp fallback — because
-         *    it runs on one operator-paid account and is rate-limited hard.
+         *    Runs on one operator-paid account and is rate-limited hard, so
+         *    it sits behind the two direct Qobuz proxies.
+         * 4. amz — Amazon Music FLAC via amz.squid.wtf (independent Amazon
+         *    catalog, different upstream from the Qobuz proxies). Ranked
+         *    LAST among lossless: an uncorrelated, different-catalog fallback
+         *    when every Qobuz source misses, tried just before the lossy
+         *    YouTube fallback.
          */
         val DEFAULT_PRIORITY: List<String> = listOf(
             "squid_qobuz",
             "kennyy_qobuz",
             "arcod",
+            "amz",
         )
     }
 }

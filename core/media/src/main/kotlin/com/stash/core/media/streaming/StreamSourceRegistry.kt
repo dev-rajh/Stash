@@ -22,7 +22,11 @@ import javax.inject.Singleton
  *      authenticated job-render queue (search → create-job → poll → open URL).
  *      Slower per-track than the proxies, so it sits last among the lossless
  *      sources — reached only when kennyy and squid both miss.
- *   4. [YouTubeStreamResolver] — yt-dlp / InnerTube extraction. Last
+ *   4. [AmzStreamResolver]     — `amz.squid.wtf`, Amazon Music lossless
+ *      FLAC. Consulted when neither Qobuz proxy has a confident match,
+ *      so an Amazon-only track still streams lossless before dropping to
+ *      lossy YouTube. Captcha auth rides the shared client's interceptor.
+ *   5. [YouTubeStreamResolver] — yt-dlp / InnerTube extraction. Last
  *      resort, reached only when the track genuinely isn't in the Qobuz
  *      catalog (Bandcamp re-uploads, region-exclusive, underground
  *      releases). Lossy quality (AAC/Opus ~128-160 kbps), surfaced as a
@@ -38,7 +42,15 @@ import javax.inject.Singleton
  * id. Subsequent plays of the same track hit the cache and bypass the
  * registry entirely until the URL's `etsp` expires.
  *
- * Test toggle (off for normal use):
+ * Test toggles (off for normal use):
+ *  - [StreamingPreference.isForceArcodOnly]: [resolve] routes through arcod
+ *    ONLY — kennyy/squid/youtube removed from play so a track either streams
+ *    via arcod or fails visibly. Takes precedence over force-amz and
+ *    force-YouTube. Used to exercise the arcod source on demand.
+ *  - [StreamingPreference.isForceAmzOnly]: [resolve] routes through amz
+ *    ONLY — kennyy/squid/youtube removed from play so a track either streams
+ *    via amz or fails visibly. Takes precedence over force-YouTube. Used to
+ *    exercise the amz source on demand.
  *  - [StreamingPreference.isForceYouTubeFallback]: [resolve] skips Kennyy
  *    and Squid entirely and routes every track through the YouTube resolver
  *    only — reproduces the lossless-down fallback path on demand.
@@ -48,6 +60,7 @@ class StreamSourceRegistry @Inject constructor(
     private val kennyy: KennyyStreamResolver,
     private val qobuz: QobuzStreamResolver,
     private val arcod: ArcodStreamResolver,
+    private val amz: AmzStreamResolver,
     private val youtube: YouTubeStreamResolver,
     private val streamingPreference: StreamingPreference,
 ) {
@@ -77,12 +90,18 @@ class StreamSourceRegistry @Inject constructor(
             if (streamingPreference.isForceArcodOnly()) {
                 // Test toggle: ARCOD ONLY — skip kennyy/squid/YouTube so the
                 // ARCOD path can be exercised even when the Qobuz proxies are
-                // healthy. Takes precedence over forceYouTubeFallback. Still
-                // gated by allowYtDlp so the speculative background fill
-                // resolves NOTHING (matching forceYt) — without this, flipping
-                // the toggle and tapping a playlist fans out a render job per
-                // queue track and blows the operator's hourly cap.
+                // healthy. Takes precedence over forceAmzOnly and
+                // forceYouTubeFallback. Still gated by allowYtDlp so the
+                // speculative background fill resolves NOTHING (matching
+                // forceYt) — without this, flipping the toggle and tapping a
+                // playlist fans out a render job per queue track and blows the
+                // operator's hourly cap.
                 if (allowYtDlp) add("arcod" to arcod::resolve)
+            } else if (streamingPreference.isForceAmzOnly()) {
+                // Test toggle (outage drill): amz ONLY — kennyy/squid/youtube
+                // removed from play so a track either streams via amz or fails
+                // visibly. Ignores allowYouTube/allowYtDlp — it's amz or nothing.
+                add("amz" to amz::resolve)
             } else if (streamingPreference.isForceYouTubeFallback()) {
                 // Test toggle: skip the lossless sources, forcing the
                 // YouTube fallback path. Still gated by allowYouTube so the
@@ -100,6 +119,7 @@ class StreamSourceRegistry @Inject constructor(
                 // blows the operator's hourly cap. (Reuses allowYtDlp as the
                 // "this is a real, intentional resolve" signal.)
                 if (allowYtDlp) add("arcod" to arcod::resolve)
+                add("amz" to amz::resolve)
                 if (allowYouTube) add("youtube" to { t: TrackEntity -> youtube.resolve(t, allowYtDlp) })
             }
         }

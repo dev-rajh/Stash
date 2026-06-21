@@ -49,6 +49,7 @@ class StreamingPreference @Inject constructor(
     private val qualityKey = stringPreferencesKey("streaming_quality_tier")
     private val forceYouTubeFallbackKey = booleanPreferencesKey("force_youtube_fallback")
     private val forceArcodOnlyKey = booleanPreferencesKey("force_arcod_only")
+    private val forceAmzOnlyKey = booleanPreferencesKey("force_amz_only")
     // Retained only so [purgeRetiredKeys] can delete it from existing
     // installs; the antra source was removed (see fix/remove-antra).
     private val forceAntraOnlyKey = booleanPreferencesKey("force_antra_only")
@@ -81,10 +82,23 @@ class StreamingPreference @Inject constructor(
      * registries route through ARCOD ONLY (skip kennyy/squid/YouTube) — so
      * the ARCOD source can be exercised on demand even when the Qobuz proxies
      * are healthy. Default `false` (normal use). Takes precedence over
-     * [forceYouTubeFallback].
+     * [forceAmzOnly] and [forceYouTubeFallback].
      */
     val forceArcodOnly: Flow<Boolean> = context.streamingDataStore.data.map { prefs ->
         prefs[forceArcodOnlyKey] ?: false
+    }
+
+    /**
+     * Test-only toggle. When `true`, BOTH the streaming registry
+     * ([StreamSourceRegistry]) and the lossless-download registry
+     * ([LosslessSourceRegistry]) route through the amz (Amazon Music)
+     * source ONLY — Kennyy, Squid, and YouTube are removed from play so a
+     * track either resolves via amz or fails visibly. Used to exercise the
+     * amz source on demand (it normally ranks last and is hard to trigger).
+     * Default `false` (normal use).
+     */
+    val forceAmzOnly: Flow<Boolean> = context.streamingDataStore.data.map { prefs ->
+        prefs[forceAmzOnlyKey] ?: false
     }
 
     suspend fun current(): Boolean = enabled.first()
@@ -92,6 +106,8 @@ class StreamingPreference @Inject constructor(
     suspend fun isForceYouTubeFallback(): Boolean = forceYouTubeFallback.first()
 
     suspend fun isForceArcodOnly(): Boolean = forceArcodOnly.first()
+
+    suspend fun isForceAmzOnly(): Boolean = forceAmzOnly.first()
 
     suspend fun setEnabled(value: Boolean) {
         context.streamingDataStore.edit { it[enabledKey] = value }
@@ -107,6 +123,10 @@ class StreamingPreference @Inject constructor(
 
     suspend fun setForceArcodOnly(value: Boolean) {
         context.streamingDataStore.edit { it[forceArcodOnlyKey] = value }
+    }
+
+    suspend fun setForceAmzOnly(value: Boolean) {
+        context.streamingDataStore.edit { it[forceAmzOnlyKey] = value }
     }
 
     suspend fun setStreamQuality(tier: StreamQualityTier) {

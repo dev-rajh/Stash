@@ -33,6 +33,7 @@ fun SettingsPlaybackScreen(
     val streamOnCellular by viewModel.streamOnCellular.collectAsStateWithLifecycle()
     val forceYouTubeFallback by viewModel.forceYouTubeFallback.collectAsStateWithLifecycle()
     val forceArcodOnly by viewModel.forceArcodOnly.collectAsStateWithLifecycle()
+    val forceAmzOnly by viewModel.forceAmzOnly.collectAsStateWithLifecycle()
 
     SettingsScaffold(title = "Playback", onBack = onBack, modifier = modifier) {
         if (StashConstants.STREAMING_ENGINE_ENABLED) {
@@ -68,6 +69,14 @@ fun SettingsPlaybackScreen(
                             subtitle = "Route streaming and downloads through ARCOD alone — no Qobuz proxies, no YouTube. For testing the ARCOD source. Turn off after testing.",
                             checked = forceArcodOnly,
                             onCheckedChange = viewModel::setForceArcodOnly,
+                        )
+                    },
+                    {
+                        SettingsToggleRow(
+                            title = "Stream via amz (test)",
+                            subtitle = "Route streaming AND downloads through amz (Amazon Music) only — no Qobuz, no YouTube. For testing the amz source. Turn off after testing.",
+                            checked = forceAmzOnly,
+                            onCheckedChange = viewModel::setForceAmzOnly,
                         )
                     },
                 ),
