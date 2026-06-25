@@ -307,15 +307,17 @@ At the top with the other imports:
 
 ```kotlin
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
-import androidx.compose.foundation.background
 import com.stash.core.ui.theme.StashTheme
 ```
+(`size` is needed for `.size(22.dp)`/`.size(7.dp)` below; the current file imports only `width`/`height`.)
 
 - [ ] **Step 2: Replace the ARCOD `SettingsNavRow` call**
 
