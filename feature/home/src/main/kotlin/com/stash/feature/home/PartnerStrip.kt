@@ -38,6 +38,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.stash.core.ui.theme.StashTheme
@@ -71,7 +75,11 @@ fun PartnerStrip(modifier: Modifier = Modifier) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable { expanded = !expanded },
+                    .clickable { expanded = !expanded }
+                    .semantics {
+                        role = Role.Button
+                        stateDescription = if (expanded) "expanded" else "collapsed"
+                    },
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Image(
@@ -95,7 +103,8 @@ fun PartnerStrip(modifier: Modifier = Modifier) {
                 Spacer(modifier = Modifier.weight(1f))
                 Icon(
                     imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                    contentDescription = if (expanded) "Collapse ARCOD" else "Expand ARCOD",
+                    // Decorative: the header Row carries role + state + label.
+                    contentDescription = null,
                     modifier = Modifier
                         .size(18.dp)
                         .graphicsLayer(rotationZ = chevronRotation),
@@ -140,9 +149,10 @@ private fun PartnerChip(
     modifier: Modifier = Modifier,
 ) {
     val isKofi = link.kind == PartnerLinkKind.KOFI
-    val accent = if (isKofi) Color(0xFFFF7E7B) else Color(0xFF8A93F5) // ko-fi coral / discord blurple
+    // ko-fi coral / discord blurple — lighter than the canonical 0xFF5865F2 for legibility as a tint on dark glass
+    val accent = if (isKofi) Color(0xFFFF7E7B) else Color(0xFF8A93F5)
     Surface(
-        modifier = modifier.clickable { onClick() },
+        modifier = modifier.clickable(onClick = onClick),
         color = Color(0x0DFFFFFF),
         shape = RoundedCornerShape(10.dp),
         border = BorderStroke(1.dp, accent.copy(alpha = 0.35f)),
@@ -152,12 +162,21 @@ private fun PartnerChip(
             horizontalArrangement = Arrangement.Center,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Icon(
-                imageVector = Icons.Default.FavoriteBorder,
-                contentDescription = null,
-                tint = accent,
-                modifier = Modifier.size(14.dp),
-            )
+            if (isKofi) {
+                Icon(
+                    imageVector = Icons.Default.FavoriteBorder,
+                    contentDescription = null,
+                    tint = accent,
+                    modifier = Modifier.size(14.dp),
+                )
+            } else {
+                Icon(
+                    painter = painterResource(id = R.drawable.ic_discord),
+                    contentDescription = null,
+                    tint = accent,
+                    modifier = Modifier.size(14.dp),
+                )
+            }
             Spacer(modifier = Modifier.width(6.dp))
             Text(
                 text = if (isKofi) "Support on Ko-fi" else "Discord",
