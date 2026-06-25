@@ -155,7 +155,7 @@ fun SettingsAudioQualityScreen(
                                     painter = painterResource(
                                         id = com.stash.core.ui.R.drawable.partner_arcod,
                                     ),
-                                    contentDescription = "ARCOD",
+                                    contentDescription = null, // decorative; the row title already says "ARCOD"
                                     contentScale = ContentScale.Fit,
                                     modifier = Modifier
                                         .size(22.dp)
