@@ -1825,7 +1825,7 @@ private const val STASH_ISSUE_URL = "https://github.com/rawnaldclark/Stash/issue
 // v0.9.38+: Discord invite shown as a chat-bubble icon (blurple-tinted)
 // to the left of the wrench. Tap → opens the invite in the default
 // browser. Edit when the invite rotates.
-private const val STASH_DISCORD_URL = "https://discord.gg/tbBSMd6dR"
+private const val STASH_DISCORD_URL = "https://discord.gg/vcbjEby5PC"
 
 private val HOME_SUPPORTERS = listOf(
     Supporter(
