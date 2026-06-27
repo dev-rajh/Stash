@@ -174,8 +174,12 @@ class StashPlaybackService : MediaLibraryService() {
          */
         private const val CROSSFADE_POLL_INTERVAL_MS = 250L
 
-        /** Lead time before the fade window to prime the spare (decoupled from fire). */
-        private const val PREPARE_LEAD_MS = 8_000L
+        /**
+         * Remaining-time threshold at which the spare is primed (once the next
+         * track's URL is resolved). Large so cold streams get tens of seconds to
+         * buffer before the seam.
+         */
+        private const val PREPARE_AT_MS = 90_000L
 
         /** Slack left on the outgoing when the fade ends, so it doesn't hit its natural end. */
         private const val HANDOFF_MARGIN_MS = 500L
@@ -468,24 +472,29 @@ class StashPlaybackService : MediaLibraryService() {
         val nextId = nextItem.mediaId
         val remaining = duration - player.currentPosition
 
-        // Phase 1 — prime the spare early (decoupled from the fade).
-        if (remaining <= fade + PREPARE_LEAD_MS && !engine.isPreparedFor(nextId)) {
+        // Phase 1 — prime the spare as soon as the next track is resolved and we
+        // are in the back stretch of the current one, so a COLD stream has tens
+        // of seconds to buffer (not just the few seconds before the seam). This
+        // is what makes streaming crossfade reliable.
+        if (remaining <= PREPARE_AT_MS && !engine.isPreparedFor(nextId)) {
             android.util.Log.i("Crossfade", "prepare next=$nextId remaining=$remaining")
             engine.prepareNext(nextItem)
             crossfadePreparedId = nextId
         }
 
-        // Phase 2 — fire at the seam once the spare is buffered.
+        // Phase 2 — fire only when the spare has buffered at least the fade
+        // length ahead, so it can't stall mid-fade (a barely-READY spare
+        // glitches on cold streams).
         if (remaining <= fade) {
             android.util.Log.i(
                 "Crossfade",
-                "fireCheck remaining=$remaining nextId=$nextId preparedFor=${engine.isPreparedFor(nextId)} ready=${engine.isNextReady()} spareState=${engine.spareState()} spareId=${engine.spareId()}",
+                "fireCheck remaining=$remaining nextId=$nextId preparedFor=${engine.isPreparedFor(nextId)} bufferedMs=${engine.spareBufferedMs()} need=$fade spareState=${engine.spareState()}",
             )
         }
-        if (remaining <= fade && engine.isPreparedFor(nextId) && engine.isNextReady()) {
+        if (remaining <= fade && engine.isPreparedFor(nextId) && engine.spareBufferedMs() >= fade) {
             val fadeMs = minOf(fade, remaining - HANDOFF_MARGIN_MS)
             if (fadeMs >= MIN_FADE_MS) {
-                android.util.Log.i("Crossfade", "fire fadeMs=$fadeMs remaining=$remaining next=$nextId")
+                android.util.Log.i("Crossfade", "fire fadeMs=$fadeMs remaining=$remaining next=$nextId bufferedMs=${engine.spareBufferedMs()}")
                 crossfadePollJob?.cancel() // swap restarts the poll on the new master
                 engine.performTransition(fadeMs) { newMaster -> onCrossfadeSwap(newMaster) }
             }

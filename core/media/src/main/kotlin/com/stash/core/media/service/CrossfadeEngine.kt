@@ -97,6 +97,39 @@ class CrossfadeEngine(
         playerA = buildPlayer()
         playerB = buildPlayer()
         playerA.addListener(masterFocusListener)
+        // TEMP: trace the spare's actual HTTP load activity to root-cause why it
+        // can't buffer streamed next-tracks.
+        playerB.addAnalyticsListener(object : androidx.media3.exoplayer.analytics.AnalyticsListener {
+            override fun onLoadStarted(
+                eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
+                loadEventInfo: androidx.media3.exoplayer.source.LoadEventInfo,
+                mediaLoadData: androidx.media3.exoplayer.source.MediaLoadData,
+            ) {
+                android.util.Log.i("Crossfade", "B loadStarted uri=${loadEventInfo.uri}")
+            }
+            override fun onLoadCompleted(
+                eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
+                loadEventInfo: androidx.media3.exoplayer.source.LoadEventInfo,
+                mediaLoadData: androidx.media3.exoplayer.source.MediaLoadData,
+            ) {
+                android.util.Log.i("Crossfade", "B loadCompleted bytes=${loadEventInfo.bytesLoaded} ms=${loadEventInfo.loadDurationMs} uri=${loadEventInfo.uri}")
+            }
+            override fun onLoadError(
+                eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
+                loadEventInfo: androidx.media3.exoplayer.source.LoadEventInfo,
+                mediaLoadData: androidx.media3.exoplayer.source.MediaLoadData,
+                error: java.io.IOException,
+                wasCanceled: Boolean,
+            ) {
+                android.util.Log.e("Crossfade", "B loadError canceled=$wasCanceled bytes=${loadEventInfo.bytesLoaded} uri=${loadEventInfo.uri} err=$error")
+            }
+            override fun onPlayerError(
+                eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
+                error: androidx.media3.common.PlaybackException,
+            ) {
+                android.util.Log.e("Crossfade", "B playerError code=${error.errorCodeName} msg=${error.message}")
+            }
+        })
     }
 
     private fun requestFocus() {
@@ -139,6 +172,15 @@ class CrossfadeEngine(
     /** Diagnostics: the spare's current playbackState and primed item. */
     fun spareState(): Int = if (::playerB.isInitialized) playerB.playbackState else -1
     fun spareId(): String? = if (::playerB.isInitialized) playerB.currentMediaItem?.mediaId else null
+
+    /**
+     * How much the spare has buffered from its start (it is primed at position
+     * 0). Used to gate the fire so we only crossfade into a spare that has at
+     * least the fade length ready — a barely-READY spare stalls mid-fade on
+     * cold streams.
+     */
+    fun spareBufferedMs(): Long =
+        if (::playerB.isInitialized) playerB.bufferedPosition.coerceAtLeast(0) else 0
 
     /** True when the spare is primed with [mediaId] (so we don't re-prepare it). */
     fun isPreparedFor(mediaId: String?): Boolean =
