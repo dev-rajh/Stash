@@ -476,6 +476,12 @@ class StashPlaybackService : MediaLibraryService() {
         }
 
         // Phase 2 — fire at the seam once the spare is buffered.
+        if (remaining <= fade) {
+            android.util.Log.i(
+                "Crossfade",
+                "fireCheck remaining=$remaining nextId=$nextId preparedFor=${engine.isPreparedFor(nextId)} ready=${engine.isNextReady()} spareState=${engine.spareState()} spareId=${engine.spareId()}",
+            )
+        }
         if (remaining <= fade && engine.isPreparedFor(nextId) && engine.isNextReady()) {
             val fadeMs = minOf(fade, remaining - HANDOFF_MARGIN_MS)
             if (fadeMs >= MIN_FADE_MS) {

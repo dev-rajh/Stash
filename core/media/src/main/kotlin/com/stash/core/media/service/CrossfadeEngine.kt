@@ -136,6 +136,10 @@ class CrossfadeEngine(
     fun isNextReady(): Boolean =
         ::playerB.isInitialized && playerB.playbackState == Player.STATE_READY
 
+    /** Diagnostics: the spare's current playbackState and primed item. */
+    fun spareState(): Int = if (::playerB.isInitialized) playerB.playbackState else -1
+    fun spareId(): String? = if (::playerB.isInitialized) playerB.currentMediaItem?.mediaId else null
+
     /** True when the spare is primed with [mediaId] (so we don't re-prepare it). */
     fun isPreparedFor(mediaId: String?): Boolean =
         mediaId != null && ::playerB.isInitialized &&
@@ -167,6 +171,12 @@ class CrossfadeEngine(
                 val (out, inc) = equalPowerVolumes(elapsed.toFloat() / fadeMs)
                 outgoing.volume = out
                 incoming.volume = inc
+                if (elapsed % 1000L < STEP_MS) {
+                    android.util.Log.i(
+                        "Crossfade",
+                        "ramp t=$elapsed set out=$out in=$inc | read A.vol=${outgoing.volume} B.vol=${incoming.volume} A.playing=${outgoing.isPlaying} B.playing=${incoming.isPlaying} A.state=${outgoing.playbackState} B.state=${incoming.playbackState}",
+                    )
+                }
                 if (outgoing.playbackState == Player.STATE_ENDED ||
                     incoming.playbackState == Player.STATE_ENDED
                 ) break
