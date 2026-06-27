@@ -1,14 +1,24 @@
 package com.stash.feature.settings
 
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.stash.core.common.constants.StashConstants
 import com.stash.feature.settings.components.SettingsGroupCard
+import com.stash.feature.settings.components.SettingsRowPadH
+import com.stash.feature.settings.components.SettingsRowPadV
 import com.stash.feature.settings.components.SettingsScaffold
 import com.stash.feature.settings.components.SettingsSectionLabel
 import com.stash.feature.settings.components.SettingsSegmented
@@ -34,6 +44,8 @@ fun SettingsPlaybackScreen(
     val forceYouTubeFallback by viewModel.forceYouTubeFallback.collectAsStateWithLifecycle()
     val forceArcodOnly by viewModel.forceArcodOnly.collectAsStateWithLifecycle()
     val forceAmzOnly by viewModel.forceAmzOnly.collectAsStateWithLifecycle()
+    val crossfadeEnabled by viewModel.crossfadeEnabled.collectAsStateWithLifecycle()
+    val crossfadeDurationMs by viewModel.crossfadeDurationMs.collectAsStateWithLifecycle()
 
     SettingsScaffold(title = "Playback", onBack = onBack, modifier = modifier) {
         if (StashConstants.STREAMING_ENGINE_ENABLED) {
@@ -88,5 +100,74 @@ fun SettingsPlaybackScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+
+        // Crossfade applies to both streamed and downloaded tracks, so it sits
+        // outside the streaming-engine gate.
+        SettingsSectionLabel("Crossfade")
+        SettingsGroupCard(
+            rows = buildList {
+                add {
+                    SettingsToggleRow(
+                        title = "Crossfade",
+                        subtitle = "Fade the ending track into the next on auto-advance. Manual skips still cut instantly.",
+                        checked = crossfadeEnabled,
+                        onCheckedChange = viewModel::onCrossfadeToggle,
+                    )
+                }
+                if (crossfadeEnabled) {
+                    add {
+                        CrossfadeDurationRow(
+                            seconds = (crossfadeDurationMs / 1000L).toInt().coerceIn(1, 12),
+                            onSecondsChange = { viewModel.onCrossfadeDurationChange(it * 1000L) },
+                        )
+                    }
+                }
+            },
+        )
+    }
+}
+
+/**
+ * Duration slider row for the Crossfade section: 1–12 s in whole-second steps
+ * (Material [Slider] `steps` counts internal stops, so 10 → 12 positions).
+ * Stateless; the caller owns persistence.
+ */
+@Composable
+private fun CrossfadeDurationRow(
+    seconds: Int,
+    onSecondsChange: (Int) -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = SettingsRowPadH, vertical = SettingsRowPadV),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "Duration",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            Text(
+                text = "$seconds sec",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Slider(
+            value = seconds.toFloat(),
+            onValueChange = { onSecondsChange(it.toInt()) },
+            valueRange = 1f..12f,
+            steps = 10,
+            colors = SliderDefaults.colors(
+                thumbColor = MaterialTheme.colorScheme.primary,
+                activeTrackColor = MaterialTheme.colorScheme.primary,
+                inactiveTrackColor = MaterialTheme.colorScheme.surfaceVariant,
+            ),
+        )
     }
 }

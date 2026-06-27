@@ -102,6 +102,7 @@ class SettingsViewModel @Inject constructor(
     private val settingsDeepLinkController: com.stash.core.data.navigation.SettingsDeepLinkController,
     private val crashFileStore: CrashFileStore,
     private val streamingPreference: com.stash.core.data.prefs.StreamingPreference,
+    private val crossfadePreference: com.stash.core.data.prefs.CrossfadePreference,
     private val databaseBackupManager: DatabaseBackupManager,
 ) : ViewModel() {
 
@@ -195,6 +196,33 @@ class SettingsViewModel @Inject constructor(
     /** Persist the force-arcod-only test toggle flip. */
     fun setForceArcodOnly(v: Boolean) = viewModelScope.launch {
         streamingPreference.setForceArcodOnly(v)
+    }
+
+    /** Crossfade on/off — drives the Playback section toggle. Off by default. */
+    val crossfadeEnabled: kotlinx.coroutines.flow.StateFlow<Boolean> =
+        crossfadePreference.enabled.stateIn(
+            scope = viewModelScope,
+            started = kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5_000),
+            initialValue = false,
+        )
+
+    /** Crossfade fade duration in ms (clamped 1000–12000); drives the slider. */
+    val crossfadeDurationMs: kotlinx.coroutines.flow.StateFlow<Long> =
+        crossfadePreference.durationMs.stateIn(
+            scope = viewModelScope,
+            started = kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5_000),
+            initialValue = 6000L,
+        )
+
+    /** Persist the crossfade on/off flip. */
+    fun onCrossfadeToggle(enabled: Boolean) {
+        if (enabled == crossfadeEnabled.value) return
+        viewModelScope.launch { crossfadePreference.setEnabled(enabled) }
+    }
+
+    /** Persist the crossfade duration (clamped on write). */
+    fun onCrossfadeDurationChange(ms: Long) = viewModelScope.launch {
+        crossfadePreference.setDurationMs(ms)
     }
 
     /** Persist the force-amz-only test toggle flip. */
