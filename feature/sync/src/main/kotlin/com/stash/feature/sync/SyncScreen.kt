@@ -324,12 +324,12 @@ fun SyncScreen(
             title = { Text("Switch to Refresh?") },
             text = {
                 Text(
-                    "Refresh pulls fresh mixes each sync — your Daily Mixes, " +
-                        "Discover Weekly, and other rotating playlists. Tracks that " +
-                        "rotate out are removed from the mix and their downloads deleted " +
-                        "to keep your library lean. Cleanup runs once all sources are set " +
-                        "to Refresh — while any source still accumulates, nothing is " +
-                        "deleted. Tracks you added manually are kept."
+                    "Refresh pulls fresh tracks each sync — your auto-generated " +
+                        "daily mixes, weekly discovery, and other rotating playlists. " +
+                        "Tracks that rotate out are removed from the mix and their " +
+                        "downloads deleted to keep your library lean. Cleanup runs once " +
+                        "all sources are set to Refresh — while any source still " +
+                        "accumulates, nothing is deleted. Tracks you added manually are kept."
                 )
             },
             confirmButton = {
