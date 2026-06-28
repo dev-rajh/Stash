@@ -99,15 +99,21 @@ Single root-cause guard in the one function that deletes — covers every caller
   `SyncPreferencesManager` dependency (constructor `@Inject`; it's a
   `@Singleton`, so no module change).
 
-- **Pending-download orphan cancel** (the separate "cancel download_queue rows
-  for tracks no longer in any sync-enabled playlist" step): gate it with the same
-  `anyAccumulate()` check so Accumulate doesn't cancel in-flight/queued downloads
-  of accumulated tracks. (Locate its exact call site during implementation; it's
-  near the startup sweep + in the sync finalize path.)
+- **Pending-download orphan cancel is intentionally NOT gated.**
+  `cancelDownloadsWithNoEnabledPlaylist()` has two callers — the startup sweep
+  (`MusicRepositoryImpl.kt:155`) and `SyncViewModel.onTogglePlaylistSync()`
+  (`SyncViewModel.kt:301`, fired when the user *disables* a playlist). It cancels
+  **not-yet-downloaded** `download_queue` rows for tracks in no sync-enabled
+  playlist. Cancelling a queued (never-downloaded) row is not "deleting a track
+  or file," and it only ever fires for playlists the user explicitly deselected —
+  gating it would keep downloading a deselected playlist's tracks just because
+  another source accumulates, contradicting the deselect. Also moot in practice:
+  Accumulate keeps tracks linked to their playlist, so an accumulated track is
+  never orphan-cancelled. So this path stays as-is.
 
 Result: whenever any source is Accumulate, the library is append-only — deselect,
-rotate, or disconnect can't delete. When all sources are Refresh, the sweep runs
-exactly as today.
+rotate, or disconnect can't delete a downloaded track or its file. When all
+sources are Refresh, the sweep runs exactly as today.
 
 ### 2. Refresh warning dialog
 
@@ -119,10 +125,13 @@ exactly as today.
 - **Content (copy, final wording TBD in build):**
   - Title: "Switch to Refresh?"
   - Body: "Refresh pulls fresh mixes each sync — your Daily Mixes, Discover
-    Weekly, and other rotating playlists. Tracks that rotate out will be removed
-    from the mix **and their downloads deleted** to keep your library lean,
-    including tracks you've accumulated so far. Tracks you added manually are
-    kept."
+    Weekly, and other rotating playlists. Tracks that rotate out are removed from
+    the mix and their downloads deleted to keep your library lean. Cleanup runs
+    once **all** sources are set to Refresh (while any source still accumulates,
+    nothing is deleted). Tracks you added manually are kept."
+    (Phrased to stay accurate under the global rule: switching one source to
+    Refresh while another accumulates rotates the mix *view* but deletes nothing
+    yet.)
   - Confirm button: "Switch to Refresh" → calls the existing
     `onSpotifySyncModeChanged(REFRESH)` / `onYoutubeSyncModeChanged(REFRESH)`.
   - Dismiss button: "Cancel" → no change.
@@ -159,7 +168,7 @@ Sync run (DiffWorker) / app startup (MusicRepositoryImpl)
   → cleanOrphanedMixTracks()
       anyAccumulate()?  yes → return 0 (no deletion)      ← THE GATE
                         no  → existing orphan delete (Refresh-only)
-  → pending-download orphan cancel: same anyAccumulate() gate
+  (pending-download orphan cancel: unchanged — not a deletion, see §1)
 ```
 
 ## Error handling / edge cases
@@ -190,7 +199,9 @@ Sync run (DiffWorker) / app startup (MusicRepositoryImpl)
   anyAccumulate=true → returns 0, deletes nothing (no `deleteTrackFile`, no
   `trackDao.delete`); anyAccumulate=false → deletes orphans as before
   (preserving the existing discovery-queue protection).
-- Pending-download orphan cancel: gated identically.
+- Pending-download orphan cancel: NOT gated — assert it still cancels for a
+  deselected playlist's queued rows even when another source accumulates (it's
+  not a deletion; see §1).
 - `SyncViewModel`: tapping Refresh from Accumulate sets `pendingRefreshSource`
   and does NOT change the mode; confirm changes it; cancel clears without change;
   tapping Accumulate changes mode with no dialog.
@@ -204,6 +215,6 @@ Sync run (DiffWorker) / app startup (MusicRepositoryImpl)
 
 ## Open questions / risks
 - Exact dialog copy is final-tuned during build (content above is the intent).
-- Confirm the precise call site of the pending-download orphan-cancel step and
-  that gating it has no unintended effect on legitimately-removed tracks (it only
-  defers cancellation while accumulating).
+- The only behavior that gets gated is `cleanOrphanedMixTracks()` (the one
+  function that deletes a downloaded track + its files). The pending-download
+  orphan-cancel is deliberately left alone (resolved — see §1).
