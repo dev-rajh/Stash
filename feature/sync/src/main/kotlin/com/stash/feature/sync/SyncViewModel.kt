@@ -388,6 +388,7 @@ class SyncViewModel @Inject constructor(
         }
     }
 
+    /** Refresh chip tapped for YouTube — see [onRequestSpotifyRefresh]. */
     fun onRequestYoutubeRefresh() {
         if (_uiState.value.youtubeSyncMode == SyncMode.ACCUMULATE) {
             _uiState.update { it.copy(pendingRefreshSource = MusicSource.YOUTUBE) }
@@ -400,7 +401,8 @@ class SyncViewModel @Inject constructor(
         viewModelScope.launch {
             when (source) {
                 MusicSource.YOUTUBE -> syncPreferencesManager.setYoutubeSyncMode(SyncMode.REFRESH)
-                else -> syncPreferencesManager.setSpotifySyncMode(SyncMode.REFRESH)
+                MusicSource.SPOTIFY -> syncPreferencesManager.setSpotifySyncMode(SyncMode.REFRESH)
+                MusicSource.LOCAL, MusicSource.BOTH -> Unit
             }
         }
         _uiState.update { it.copy(pendingRefreshSource = null) }
