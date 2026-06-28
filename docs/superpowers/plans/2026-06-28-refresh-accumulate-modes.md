@@ -24,7 +24,7 @@
 | The deleter | `MusicRepositoryImpl.cleanOrphanedMixTracks()` (`MusicRepositoryImpl.kt:846-883`) |
 | MusicRepositoryImpl ctor | `MusicRepositoryImpl.kt:36-49` (last param `localFileOps` at `:48`) |
 | Deleter callers | `DiffWorker.kt:176`, startup sweep `MusicRepositoryImpl.kt:148` |
-| Test helper for the repo | `core/data/src/test/kotlin/com/stash/core/data/repository/MusicRepositoryDownloadsMixTest.kt` — `makeRepo(...)` builds `MusicRepositoryImpl` with `mockk(relaxed=true)` deps |
+| Test helper for the repo | `core/data/src/test/kotlin/com/stash/core/data/repository/MusicRepositoryDownloadsMixTest.kt` — `buildRepo(...)` builds `MusicRepositoryImpl` with `mockk(relaxed=true)` deps |
 | SyncViewModel mode handlers | `SyncViewModel.kt:362` (`onSpotifySyncModeChanged`), `:369` (`onYoutubeSyncModeChanged`) — both already inject `syncPreferencesManager` |
 | SyncUiState mode fields | `SyncViewModel.kt:102-103` (`spotifySyncMode`/`youtubeSyncMode = SyncMode.REFRESH`) |
 | Chip row composable | `SyncScreen.kt:559-594` (`SyncModeChipRow`), used by Spotify card (~`:721`) + YouTube card (~`:940`) |
@@ -64,7 +64,15 @@ class SyncPreferencesManagerTest {
     private lateinit var mgr: SyncPreferencesManager
 
     @Before fun setUp() {
-        mgr = SyncPreferencesManager(ApplicationProvider.getApplicationContext())
+        val ctx = ApplicationProvider.getApplicationContext<android.content.Context>()
+        // CRITICAL: the `sync_preferences` DataStore is a per-PROCESS delegate, so
+        // it leaks across tests in a Robolectric run (Task 2 writes REFRESH/REFRESH,
+        // which would corrupt Task 1's "fresh store → ACCUMULATE" assertion). Delete
+        // the backing file before each test so every test starts from a truly empty
+        // store. (Resolve the file via the same `name = "sync_preferences"` the
+        // delegate uses: `ctx.preferencesDataStoreFile("sync_preferences").delete()`.)
+        ctx.preferencesDataStoreFile("sync_preferences").delete()
+        mgr = SyncPreferencesManager(ctx)
     }
 
     @Test fun `default mode is ACCUMULATE for both sources on a fresh store`() = runTest {
@@ -165,9 +173,9 @@ git commit -m "feat(sync): SyncPreferencesManager.anyAccumulate() — drives the
 
 **Files:**
 - Modify: `core/data/src/main/kotlin/com/stash/core/data/repository/MusicRepositoryImpl.kt` (ctor `:36-49` + the function `:846`)
-- Test: `core/data/src/test/kotlin/com/stash/core/data/repository/MusicRepositoryDownloadsMixTest.kt` (extend — add the `syncPreferencesManager` param to `makeRepo` + 2 gate tests)
+- Test: `core/data/src/test/kotlin/com/stash/core/data/repository/MusicRepositoryDownloadsMixTest.kt` (extend — add the `syncPreferencesManager` param to `buildRepo` + 2 gate tests)
 
-- [ ] **Step 1: Write the failing tests.** First extend the existing `makeRepo(...)` helper to inject a `SyncPreferencesManager` mock (default `coEvery { anyAccumulate() } returns false` so existing tests keep their current behavior), then add:
+- [ ] **Step 1: Write the failing tests.** First extend the existing `buildRepo(...)` helper to inject a `SyncPreferencesManager` mock (default `coEvery { anyAccumulate() } returns false` so existing tests keep their current behavior), then add:
 ```kotlin
     @Test fun `cleanOrphanedMixTracks deletes nothing when any source accumulates`() = runTest {
         val trackDao = mockk<TrackDao>(relaxed = true)
@@ -177,7 +185,7 @@ git commit -m "feat(sync): SyncPreferencesManager.anyAccumulate() — drives the
             // a downloaded track that WOULD be swept if the gate were off
             trackEntity(id = 1L, filePath = "/x/a.flac"),
         )
-        val repo = makeRepo(trackDao = trackDao, syncPreferencesManager = prefs)
+        val repo = buildRepo(trackDao = trackDao, syncPreferencesManager = prefs)
 
         val cleaned = repo.cleanOrphanedMixTracks()
 
@@ -198,7 +206,7 @@ git commit -m "feat(sync): SyncPreferencesManager.anyAccumulate() — drives the
         // discovery-queue protection returns empty so the orphan is eligible:
         val discoveryQueueDao = mockk<DiscoveryQueueDao>(relaxed = true)
         coEvery { discoveryQueueDao.getActiveTrackIds() } returns emptyList()
-        val repo = makeRepo(trackDao = trackDao, discoveryQueueDao = discoveryQueueDao,
+        val repo = buildRepo(trackDao = trackDao, discoveryQueueDao = discoveryQueueDao,
             syncPreferencesManager = prefs)
 
         val cleaned = repo.cleanOrphanedMixTracks()
@@ -207,7 +215,7 @@ git commit -m "feat(sync): SyncPreferencesManager.anyAccumulate() — drives the
         coVerify(exactly = 1) { trackDao.delete(any()) }
     }
 ```
-> Use the file's existing `trackEntity(...)`/fixture helper if present; otherwise build a minimal `TrackEntity` with `isDownloaded=true`. Mirror how the file already constructs entities. Add a `syncPreferencesManager: SyncPreferencesManager = mockk(relaxed = true)` param to `makeRepo` and pass it to the `MusicRepositoryImpl(...)` call (new last arg).
+> This test file has NO `trackEntity(...)` fixture — build a minimal `TrackEntity` with `isDownloaded = true` + a `filePath`. Copy the `trackEntity(id, isDownloaded = ...)` construction pattern from `core/data/src/test/kotlin/com/stash/core/data/db/dao/DiscoveryQueueDaoCapTest.kt:136`. Add a `syncPreferencesManager: SyncPreferencesManager = mockk(relaxed = true)` param to `buildRepo` and pass it to the `MusicRepositoryImpl(...)` call (new last arg). The existing `buildRepo` already defaults `anyAccumulate()` via the relaxed mock — but to keep pre-existing repo tests deterministic, have `buildRepo` stub `coEvery { syncPreferencesManager.anyAccumulate() } returns false` by default.
 
 - [ ] **Step 2: Run — expect FAIL** (ctor arity mismatch / gate not present).
 ```
@@ -231,7 +239,12 @@ git commit -m "feat(sync): SyncPreferencesManager.anyAccumulate() — drives the
 ```
 
 - [ ] **Step 4: Run — expect PASS.** Also run the whole repo test class to confirm pre-existing tests still pass with the relaxed `anyAccumulate()=false` default.
-- [ ] **Step 5: Commit.**
+- [ ] **Step 5: Confirm no sibling deleter (spec edge case).** Grep to confirm `cleanOrphanedMixTracks()` is the ONLY auto-deleter on the sync path and that Stash's own mix refresh doesn't independently delete library tracks:
+```
+grep -rnE 'deleteTrackFile|trackDao\.delete|getOrphanedDownloadedTracks' core/data/src/main/kotlin/com/stash/core/data/sync/
+```
+Expected: no `deleteTrackFile`/`trackDao.delete`/orphan-query in `StashMixRefreshWorker` or other sync workers (the deletion lives only in `MusicRepositoryImpl.cleanOrphanedMixTracks`, now gated). If a sibling deleter exists, STOP and report — it would need the same gate.
+- [ ] **Step 6: Commit.**
 ```
 git add core/data/src/main/kotlin/com/stash/core/data/repository/MusicRepositoryImpl.kt \
         core/data/src/test/kotlin/com/stash/core/data/repository/MusicRepositoryDownloadsMixTest.kt
@@ -362,10 +375,9 @@ private fun SyncModeChipRow(
 }
 ```
 
-- [ ] **Step 2:** At the two call sites (Spotify card ~`:721`, YouTube card ~`:940`), pass the new callbacks:
-  - Spotify: `onRequestRefresh = viewModel::onRequestSpotifyRefresh`
-  - YouTube: `onRequestRefresh = viewModel::onRequestYoutubeRefresh`
-  (these call sites likely live inside helper composables that take an `onSyncModeChanged` param — thread an `onRequestRefresh` param through the same way; keep `onSyncModeChanged` for the Accumulate chip.)
+- [ ] **Step 2:** Thread the new callback. The chip row lives inside per-source card composables (Spotify card takes `onSyncModeChanged` ~`:707`, used at `SyncModeChipRow` ~`:721`; YouTube card ~`:923`/`:940`). `viewModel` is NOT in scope inside the cards — so:
+  - Add an `onRequestRefresh: () -> Unit` param to each card composable (next to its `onSyncModeChanged`), and forward it into `SyncModeChipRow(onRequestRefresh = onRequestRefresh, ...)`.
+  - Bind the `viewModel::` references at the **screen-level card invocations** (where `onSyncModeChanged` is already wired): Spotify card call ~`:210` → `onRequestRefresh = viewModel::onRequestSpotifyRefresh`; YouTube card call ~`:245` → `onRequestRefresh = viewModel::onRequestYoutubeRefresh`. Keep `onSyncModeChanged` for the Accumulate chip.
 
 - [ ] **Step 3:** Render the confirm dialog once at the screen level, driven by `uiState.pendingRefreshSource` (mirror `FailedMatchesScreen.kt:288` for the AlertDialog shape):
 ```kotlin
