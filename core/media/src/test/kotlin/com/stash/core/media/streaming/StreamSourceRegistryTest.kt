@@ -17,6 +17,7 @@ class StreamSourceRegistryTest {
     private val qobuz: QobuzStreamResolver = mockk()
     private val arcod: ArcodStreamResolver = mockk()
     private val amz: AmzStreamResolver = mockk()
+    private val qbdlx: QbdlxStreamResolver = mockk()
     private val youtube: YouTubeStreamResolver = mockk()
     private val streamingPreference: StreamingPreference = mockk {
         // Default: no test toggle on. Individual tests override as needed.
@@ -24,7 +25,7 @@ class StreamSourceRegistryTest {
         coEvery { isForceAmzOnly() } returns false
     }
 
-    private fun registry() = StreamSourceRegistry(kennyy, qobuz, arcod, amz, youtube, streamingPreference)
+    private fun registry() = StreamSourceRegistry(kennyy, qobuz, arcod, amz, qbdlx, youtube, streamingPreference)
 
     private fun stubStreamUrl(origin: String) = StreamUrl(
         url = "https://example.test/$origin.flac",
@@ -66,6 +67,7 @@ class StreamSourceRegistryTest {
         coEvery { qobuz.resolve(any()) } returns null
         coEvery { arcod.resolve(any()) } returns null
         coEvery { amz.resolve(any()) } returns null
+        coEvery { qbdlx.resolve(any()) } returns null
         coEvery { youtube.resolve(any(), any()) } returns null
         val track = stubTrack()
 
@@ -85,6 +87,7 @@ class StreamSourceRegistryTest {
         coEvery { qobuz.resolve(any()) } returns null
         coEvery { arcod.resolve(any()) } returns null
         coEvery { amz.resolve(any()) } returns null
+        coEvery { qbdlx.resolve(any()) } returns null
         coEvery { youtube.resolve(any(), any()) } returns null
         val track = stubTrack()
 
@@ -94,6 +97,7 @@ class StreamSourceRegistryTest {
         coVerify { qobuz.resolve(track) }
         coVerify { arcod.resolve(track) }
         coVerify { amz.resolve(track) }
+        coVerify { qbdlx.resolve(track) }
         coVerify { youtube.resolve(track, allowYtDlp = true) }
     }
 
@@ -165,7 +169,7 @@ class StreamSourceRegistryTest {
         coEvery { streamingPreference.isForceYouTubeFallback() } returns false
         coEvery { kennyy.resolve(any()) } returns null
         coEvery { qobuz.resolve(any()) } returns null
-        // arcod + amz intentionally unstubbed — neither must be consulted.
+        // arcod + amz + qbdlx intentionally unstubbed — none must be consulted.
         coEvery { youtube.resolve(any(), any()) } returns null
         val track = stubTrack()
 
@@ -173,6 +177,7 @@ class StreamSourceRegistryTest {
 
         coVerify(exactly = 0) { arcod.resolve(any()) }
         coVerify(exactly = 0) { amz.resolve(any()) }
+        coVerify(exactly = 0) { qbdlx.resolve(any()) }
         coVerify { youtube.resolve(track, allowYtDlp = false) }
     }
 
