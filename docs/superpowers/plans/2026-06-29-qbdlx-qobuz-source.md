@@ -179,7 +179,7 @@ class QbdlxSigner(
 }
 ```
 
-> NOTE: the sig and ts must come from the SAME `clock()` read. Refactor `signGetFileUrl` to return a `Signed(ts, sig)` pair so the caller can't drift them — do this in Task 2.2 when wiring the client. For now the test pins the formula.
+> NOTE: the sig and ts must come from the SAME `clock()` read. In Task 2.2 Step 3a, refactor `signGetFileUrl`/`signLyricsUrl` to take an explicit `ts: Long` param (caller reads `val ts = signer.requestTs()` once, passes it in) so the two can't drift. For now the test pins the formula with a constant clock.
 
 - [ ] **Step 4: Run — verify pass.** Expected: 4 tests PASS.
 
@@ -281,8 +281,10 @@ class QbdlxApiClientTest {
         client = QbdlxApiClient(
             sharedClient = OkHttpClient(),
             signer = QbdlxSigner("secret") { 1000L },
-            appId = "798273057",
-        ).also { it.baseUrl = server.url("/").toString().trimEnd('/') }
+        ).also {
+            it.baseUrl = server.url("/").toString().trimEnd('/')
+            it.appId = "798273057"   // appId is an internal var (reads BuildConfig in prod), set here for the test
+        }
     }
     @After fun tearDown() { server.shutdown() }
 
@@ -367,8 +369,11 @@ class QbdlxApiException(val status: Int, message: String? = null) : RuntimeExcep
 class QbdlxApiClient @Inject constructor(
     sharedClient: OkHttpClient,
     private val signer: QbdlxSigner,
-    private val appId: String,
 ) {
+    // appId read from BuildConfig directly (like ArcodClient reads ARCOD_STREAM_BASE) —
+    // NOT a constructor String param, to avoid polluting the global Hilt String namespace.
+    // internal var so tests can override.
+    internal var appId: String = com.stash.data.download.BuildConfig.QBDLX_APP_ID
     internal var httpClient: OkHttpClient = sharedClient  // direct www.qobuz.com; no interceptor
     internal var baseUrl: String = ORIGIN
     internal var json: Json = Json { ignoreUnknownKeys = true; isLenient = true; coerceInputValues = true }
@@ -410,8 +415,8 @@ class QbdlxApiClient @Inject constructor(
             f.restrictions.any { it.code.equals("UserUnauthenticated", ignoreCase = true) }
         if (dead) return QbdlxResolveResult.TokenDead
         if (f.url.isNullOrBlank() || f.formatId < 6) return QbdlxResolveResult.RegionLocked
-        val codec = if (f.formatId == 5) "mp3" else "flac"
-        return QbdlxResolveResult.Ok(f.url, codec, f.bitDepth, (f.samplingRate * 1000f).toInt())
+        // formatId >= 6 here (5 already returned TokenDead) → always FLAC.
+        return QbdlxResolveResult.Ok(f.url, "flac", f.bitDepth, (f.samplingRate * 1000f).toInt())
     }
 
     private fun get(url: String, token: String): String {
@@ -446,35 +451,66 @@ class QbdlxApiClient @Inject constructor(
 
 ## Phase 3 — Credential store (token pool, rotation, persisted death, region)
 
-### Task 3.1: `QbdlxCredentialStore`
+### Task 3.1: `QbdlxCredentialStore` (own DataStore — mirror `ArcodCredentialStore`)
 
 **Files:**
 - Create: `data/download/src/main/kotlin/com/stash/data/download/lossless/qbdlx/QbdlxCredentialStore.kt`
-- Modify: `data/download/src/main/kotlin/com/stash/data/download/lossless/LosslessSourcePreferences.kt` (add a pasted-token key + a dead-token-set key, mirroring `captchaCookieKey` storage)
 - Test: `data/download/src/test/kotlin/com/stash/data/download/lossless/qbdlx/QbdlxCredentialStoreTest.kt`
 
-Behavior (spec §3.2):
-- `activeToken()` → pasted token if set, else round-robin over **live** (non-dead) pool tokens; null if all dead.
-- `tokensForRegion(country?)` → ordered live tokens, country-match first, capped at `MAX_REGION_TRIES = 3`.
-- `markDead(token)` → add to a persisted dead set (DataStore string set/CSV); on `recordAlive(token)` clear it.
-- `allDead()` → pasted (if any) dead AND every pool token dead.
-- Pool parsed from `BuildConfig.QBDLX_TOKEN_POOL` ("token:country,token:country").
+**Seam decision (corrected per plan review):** give `QbdlxCredentialStore` its **own** DataStore (a `private val Context.qbdlxStore by preferencesDataStore("qbdlx_creds")`), exactly like `ArcodCredentialStore` does — do NOT thread pasted/dead-token state through `LosslessSourcePreferences` (it's a concrete `@Singleton` needing a `DownloadQueueDao`, not interface-fakeable). Test with **Robolectric + a real temp DataStore**, mirroring `ArcodCredentialStoreTest` (read that file first for the exact `@RunWith(RobolectricTestRunner::class)` + `ApplicationProvider.getApplicationContext()` + `runTest` setup). There is no `AntraCredentialStoreTest` (antra was removed) — ignore any reference to it.
 
-- [ ] **Step 1: Write failing tests** (use a fake prefs interface so DataStore isn't needed — see existing `AntraCredentialStoreTest` / `ArcodCredentialStoreTest` for the pattern). Cover: pasted-priority; round-robin advances; markDead skips dead + persists; region country-first + bounded; allDead true only when everything dead.
+Behavior (spec §3.2):
+- `activeToken(): String?` → pasted token if set, else round-robin (in-memory `AtomicInteger`) over **live** (non-dead) pool tokens; null if all dead.
+- `tokensForRegion(country: String?): List<String>` → live tokens, country-match first, capped at `MAX_REGION_TRIES = 3`.
+- `markDead(token)` (persist to the dead-set in DataStore) / `recordAlive(token)` (remove from dead-set).
+- `allDead(): Boolean` → pasted (if present) is dead AND every pool token is dead.
+- `setPastedToken(String?)` (writes the DataStore key the Settings field calls).
+- Pool parsed from `BuildConfig.QBDLX_TOKEN_POOL` ("token:country,token:country"); each entry split on the LAST ':' (tokens contain no ':' but be defensive).
+
+- [ ] **Step 1: Write failing tests** — Robolectric, real DataStore, the credential store's pool injected via an internal/overridable `poolRaw` seam (so the test isn't at the mercy of BuildConfig). Concrete cases:
 
 ```kotlin
-// Sketch — implement against the chosen prefs seam.
-@Test fun `pasted token takes priority over pool`() { ... assertThat(store.activeToken()).isEqualTo("pasted") }
-@Test fun `round-robin advances across live pool tokens`() { ... }
-@Test fun `markDead skips token and persists across reload`() { ... }
-@Test fun `tokensForRegion puts country match first and caps at 3`() { ... }
-@Test fun `allDead true only when pasted and all pool dead`() { ... }
+@RunWith(RobolectricTestRunner::class)
+class QbdlxCredentialStoreTest {
+    private val ctx = ApplicationProvider.getApplicationContext<Context>()
+    private fun store(pool: String) = QbdlxCredentialStore(ctx).also { it.poolRaw = pool }
+
+    @Test fun `pasted token takes priority over pool`() = runTest {
+        val s = store("a:FR,b:GB"); s.setPastedToken("pasted")
+        assertThat(s.activeToken()).isEqualTo("pasted")
+    }
+    @Test fun `round-robin advances across live pool tokens`() = runTest {
+        val s = store("a:FR,b:GB")
+        val first = s.activeToken(); val second = s.activeToken()
+        assertThat(setOf(first, second)).isEqualTo(setOf("a", "b"))
+    }
+    @Test fun `markDead skips dead token and persists`() = runTest {
+        val s = store("a:FR,b:GB"); s.markDead("a")
+        repeat(4) { assertThat(s.activeToken()).isEqualTo("b") }
+        // new instance, same DataStore → still dead
+        val s2 = store("a:FR,b:GB"); assertThat(s2.activeToken()).isEqualTo("b")
+    }
+    @Test fun `tokensForRegion country-first and capped at 3`() = runTest {
+        val s = store("a:FR,b:GB,c:US,d:DE")
+        assertThat(s.tokensForRegion("GB").first()).isEqualTo("b")
+        assertThat(s.tokensForRegion("GB").size).isAtMost(3)
+    }
+    @Test fun `allDead only when pasted and all pool dead`() = runTest {
+        val s = store("a:FR,b:GB")
+        s.markDead("a"); s.markDead("b"); assertThat(s.allDead()).isTrue()
+        s.setPastedToken("p"); assertThat(s.allDead()).isFalse()
+        s.markDead("p"); assertThat(s.allDead()).isTrue()
+    }
+    @Test fun `recordAlive clears dead flag`() = runTest {
+        val s = store("a:FR,b:GB"); s.markDead("a"); s.recordAlive("a")
+        assertThat(s.allDead()).isFalse()
+    }
+}
 ```
 
-- [ ] **Step 2:** Run — verify fail.
-- [ ] **Step 3:** Add to `LosslessSourcePreferences`: `qbdlxPastedTokenKey = stringPreferencesKey("qbdlx_pasted_token")`, `qbdlxDeadTokensKey = stringPreferencesKey("qbdlx_dead_tokens")` (CSV); flows + `…Now()` reads + `setQbdlxPastedToken(String?)` + `addQbdlxDeadToken(String)` + `clearQbdlxDeadToken(String)`, mirroring the `captchaCookie` methods (lines ~137-162).
-- [ ] **Step 4:** Implement `QbdlxCredentialStore` (parse pool from `BuildConfig.QBDLX_TOKEN_POOL`; round-robin index in-memory `AtomicInteger`; dead set + pasted token from prefs). Run — verify pass.
-- [ ] **Step 5:** Commit. `git commit -m "feat(qbdlx): credential store — pool rotation, persisted death, region"`
+- [ ] **Step 2:** Run — verify fail. `./gradlew :data:download:testDebugUnitTest --tests "com.stash.data.download.lossless.qbdlx.QbdlxCredentialStoreTest"`
+- [ ] **Step 3:** Implement `QbdlxCredentialStore` (own `preferencesDataStore("qbdlx_creds")`; `internal var poolRaw = BuildConfig.QBDLX_TOKEN_POOL`; parse to `List<Pair<token,country>>`; dead-set persisted as a CSV `stringPreferencesKey("dead_tokens")`; pasted as `stringPreferencesKey("pasted_token")`; round-robin via `AtomicInteger`). Run — verify pass.
+- [ ] **Step 4:** Commit. `git commit -m "feat(qbdlx): credential store (own DataStore, rotation, persisted death, region)"`
 
 ---
 
@@ -501,7 +537,7 @@ assertThat(score).isEqualTo(0.95f)
 ```
 
 - [ ] **Step 2:** Run — verify fail.
-- [ ] **Step 3:** Move `normalize`/`jaccard`/`artistSimilarity`/`confidence`/`MIN_CONFIDENCE` into `object QobuzCandidateMatcher` as **public**, with `confidence(query, candTitle, candArtist, candIsrc, candDurationSec, candStreamable)`. In `QobuzSource`, replace the private `confidence(query, candidate: QobuzTrack)` body with a call to `QobuzCandidateMatcher.confidence(query, candidate.title, candidate.performer?.name.orEmpty(), candidate.isrc, candidate.duration, candidate.streamable)` and reference `QobuzCandidateMatcher.MIN_CONFIDENCE`. Keep the `internal` test hooks delegating if other tests use them.
+- [ ] **Step 3:** Move `normalize`/`jaccard`/`artistSimilarity`/`confidence`/`MIN_CONFIDENCE` into `object QobuzCandidateMatcher` as **public**, with `confidence(query, candTitle, candArtist, candIsrc, candDurationSec, candStreamable)`. In `QobuzSource`, replace the private `confidence(query, candidate: QobuzTrack)` body with a call to `QobuzCandidateMatcher.confidence(query, candidate.title, candidate.performer?.name.orEmpty(), candidate.isrc, candidate.duration, candidate.streamable)` and reference `QobuzCandidateMatcher.MIN_CONFIDENCE`. **REQUIRED — do not skip:** the existing `QobuzSourceTest` (~lines 353-429) calls `QobuzSource.normalize` / `jaccard` / `artistSimilarity` directly, so `QobuzSource` MUST keep `internal` delegating shims (`internal fun normalize(s) = QobuzCandidateMatcher.normalize(s)`, etc.) or the existing suite won't compile. These shims are mandatory, not optional.
 - [ ] **Step 4:** Run the FULL qobuz test suite to prove no regression:
 
 Run: `./gradlew :data:download:testDebugUnitTest --tests "com.stash.data.download.lossless.qobuz.*"`
@@ -521,17 +557,18 @@ Expected: all PASS (existing `QobuzSourceTest` unchanged + new matcher test).
 
 Mirror `QobuzSource`: `resolve` (rate-limited) + `resolveImmediate` (bypass breaker, for stream) + `isEnabled()`/`isEnabledForStreaming()`. Flow per spec §4. Format read from the getFileUrl response. On `TokenDead` → `markDead` + rotate (bounded); on `RegionLocked` → `tokensForRegion` (bounded); on `QbdlxAuthException` from search → `markDead` + rotate.
 
-- [ ] **Step 1: Write failing tests** (MockK the client/credentialStore/rateLimiter/healthGate): match→SourceResult with response-format; preview→TokenDead→markDead+rotate→success on 2nd token; region-locked→tries country token; whole-pool-dead→`isEnabled()` false & resolve null; `resolveImmediate` ignores circuit-broken.
+- [ ] **Step 1: Write failing tests** (MockK the client/credentialStore/rateLimiter/healthGate + a fake enabled-flag source — see Step 3 for the gate): match→SourceResult with response-format; preview→TokenDead→markDead+rotate→success on 2nd token; region-locked→tries another token; whole-pool-dead→`isEnabled()` false & resolve null; `resolveImmediate` succeeds even when `rateLimiter.stateOf(id).isCircuitBroken == true`; **toggle off → both `isEnabled()` and `isEnabledForStreaming()` false**; **429 from the client → `rateLimiter.reportRateLimited(id)` called (NOT reportFailure)** — `coVerify { rateLimiter.reportRateLimited("qbdlx_qobuz") }`.
 - [ ] **Step 2:** Run — verify fail.
 - [ ] **Step 3:** Implement. Key points:
-  - `id = "qbdlx_qobuz"`, `displayName = "Qobuz (via qbdlx)"`.
-  - `isEnabled()` = `!rateLimiter.stateOf(id).isCircuitBroken && !credentialStore.allDead()`.
-  - `isEnabledForStreaming()` = `!credentialStore.allDead()` (NO breaker).
-  - `resolve` → rate-limit acquire then `resolveWith(token = activeToken())`; `resolveImmediate` → bypass acquire, breaker-independent gate.
-  - Search via `apiClient.search`; on `QbdlxAuthException` → `markDead(token)` + try next live token (bounded loop, ≤ pool size); match via `QobuzCandidateMatcher`; `getFileUrl` → classify; `Ok` → build `SourceResult(format from Ok.codec/bitDepth/sampleRateHz)`; `TokenDead` → markDead + next; `RegionLocked` → iterate `tokensForRegion(query.country)` (note: `TrackQuery` has no country today — pass `null`, country-matching is a v2 refinement; bounded retry across live tokens still applies); report success/failure to `rateLimiter`.
-  - `recordAlive(token)` on any `Ok` so a previously-dead-then-recovered token clears.
+  - `companion object { const val SOURCE_ID = "qbdlx_qobuz" }`; `override val id = SOURCE_ID`; `displayName = "Qobuz (via qbdlx)"`.
+  - **Enable toggle gate (folded in here, not Phase 8):** inject `LosslessSourcePreferences`; read a new `qbdlxEnabledNow()` boolean (default true — add the `qbdlx_enabled` key + flow + `…Now()` in `LosslessSourcePreferences`, mirroring `enabledKey`). Both gates below AND this flag.
+  - `isEnabled()` = `qbdlxEnabledNow() && !rateLimiter.stateOf(id).isCircuitBroken && !credentialStore.allDead()`.
+  - `isEnabledForStreaming()` = `qbdlxEnabledNow() && !credentialStore.allDead()` (NO breaker — so a user stream tap bypasses the breaker like `QobuzSource`; but a disabled toggle still blocks streaming).
+  - `resolve` → `if (!isEnabled()) return null`; rate-limit acquire; resolve. `resolveImmediate` → `if (!isEnabledForStreaming()) return null`; bypass acquire + breaker.
+  - Search via `apiClient.search`; on `QbdlxAuthException` → `markDead(token)` + try next live token (bounded loop, ≤ pool size); match via `QobuzCandidateMatcher`; `getFileUrl` → classify; `Ok` → `recordAlive(token)` + build `SourceResult(format from Ok.codec/bitDepth/sampleRateHz)`; `TokenDead` → `markDead` + next token; `RegionLocked` → iterate `credentialStore.tokensForRegion(null)` (TrackQuery has no `country` field today — pass `null`; bounded retry across live tokens; country-aware selection is a v2 follow-up).
+  - **Rate-limit reporting (mirror `QobuzSource.callLimited`):** wrap calls so success → `reportSuccess(id)`; `catch (e: QbdlxApiException)` → if `e.status == 429` → `reportRateLimited(id)` else `reportFailure(id)`; `catch (e: QbdlxAuthException)` → markDead + rotate (do NOT trip the breaker — a dead token isn't a source-health failure); other `Exception` → `reportFailure(id)`. Background `resolve` respects the breaker; `resolveImmediate` skips `acquire` but still reports outcomes so the breaker state stays accurate.
 - [ ] **Step 4:** Run — verify pass.
-- [ ] **Step 5:** Commit. `git commit -m "feat(qbdlx): QbdlxQobuzSource (resolve + streaming bypass + rotation)"`
+- [ ] **Step 5:** Commit. `git commit -m "feat(qbdlx): QbdlxQobuzSource (resolve + streaming bypass + rotation + enable gate)"`
 
 ---
 
@@ -544,7 +581,10 @@ Mirror `QobuzSource`: `resolve` (rate-limited) + `resolveImmediate` (bypass brea
 - Modify: `data/download/src/main/kotlin/com/stash/data/download/lossless/LosslessSourcePreferences.kt` (`DEFAULT_PRIORITY` += `"qbdlx_qobuz"` last)
 - Modify: `data/download/src/main/kotlin/com/stash/data/download/lossless/AggregatorRateLimiter.kt` (`configs["qbdlx_qobuz"]` in init)
 
-- [ ] **Step 1:** `QbdlxModule`: `@Binds @IntoSet bindQbdlxAsLosslessSource(impl: QbdlxQobuzSource): LosslessSource` (mirror `QobuzModule`). Also a `@Provides` for `QbdlxSigner` (secret from `BuildConfig.QBDLX_APP_SECRET`) and for `QbdlxApiClient`'s `appId` (`BuildConfig.QBDLX_APP_ID`) — or construct these inside the module. Provide `QbdlxCredentialStore` (it's `@Inject` constructed; needs prefs + BuildConfig pool — read pool in the store from `BuildConfig.QBDLX_TOKEN_POOL`).
+- [ ] **Step 1:** `QbdlxModule` (`abstract class` with a `companion object` for `@Provides`, like other modules):
+  - `@Binds @IntoSet abstract fun bindQbdlxAsLosslessSource(impl: QbdlxQobuzSource): LosslessSource` (mirror `QobuzModule`).
+  - `companion object { @Provides @Singleton fun provideQbdlxSigner(): QbdlxSigner = QbdlxSigner(BuildConfig.QBDLX_APP_SECRET) }`.
+  - **Do NOT** `@Provides` a bare `String` for appId (pollutes the global Hilt `String` namespace) and **do NOT** `@Provides QbdlxApiClient` (it has an `@Inject` constructor — a second binding = duplicate-binding error). `QbdlxApiClient` reads `BuildConfig.QBDLX_APP_ID` itself (Task 2.2); `QbdlxCredentialStore` reads `BuildConfig.QBDLX_TOKEN_POOL` itself (Task 3.1) — both are plain `@Inject`/`@Singleton`, no module wiring needed.
 - [ ] **Step 2:** `LosslessSourcePreferences.DEFAULT_PRIORITY`: append `"qbdlx_qobuz"` after `"amz"` (last). Update the KDoc list (it numbers the sources).
 - [ ] **Step 3:** `AggregatorRateLimiter` init: add
 ```kotlin
@@ -588,15 +628,16 @@ Mirror `QobuzStreamResolver` exactly — delegate to `QbdlxQobuzSource.resolveIm
 
 ## Phase 8 — Settings: enable toggle, paste-token, all-dead notice
 
-### Task 8.1: Settings surface
+### Task 8.1: Settings surface (UI only — the enable gate + token storage already exist from Phases 3 & 5)
 
-**Files:**
-- Modify: `feature/settings/.../SettingsViewModel.kt` + the lossless-sources screen (find the row that renders squid's "Connect"/cookie + the per-source toggles; mirror it).
+**Files (locate first):** run `grep -rn "captcha" feature/settings/src/main/kotlin --include=*.kt -l` and `grep -rn "lossless\|Connect\|Lossless source" feature/settings/src/main/kotlin -l` to find the lossless-sources screen + its ViewModel. Mirror the existing squid cookie/"Connect" row + the per-source toggle pattern there.
 
-- [ ] **Step 1:** Add a "Qobuz (via qbdlx)" row: an enable toggle (persist via a new `LosslessSourcePreferences` boolean key `qbdlx_enabled`, default true) + a "Paste token" text field calling `setQbdlxPastedToken`. Gate `QbdlxQobuzSource.isEnabled()` on the new boolean too.
-- [ ] **Step 2:** All-dead notice: expose `QbdlxCredentialStore.allDead()` (or a flow) to the screen; when true, show "qbdlx tokens expired — paste a fresh one" (mirror squid's `lastKnownBadCookie` "Expired" badge pattern).
-- [ ] **Step 3:** `./gradlew :app:assembleDebug` → BUILD SUCCESSFUL.
-- [ ] **Step 4:** Commit. `git commit -m "feat(qbdlx): Settings toggle + paste-token + expired notice"`
+This phase is **presentation only** — `qbdlx_enabled` (Phase 5), `setPastedToken`/`allDead` (Phase 3) already exist; here we surface them.
+
+- [ ] **Step 1:** ViewModel — expose: a `qbdlxEnabled` StateFlow (read/write the `qbdlx_enabled` pref) and an `onQbdlxEnabledChange(Boolean)`; an `onQbdlxTokenPaste(String)` → `credentialStore.setPastedToken(...)`; a `qbdlxExpired` StateFlow derived from `credentialStore.allDead()` (expose `allDead` as a `Flow<Boolean>` on the store if not already). Add a focused ViewModel test for the toggle + paste wiring (the ViewModel test class for this screen already exists — mirror its style; this is the one TDD'd piece of Phase 8).
+- [ ] **Step 2:** Compose row — "Qobuz (via qbdlx)" with: the enable Switch, a "Paste token" text field (→ `onQbdlxTokenPaste`), and — when `qbdlxExpired` is true — an "Expired — paste a fresh token" badge (mirror squid's `lastKnownBadCookie` "Expired" badge). **Decision:** the toggle gates BOTH download and streaming (Phase 5 gates `isEnabledForStreaming()` on `qbdlxEnabledNow()` too), and the badge is the all-dead surface (no separate push notification — spec §3.2's `CaptchaExpiredNotifier` is named as a *pattern*; a Settings badge is the chosen surface, consistent with how the user discovers a dead squid cookie).
+- [ ] **Step 3:** `./gradlew :app:assembleDebug` → BUILD SUCCESSFUL. Run the settings ViewModel test filter → PASS.
+- [ ] **Step 4:** Commit. `git commit -m "feat(qbdlx): Settings row — toggle, paste-token, expired badge"`
 
 ---
 
