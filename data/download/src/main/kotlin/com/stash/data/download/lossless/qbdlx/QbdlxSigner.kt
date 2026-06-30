@@ -15,16 +15,16 @@ class QbdlxSigner(
 ) {
     fun requestTs(): Long = clock()
 
-    /** ts is returned alongside the sig so the caller sends the SAME ts it signed. */
-    fun signGetFileUrl(trackId: Long, formatId: Int): String {
-        val ts = clock()
-        return md5("trackgetFileUrl" + "format_id$formatId" + "intentstream" + "track_id$trackId" + ts + appSecret)
-    }
+    /**
+     * Signs with the caller-supplied [ts]. The caller reads [requestTs] ONCE and
+     * passes that same value into both the URL's `request_ts` param and here, so
+     * the signed timestamp can never drift from the sent timestamp.
+     */
+    fun signGetFileUrl(ts: Long, trackId: Long, formatId: Int): String =
+        md5("trackgetFileUrl" + "format_id$formatId" + "intentstream" + "track_id$trackId" + ts + appSecret)
 
-    fun signLyricsUrl(trackId: Long): String {
-        val ts = clock()
-        return md5("tracklyricsUrl" + "track_id$trackId" + ts + appSecret)
-    }
+    fun signLyricsUrl(ts: Long, trackId: Long): String =
+        md5("tracklyricsUrl" + "track_id$trackId" + ts + appSecret)
 
     private fun md5(s: String): String =
         MessageDigest.getInstance("MD5").digest(s.toByteArray())
