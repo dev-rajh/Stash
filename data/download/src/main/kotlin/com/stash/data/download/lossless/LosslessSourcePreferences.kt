@@ -47,6 +47,7 @@ class LosslessSourcePreferences @Inject constructor(
     private val priorityKey = stringPreferencesKey("priority_order")
     private val minQualityKey = stringPreferencesKey("min_quality")
     private val enabledKey = booleanPreferencesKey("enabled")
+    private val qbdlxEnabledKey = booleanPreferencesKey("qbdlx_enabled")
     private val captchaCookieKey = stringPreferencesKey("squid_wtf_captcha_verified_at")
     private val captchaCookieSetAtKey = longPreferencesKey("squid_wtf_captcha_set_at_ms")
     private val bannerDismissedKey = booleanPreferencesKey("home_banner_dismissed")
@@ -80,6 +81,24 @@ class LosslessSourcePreferences @Inject constructor(
     }
 
     suspend fun enabledNow(): Boolean = enabled.first()
+
+    /**
+     * Per-source enable toggle for the qbdlx direct-Qobuz source. Defaults
+     * to true — fresh installs land it ready (it has a bundled token pool).
+     * Gates BOTH download ([QbdlxQobuzSource.isEnabled]) and streaming
+     * ([QbdlxQobuzSource.isEnabledForStreaming]); turning it off blocks the
+     * source everywhere. Mirrors [enabled]/[enabledNow]; no requeue side
+     * effect (it's one source among several, not the master switch).
+     */
+    val qbdlxEnabled: Flow<Boolean> = context.losslessDataStore.data.map { prefs ->
+        prefs[qbdlxEnabledKey] ?: true
+    }
+
+    suspend fun qbdlxEnabledNow(): Boolean = qbdlxEnabled.first()
+
+    suspend fun setQbdlxEnabled(value: Boolean) {
+        context.losslessDataStore.edit { prefs -> prefs[qbdlxEnabledKey] = value }
+    }
 
     suspend fun setEnabled(value: Boolean) {
         context.losslessDataStore.edit { prefs -> prefs[enabledKey] = value }
