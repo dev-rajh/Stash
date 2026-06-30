@@ -53,9 +53,10 @@ class QbdlxQobuzSourceTest {
     private fun ok(url: String = "https://cdn/file?fmt=27") =
         QbdlxResolveResult.Ok(url, codec = "flac", bitDepth = 24, sampleRateHz = 96_000)
 
-    /** Toggle on, pool live, breaker closed, tokens available. */
+    /** Toggle on, pool live, breaker closed, tokens available, MAX tier (qobuzCode 27). */
     private fun enabledAndAcquired() {
         coEvery { prefs.qbdlxEnabledNow() } returns true
+        coEvery { prefs.qualityTierNow() } returns com.stash.data.download.lossless.LosslessQualityTier.MAX
         coEvery { credentialStore.allDead() } returns false
         coEvery { rateLimiter.stateOf(sid) } returns notBroken
         coEvery { rateLimiter.acquire(sid) } returns true
@@ -148,6 +149,8 @@ class QbdlxQobuzSourceTest {
     @Test
     fun `resolveImmediate succeeds even when circuit broken and bypasses acquire`() = runTest {
         coEvery { prefs.qbdlxEnabledNow() } returns true
+        // resolveImmediate(query) with no explicit quality falls back to the tier.
+        coEvery { prefs.qualityTierNow() } returns com.stash.data.download.lossless.LosslessQualityTier.MAX
         coEvery { credentialStore.allDead() } returns false
         coEvery { rateLimiter.stateOf(sid) } returns
             RateLimitState(0.0, 0L, isCircuitBroken = true, msUntilUnblock = 60_000L, recentFailures = 5)
@@ -182,6 +185,36 @@ class QbdlxQobuzSourceTest {
 
         assertThat(r).isNull()
         coVerify { rateLimiter.reportRateLimited(sid) }
+        coVerify(exactly = 0) { rateLimiter.reportFailure(sid) }
+    }
+
+    @Test
+    fun `download path requests the user quality tier not always hi-res`() = runTest {
+        // CD tier → qobuzCode 6. resolve() (download) must request 6, not a hardcoded 27.
+        coEvery { prefs.qbdlxEnabledNow() } returns true
+        coEvery { prefs.qualityTierNow() } returns com.stash.data.download.lossless.LosslessQualityTier.CD
+        coEvery { credentialStore.allDead() } returns false
+        coEvery { rateLimiter.stateOf(sid) } returns notBroken
+        coEvery { rateLimiter.acquire(sid) } returns true
+        coEvery { credentialStore.activeToken() } returns "tok1"
+        coEvery { apiClient.search(any(), "tok1") } returns listOf(candidate())
+        coEvery { apiClient.getFileUrl(42, 6, "tok1") } returns ok()
+
+        val r = source().resolve(query)
+
+        assertThat(r).isNotNull()
+        coVerify { apiClient.getFileUrl(42, 6, "tok1") } // CD = format_id 6
+    }
+
+    @Test
+    fun `cancellation propagates and is not swallowed as a failure`() = runTest {
+        enabledAndAcquired()
+        coEvery { credentialStore.activeToken() } returns "tok1"
+        coEvery { apiClient.search(any(), "tok1") } throws kotlinx.coroutines.CancellationException("cancelled")
+
+        org.junit.Assert.assertThrows(kotlinx.coroutines.CancellationException::class.java) {
+            kotlinx.coroutines.runBlocking { source().resolve(query) }
+        }
         coVerify(exactly = 0) { rateLimiter.reportFailure(sid) }
     }
 }

@@ -86,7 +86,11 @@ class QbdlxQobuzSource @Inject constructor(
         requestedQuality: Int?,
     ): SourceResult? {
         val (track, conf, token) = search(query, bypassRateLimit) ?: return null
-        val formatId = requestedQuality ?: HI_RES_FORMAT_ID
+        // Honor the user's quality tier on the download path (CD/Hi-Res/Max →
+        // qobuzCode 6/7/27), mirroring QobuzSource. The stream path passes an
+        // explicit requestedQuality (the streaming tier); only fall back to the
+        // download tier preference when none was given.
+        val formatId = requestedQuality ?: losslessPrefs.qualityTierNow().qobuzCode
         return resolveFile(track, conf, token, formatId, bypassRateLimit)
     }
 
@@ -278,9 +282,6 @@ class QbdlxQobuzSource @Inject constructor(
     companion object {
         const val SOURCE_ID = "qbdlx_qobuz"
         private const val TAG = "QbdlxQobuzSource"
-
-        /** Qobuz format_id 27 = Hi-Res 24-bit ≤192kHz FLAC. */
-        private const val HI_RES_FORMAT_ID = 27
 
         /**
          * Hard ceiling on token rotations per phase. The tried-set is the real
