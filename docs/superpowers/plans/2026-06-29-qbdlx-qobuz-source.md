@@ -52,7 +52,9 @@
 // public (shown on qbdlx's login page). TOKEN_POOL is a comma-separated list of
 // "user_auth_token:ISO2COUNTRY" pairs. Empty is valid — an unconfigured build
 // simply has no bundled tokens and relies on a user-pasted token.
-val qbdlxProps = java.util.Properties().apply {
+// NOTE: use bare `Properties()` — data/download/build.gradle.kts already has
+// `import java.util.Properties` at the top (matches the existing ARCOD block).
+val qbdlxProps = Properties().apply {
     val f = rootProject.file("local.properties")
     if (f.exists()) f.inputStream().use { load(it) }
 }
