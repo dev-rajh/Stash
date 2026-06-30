@@ -39,6 +39,7 @@ import com.stash.data.download.lossless.AggregatorRateLimiter
 import com.stash.data.download.lossless.LosslessQualityTier
 import com.stash.data.download.lossless.LosslessSourcePreferences
 import com.stash.data.download.lossless.arcod.ArcodCredentialStore
+import com.stash.data.download.lossless.qbdlx.QbdlxCredentialStore
 import com.stash.data.download.lossless.qobuz.QobuzSource
 import com.stash.data.download.prefs.StreamingQualityPreferences
 import com.stash.feature.settings.components.squidCaptchaStatus
@@ -97,6 +98,7 @@ class SettingsViewModel @Inject constructor(
     private val losslessRateLimiter: AggregatorRateLimiter,
     private val qobuzSource: QobuzSource,
     private val arcodCredentialStore: ArcodCredentialStore,
+    private val qbdlxCredentialStore: QbdlxCredentialStore,
     private val likePreferences: LikePreferences,
     private val trackDao: TrackDao,
     private val settingsDeepLinkController: com.stash.core.data.navigation.SettingsDeepLinkController,
@@ -240,6 +242,7 @@ class SettingsViewModel @Inject constructor(
         // Must follow _localState declaration: Kotlin initializes properties
         // top-to-bottom and refreshDiagnostics() writes to _localState.
         refreshDiagnostics()
+        refreshQbdlxExpired()
     }
 
     /**
@@ -1042,6 +1045,47 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch {
             losslessPrefs.setCaptchaCookieValue(value)
         }
+    }
+
+    // -- qbdlx (direct-Qobuz lossless, 5th source) ---------------------------
+
+    /**
+     * Per-source enable toggle for qbdlx. Gates BOTH download and streaming
+     * (the source reads `qbdlxEnabledNow()` in both `isEnabled()` and
+     * `isEnabledForStreaming()`). Default true.
+     */
+    val qbdlxEnabled: StateFlow<Boolean> =
+        losslessPrefs.qbdlxEnabled.stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5_000),
+            initialValue = true,
+        )
+
+    /**
+     * True when every qbdlx token (pasted + pool) is dead — drives the
+     * Settings "expired, paste a fresh token" badge. The store exposes only a
+     * suspend `allDead()`, so we poll it on construction and after each paste
+     * (the only events that flip it). ponytail: poll-on-change, add a store
+     * Flow if another surface needs live updates.
+     */
+    private val _qbdlxExpired = MutableStateFlow(false)
+    val qbdlxExpired: StateFlow<Boolean> = _qbdlxExpired
+
+    /** Persist the qbdlx enable flip. */
+    fun onQbdlxEnabledChange(enabled: Boolean) {
+        viewModelScope.launch { losslessPrefs.setQbdlxEnabled(enabled) }
+    }
+
+    /** Store (or clear, on blank) the user-pasted qbdlx token, then re-check expiry. */
+    fun onQbdlxTokenPaste(token: String) {
+        viewModelScope.launch {
+            qbdlxCredentialStore.setPastedToken(token.ifBlank { null })
+            _qbdlxExpired.value = qbdlxCredentialStore.allDead()
+        }
+    }
+
+    private fun refreshQbdlxExpired() {
+        viewModelScope.launch { _qbdlxExpired.value = qbdlxCredentialStore.allDead() }
     }
 
     // -- Streaming quality (per-network tiers + Save Data) -------------------

@@ -83,6 +83,8 @@ fun SettingsAudioQualityScreen(
     viewModel: SettingsViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val qbdlxEnabled by viewModel.qbdlxEnabled.collectAsStateWithLifecycle()
+    val qbdlxExpired by viewModel.qbdlxExpired.collectAsStateWithLifecycle()
 
     SettingsScaffold(title = "Audio & Quality", onBack = onBack, modifier = modifier) {
         // (a) Download tier — only when lossless OFF. The standalone yt-dlp
@@ -175,6 +177,46 @@ fun SettingsAudioQualityScreen(
                                 null
                             },
                         )
+
+                        // qbdlx — direct www.qobuz.com Hi-Res FLAC (5th source).
+                        // Per-source enable toggle gates BOTH download and
+                        // streaming; the token field is the refresh path when the
+                        // bundled pool ages out, and the badge surfaces all-dead.
+                        SettingsToggleRow(
+                            title = "Qobuz (via qbdlx)",
+                            subtitle = "Direct Qobuz Hi-Res FLAC (5th source).",
+                            checked = qbdlxEnabled,
+                            onCheckedChange = viewModel::onQbdlxEnabledChange,
+                        )
+                        AnimatedVisibility(
+                            visible = qbdlxEnabled,
+                            enter = expandVertically() + fadeIn(),
+                            exit = shrinkVertically() + fadeOut(),
+                        ) {
+                            Column(modifier = Modifier.fillMaxWidth()) {
+                                if (qbdlxExpired) {
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = "Expired — paste a fresh token",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.error,
+                                    )
+                                }
+                                Spacer(modifier = Modifier.height(4.dp))
+                                var qbdlxToken by remember { mutableStateOf("") }
+                                OutlinedTextField(
+                                    value = qbdlxToken,
+                                    onValueChange = {
+                                        qbdlxToken = it
+                                        viewModel.onQbdlxTokenPaste(it)
+                                    },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    label = { Text("Paste token") },
+                                    singleLine = true,
+                                    placeholder = { Text("user_auth_token") },
+                                )
+                            }
+                        }
 
                         // -- Download quality picker --------------------------
                         Spacer(modifier = Modifier.height(8.dp))
