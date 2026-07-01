@@ -28,7 +28,12 @@ import javax.inject.Singleton
  *      FLAC. Consulted when neither Qobuz proxy has a confident match,
  *      so an Amazon-only track still streams lossless before dropping to
  *      lossy YouTube. Captcha auth rides the shared client's interceptor.
- *   5. [YouTubeStreamResolver] — yt-dlp / InnerTube extraction. Last
+ *   5. [QbdlxStreamResolver]   — `qbdlx`, the DIRECT Qobuz API (signed
+ *      requests + a rotating per-account token pool). Same Qobuz catalog as
+ *      kennyy/squid but via a user-supplied account pool, so — like arcod and
+ *      amz — it's foreground-only (allowYtDlp) and sits last among the
+ *      lossless sources, reached only when the proxies and amz all miss.
+ *   6. [YouTubeStreamResolver] — yt-dlp / InnerTube extraction. Last
  *      resort, reached only when the track genuinely isn't in the Qobuz
  *      catalog (Bandcamp re-uploads, region-exclusive, underground
  *      releases). Lossy quality (AAC/Opus ~128-160 kbps), surfaced as a
@@ -63,6 +68,7 @@ class StreamSourceRegistry @Inject constructor(
     private val qobuz: QobuzStreamResolver,
     private val arcod: ArcodStreamResolver,
     private val amz: AmzStreamResolver,
+    private val qbdlx: QbdlxStreamResolver,
     private val youtube: YouTubeStreamResolver,
     private val streamingPreference: StreamingPreference,
 ) {
@@ -89,7 +95,14 @@ class StreamSourceRegistry @Inject constructor(
         allowYtDlp: Boolean = true,
     ): StreamUrl? {
         val resolvers = buildList<Pair<String, suspend (TrackEntity) -> StreamUrl?>> {
-            if (streamingPreference.isForceArcodOnly()) {
+            if (streamingPreference.isForceQbdlxOnly()) {
+                // Test toggle: qbdlx (direct-Qobuz) ONLY — skip every other source
+                // so qbdlx can be exercised even when the proxies are healthy.
+                // Takes precedence over the other force toggles. Gated by
+                // allowYtDlp like arcod/amz so speculative background fill spends
+                // no pool-account quota (only foreground/next-up resolves hit it).
+                if (allowYtDlp) add("qbdlx" to qbdlx::resolve)
+            } else if (streamingPreference.isForceArcodOnly()) {
                 // Test toggle: ARCOD ONLY — skip kennyy/squid/YouTube so the
                 // ARCOD path can be exercised even when the Qobuz proxies are
                 // healthy. Takes precedence over forceAmzOnly and
@@ -133,6 +146,14 @@ class StreamSourceRegistry @Inject constructor(
                 // leaves the timeline too sparse to skip through or auto-advance
                 // (observed on-device 2026-06-21: 52s to resolve one next-up).
                 if (allowYtDlp) add("amz" to amz::resolve)
+                // qbdlx (direct Qobuz API, per-account token pool) is the same
+                // kind of authenticated per-user-account fallback as arcod, so it
+                // must run ONLY on foreground/next-up resolves (allowYtDlp = true),
+                // NEVER on the speculative queue-wide background fill
+                // (allowYtDlp = false) — otherwise one playlist tap would spend a
+                // search call + the pool account's quota on every queue track
+                // speculatively, not just the ones actually played.
+                if (allowYtDlp) add("qbdlx" to qbdlx::resolve)
                 if (allowYouTube) add("youtube" to { t: TrackEntity -> youtube.resolve(t, allowYtDlp) })
             }
         }

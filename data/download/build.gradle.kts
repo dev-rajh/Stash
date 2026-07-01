@@ -22,6 +22,21 @@ val arcodLocalProperties = Properties().apply {
 val arcodStreamBase: String =
     arcodLocalProperties.getProperty("arcod.streamBase") ?: System.getenv("ARCOD_STREAM_BASE").orEmpty()
 
+// ── qbdlx (direct-Qobuz) credentials + token pool ──────────────────────────
+// Bundled at build time from local.properties / env. APP_ID + APP_SECRET are
+// public (shown on qbdlx's login page). TOKEN_POOL is a comma-separated list of
+// "user_auth_token:ISO2COUNTRY" pairs. Empty is valid — an unconfigured build
+// simply has no bundled tokens and relies on a user-pasted token.
+val qbdlxProps = Properties().apply {
+    val f = rootProject.file("local.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
+}
+fun qbdlxProp(key: String, env: String) =
+    qbdlxProps.getProperty(key) ?: System.getenv(env).orEmpty()
+val qbdlxAppId = qbdlxProp("qbdlx.appId", "QBDLX_APP_ID")
+val qbdlxAppSecret = qbdlxProp("qbdlx.appSecret", "QBDLX_APP_SECRET")
+val qbdlxTokenPool = qbdlxProp("qbdlx.tokenPool", "QBDLX_TOKEN_POOL")
+
 android {
     namespace = "com.stash.data.download"
 
@@ -30,6 +45,9 @@ android {
         // env at build time so it never lives in the public repo. Empty when
         // unconfigured — ARCOD streaming then no-ops and the registry fails over.
         buildConfigField("String", "ARCOD_STREAM_BASE", "\"$arcodStreamBase\"")
+        buildConfigField("String", "QBDLX_APP_ID", "\"$qbdlxAppId\"")
+        buildConfigField("String", "QBDLX_APP_SECRET", "\"$qbdlxAppSecret\"")
+        buildConfigField("String", "QBDLX_TOKEN_POOL", "\"$qbdlxTokenPool\"")
     }
 
     buildFeatures {

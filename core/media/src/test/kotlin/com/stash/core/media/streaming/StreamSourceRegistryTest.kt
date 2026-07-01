@@ -17,14 +17,16 @@ class StreamSourceRegistryTest {
     private val qobuz: QobuzStreamResolver = mockk()
     private val arcod: ArcodStreamResolver = mockk()
     private val amz: AmzStreamResolver = mockk()
+    private val qbdlx: QbdlxStreamResolver = mockk()
     private val youtube: YouTubeStreamResolver = mockk()
     private val streamingPreference: StreamingPreference = mockk {
         // Default: no test toggle on. Individual tests override as needed.
+        coEvery { isForceQbdlxOnly() } returns false
         coEvery { isForceArcodOnly() } returns false
         coEvery { isForceAmzOnly() } returns false
     }
 
-    private fun registry() = StreamSourceRegistry(kennyy, qobuz, arcod, amz, youtube, streamingPreference)
+    private fun registry() = StreamSourceRegistry(kennyy, qobuz, arcod, amz, qbdlx, youtube, streamingPreference)
 
     private fun stubStreamUrl(origin: String) = StreamUrl(
         url = "https://example.test/$origin.flac",
@@ -66,6 +68,7 @@ class StreamSourceRegistryTest {
         coEvery { qobuz.resolve(any()) } returns null
         coEvery { arcod.resolve(any()) } returns null
         coEvery { amz.resolve(any()) } returns null
+        coEvery { qbdlx.resolve(any()) } returns null
         coEvery { youtube.resolve(any(), any()) } returns null
         val track = stubTrack()
 
@@ -85,6 +88,7 @@ class StreamSourceRegistryTest {
         coEvery { qobuz.resolve(any()) } returns null
         coEvery { arcod.resolve(any()) } returns null
         coEvery { amz.resolve(any()) } returns null
+        coEvery { qbdlx.resolve(any()) } returns null
         coEvery { youtube.resolve(any(), any()) } returns null
         val track = stubTrack()
 
@@ -94,6 +98,7 @@ class StreamSourceRegistryTest {
         coVerify { qobuz.resolve(track) }
         coVerify { arcod.resolve(track) }
         coVerify { amz.resolve(track) }
+        coVerify { qbdlx.resolve(track) }
         coVerify { youtube.resolve(track, allowYtDlp = true) }
     }
 
@@ -165,7 +170,7 @@ class StreamSourceRegistryTest {
         coEvery { streamingPreference.isForceYouTubeFallback() } returns false
         coEvery { kennyy.resolve(any()) } returns null
         coEvery { qobuz.resolve(any()) } returns null
-        // arcod + amz intentionally unstubbed — neither must be consulted.
+        // arcod + amz + qbdlx intentionally unstubbed — none must be consulted.
         coEvery { youtube.resolve(any(), any()) } returns null
         val track = stubTrack()
 
@@ -173,6 +178,7 @@ class StreamSourceRegistryTest {
 
         coVerify(exactly = 0) { arcod.resolve(any()) }
         coVerify(exactly = 0) { amz.resolve(any()) }
+        coVerify(exactly = 0) { qbdlx.resolve(any()) }
         coVerify { youtube.resolve(track, allowYtDlp = false) }
     }
 
@@ -233,6 +239,33 @@ class StreamSourceRegistryTest {
      * The force-amz-only test toggle routes through amz ONLY — kennyy,
      * squid, and youtube are never consulted, and an amz hit is returned.
      */
+    /**
+     * The force-qbdlx-only test toggle routes through qbdlx ONLY — every other
+     * source is skipped, and a qbdlx hit is returned. Takes precedence over the
+     * other force toggles.
+     */
+    @Test
+    fun `forceQbdlxOnly routes through qbdlx only`() = runTest {
+        coEvery { streamingPreference.isForceQbdlxOnly() } returns true
+        coEvery { qbdlx.resolve(any()) } returns StreamUrl(
+            url = "https://www.qobuz.com/file?fmt=27&etsp=1782867891",
+            expiresAtMs = Long.MAX_VALUE,
+            codec = "flac",
+            origin = "qbdlx",
+        )
+        val track = stubTrack()
+
+        val result = registry().resolve(track, allowYouTube = true, allowYtDlp = true)
+
+        assertThat(result).isNotNull()
+        assertThat(result!!.origin).isEqualTo("qbdlx")
+        coVerify { qbdlx.resolve(track) }
+        coVerify(exactly = 0) { kennyy.resolve(any()) }
+        coVerify(exactly = 0) { qobuz.resolve(any()) }
+        coVerify(exactly = 0) { amz.resolve(any()) }
+        coVerify(exactly = 0) { youtube.resolve(any(), any()) }
+    }
+
     @Test
     fun `forceAmzOnly routes through amz only`() = runTest {
         coEvery { streamingPreference.isForceAmzOnly() } returns true
