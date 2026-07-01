@@ -21,6 +21,7 @@ class StreamSourceRegistryTest {
     private val youtube: YouTubeStreamResolver = mockk()
     private val streamingPreference: StreamingPreference = mockk {
         // Default: no test toggle on. Individual tests override as needed.
+        coEvery { isForceQbdlxOnly() } returns false
         coEvery { isForceArcodOnly() } returns false
         coEvery { isForceAmzOnly() } returns false
     }
@@ -238,6 +239,33 @@ class StreamSourceRegistryTest {
      * The force-amz-only test toggle routes through amz ONLY — kennyy,
      * squid, and youtube are never consulted, and an amz hit is returned.
      */
+    /**
+     * The force-qbdlx-only test toggle routes through qbdlx ONLY — every other
+     * source is skipped, and a qbdlx hit is returned. Takes precedence over the
+     * other force toggles.
+     */
+    @Test
+    fun `forceQbdlxOnly routes through qbdlx only`() = runTest {
+        coEvery { streamingPreference.isForceQbdlxOnly() } returns true
+        coEvery { qbdlx.resolve(any()) } returns StreamUrl(
+            url = "https://www.qobuz.com/file?fmt=27&etsp=1782867891",
+            expiresAtMs = Long.MAX_VALUE,
+            codec = "flac",
+            origin = "qbdlx",
+        )
+        val track = stubTrack()
+
+        val result = registry().resolve(track, allowYouTube = true, allowYtDlp = true)
+
+        assertThat(result).isNotNull()
+        assertThat(result!!.origin).isEqualTo("qbdlx")
+        coVerify { qbdlx.resolve(track) }
+        coVerify(exactly = 0) { kennyy.resolve(any()) }
+        coVerify(exactly = 0) { qobuz.resolve(any()) }
+        coVerify(exactly = 0) { amz.resolve(any()) }
+        coVerify(exactly = 0) { youtube.resolve(any(), any()) }
+    }
+
     @Test
     fun `forceAmzOnly routes through amz only`() = runTest {
         coEvery { streamingPreference.isForceAmzOnly() } returns true
