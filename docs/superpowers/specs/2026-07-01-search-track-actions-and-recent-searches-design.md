@@ -48,10 +48,9 @@ shared by `SearchViewModel`, `ArtistProfileViewModel`, and
 `AlbumDiscoveryViewModel` (it owns preview + download today). It gains:
 
 - `fun playNext(item: TrackItem)` → converts to `Track`, calls
-  `playerRepository.addNext(track)`; on success emits a "Playing next"
-  message via the existing `userMessages` SharedFlow. Wraps in
-  `runCatching`, re-throwing `CancellationException` (matches the delegate's
-  existing error convention).
+  `playerRepository.addNext(track)`; emits a "Playing next" message via the
+  existing `userMessages` SharedFlow. Wraps in `runCatching`, re-throwing
+  `CancellationException` (matches the delegate's existing error convention).
 - `fun addToQueue(item: TrackItem)` → `playerRepository.addToQueue(track)`;
   emits "Added to queue".
 - `fun addToPlaylist(item: TrackItem, playlistId: Long)` → see semantics
@@ -61,15 +60,33 @@ shared by `SearchViewModel`, `ArtistProfileViewModel`, and
   query. `PlaylistInfo` is the same lightweight type `SaveToPlaylistSheet`
   already consumes.
 
-The `TrackItem → Track` conversion reuses the existing mapping the delegate
-already performs for preview/download (no new conversion logic).
+The `TrackItem → Track` conversion is a NEW small mapper in the delegate —
+no existing one fits (preview/download pass `TrackItem` through untouched;
+the only analog is the transient-entity synthesis private inside
+`PlayerRepositoryImpl.playFromStreamInner`). It must set
+`youtubeId = item.videoId`, `source = MusicSource.YOUTUBE`,
+`isStreamable = true`, and a synthetic stable id (`videoId.hashCode().toLong()`,
+the `ArtistProfileViewModel.toDomainTrack` convention) so
+`resolveTrackToMediaItem`'s `track.toEntity()` fallback can stream-resolve a
+queued item that isn't in the DB.
+
+Known limitation (accepted for v1): `addNext`/`addToQueue` return `Unit` and
+silently no-op when a track can't resolve to a media item (only occurs with
+streaming disabled and the track not downloaded — a state in which the whole
+search-streaming surface is already inert). The confirmation message is
+therefore emitted unconditionally; no result-signature change.
 
 ### Add-to-playlist semantics
 A search/popular track may not exist in the local DB yet. On "Add to playlist":
 
-1. Ensure the track row exists in the DB (insert if absent), using the same
-   insert path preview/download already relies on to materialize a
-   `TrackItem` into a persisted track.
+1. Ensure the track row exists in the DB (insert if absent) via a NEW small
+   helper — no reusable path exists today (`SearchDownloadCoordinator.upsertSearchTrack`
+   is private and structurally coupled to a completed download's
+   `FinalizeResult`). The helper mirrors upsertSearchTrack's lookup sequence —
+   `findByYoutubeId` → canonical-identity match → stub insert (no
+   filePath/download columns) — and MUST run the `BlocklistGuard` check
+   before inserting (the v0.9.15 blocklist redesign exists because insert
+   paths that skipped the guard leaked blocked tracks).
 2. Link it to the chosen playlist via
    `MusicRepository.addTrackToPlaylist(trackId, playlistId)`.
 
@@ -91,8 +108,8 @@ the newly created playlist.
 ## Feature 2 — Recent searches
 
 ### Storage — `RecentSearchesStore`
-A new class in the search feature (or `core/data` if a shared home fits
-better) backed by its own Preferences DataStore. Stores an ordered list of
+A new class in `feature/search` (nothing else consumes it) backed by its own
+Preferences DataStore. Stores an ordered list of
 query strings, serialized as a single delimited string value (mirrors the
 existing `LosslessSourcePreferences` priority-list pattern).
 
@@ -140,13 +157,14 @@ the query is non-empty; no recents shown while a search is active.
 
 ## Testing
 
-- **`RecentSearchesStore`** (Robolectric + DataStore, mirroring
-  `LosslessSourcePreferencesTest`): cap at 10, case-insensitive dedupe/MRU
-  reorder, remove-one, clear-all, blank ignored.
+- **`RecentSearchesStore`** (Robolectric + a real temp DataStore, the same
+  pattern as `QbdlxCredentialStoreTest`): cap at 10, case-insensitive
+  dedupe/MRU reorder, remove-one, clear-all, blank ignored.
 - **`TrackActionsDelegate`** new actions: `playNext`/`addToQueue` call the
-  right `PlayerRepository` method once; `addToPlaylist` inserts-if-absent then
-  links; success emits the expected `userMessages` string;
-  `CancellationException` re-thrown.
+  right `PlayerRepository` method once with a Track carrying
+  `youtubeId`/`isStreamable`; `addToPlaylist` inserts-if-absent (blocklist
+  checked, dedupe by youtubeId) then links; emits the expected
+  `userMessages` string; `CancellationException` re-thrown.
 - **`SearchViewModel`**: records on commit (IME action / result tap), does NOT
   record on debounce; `recentSearches` reflects the store; remove/clear
   delegate through.
