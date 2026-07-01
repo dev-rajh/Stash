@@ -197,7 +197,7 @@ fun SettingsAudioQualityScreen(
                                 if (qbdlxExpired) {
                                     Spacer(modifier = Modifier.height(4.dp))
                                     Text(
-                                        text = "Expired — paste a fresh token",
+                                        text = "No working token — paste a fresh one",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.error,
                                     )

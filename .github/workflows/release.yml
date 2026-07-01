@@ -80,6 +80,14 @@ jobs:
           # streaming simply no-ops and the registry fails over — so this MUST
           # be set for shipped APKs to stream via ARCOD.
           ARCOD_STREAM_BASE: ${{ secrets.ARCOD_STREAM_BASE }}
+          # qbdlx (direct-Qobuz) credentials + bundled token pool, consumed by
+          # data/download BuildConfig (QBDLX_*). These MUST be set: without them
+          # the shipped APK has blank credentials and qbdlx is dead on arrival —
+          # exactly what shipped in v0.9.65–v0.9.68 before this env existed. The
+          # verify step below refuses to publish an APK missing them.
+          QBDLX_APP_ID: ${{ secrets.QBDLX_APP_ID }}
+          QBDLX_APP_SECRET: ${{ secrets.QBDLX_APP_SECRET }}
+          QBDLX_TOKEN_POOL: ${{ secrets.QBDLX_TOKEN_POOL }}
         run: ./gradlew :app:assembleRelease --no-daemon
 
       - name: Locate release APK
@@ -93,6 +101,35 @@ jobs:
           echo "apk_path=$APK" >> "$GITHUB_OUTPUT"
           echo "apk_name=$(basename $APK)" >> "$GITHUB_OUTPUT"
           echo "Built: $APK ($(du -h $APK | cut -f1))"
+
+      - name: Verify bundled credentials embedded in APK
+        env:
+          QBDLX_APP_ID: ${{ secrets.QBDLX_APP_ID }}
+          QBDLX_TOKEN_POOL: ${{ secrets.QBDLX_TOKEN_POOL }}
+        run: |
+          # v0.9.65–v0.9.68 shipped with blank qbdlx BuildConfig values (this
+          # workflow didn't pass the QBDLX_* env), so qbdlx was dead on arrival
+          # in every published APK while local builds worked. Guard the ARTIFACT
+          # itself, not the config: grep the decompressed dex for the literals
+          # that must be embedded, and fail before publishing if absent. Note
+          # grep on the APK zip false-negatives (entries are deflated) — the dex
+          # files must be extracted first. Secret values are only tested with
+          # grep -q, never printed.
+          if [ -z "$QBDLX_APP_ID" ] || [ -z "$QBDLX_TOKEN_POOL" ]; then
+            echo "::error::QBDLX_APP_ID / QBDLX_TOKEN_POOL secrets are not set"
+            exit 1
+          fi
+          DEX_DIR="$RUNNER_TEMP/dexcheck"
+          mkdir -p "$DEX_DIR"
+          unzip -o -q "${{ steps.find_apk.outputs.apk_path }}" 'classes*.dex' -d "$DEX_DIR"
+          FIRST_TOKEN="${QBDLX_TOKEN_POOL%%:*}"
+          for lit in "$QBDLX_APP_ID" "$FIRST_TOKEN"; do
+            if ! grep -a -q -F -- "$lit" "$DEX_DIR"/classes*.dex; then
+              echo "::error::qbdlx credential literal missing from APK dex — refusing to publish a build with blank BuildConfig credentials"
+              exit 1
+            fi
+          done
+          echo "qbdlx credentials verified present in APK dex"
 
       - name: Rename APK for release
         id: rename_apk

@@ -43,8 +43,9 @@ private val Context.qbdlxCredentialsDataStore: DataStore<Preferences> by prefere
  *    can't fan out across every account.
  *  - [markDead]/[recordAlive]: persist a token as dead (auth-failed) / clear it,
  *    so a cold start doesn't re-probe dead tokens.
- *  - [allDead]: true when the pasted token (if any) is dead AND every pool token
- *    is dead — drives the Settings "expired, paste a fresh token" surface.
+ *  - [allDead]: true when there's no usable token (none configured, or all
+ *    currently dead) — drives the Settings "paste a token" surface and gates
+ *    the source off.
  *
  * `app_id` + `app_secret` are constant and read directly from BuildConfig by the
  * client/signer; only the rotating tokens are managed here.
@@ -147,16 +148,18 @@ class QbdlxCredentialStore @Inject constructor(
     }
 
     /**
-     * True when there IS at least one credential (pasted or bundled) AND every
-     * one of them is currently dead — i.e. "expired, paste a fresh one". An
-     * EMPTY pool with no pasted token is NOT "expired" (there's nothing to
-     * expire); `pool().all{}` would vacuously return true, so guard it.
+     * True when there is NO usable token: none configured at all (no bundled
+     * pool, no paste), or every configured one is currently dead. Drives the
+     * Settings "paste a token" badge AND gates the source off entirely via
+     * isEnabled/isEnabledForStreaming. A tokenless build MUST surface the paste
+     * prompt and drop out of the chain — an earlier "empty pool isn't expired"
+     * guard here returned false instead, which hid the v0.9.65–v0.9.68 blank
+     * BuildConfig credentials as silent per-track no_results.
      */
     suspend fun allDead(): Boolean {
         val pasted = pastedToken()
         val poolTokens = pool().map { it.first }
-        val total = poolTokens.size + (if (pasted != null) 1 else 0)
-        if (total == 0) return false // no credentials at all — not "expired"
+        if (poolTokens.isEmpty() && pasted == null) return true // no credentials at all
         pasted?.let { if (!isDead(it)) return false }
         return poolTokens.all { isDead(it) }
     }

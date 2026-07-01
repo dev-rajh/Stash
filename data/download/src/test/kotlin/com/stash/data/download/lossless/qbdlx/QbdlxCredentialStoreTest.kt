@@ -93,4 +93,13 @@ class QbdlxCredentialStoreTest {
         val s = store("a:FR,b:GB"); s.markDead("a"); s.recordAlive("a")
         assertThat(s.allDead()).isFalse()
     }
+
+    @Test
+    fun `empty pool with no paste is allDead so the tokenless state surfaces`() = runTest {
+        val s = store("")
+        assertThat(s.allDead()).isTrue() // no credentials → badge + source gated off
+        assertThat(s.activeToken()).isNull()
+        s.setPastedToken("p")
+        assertThat(s.allDead()).isFalse() // paste is the recovery path
+    }
 }
