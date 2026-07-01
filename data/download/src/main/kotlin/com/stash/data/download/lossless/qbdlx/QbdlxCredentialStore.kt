@@ -146,10 +146,20 @@ class QbdlxCredentialStore @Inject constructor(
         }
     }
 
-    /** True when the pasted token (if any) is dead AND every pool token is dead. */
+    /**
+     * True when there IS at least one credential (pasted or bundled) AND every
+     * one of them is currently dead — i.e. "expired, paste a fresh one". An
+     * EMPTY pool with no pasted token is NOT "expired" (there's nothing to
+     * expire); `pool().all{}` would vacuously return true, so guard it.
+     */
     suspend fun allDead(): Boolean {
-        pastedToken()?.let { if (!isDead(it)) return false }
-        return pool().map { it.first }.all { isDead(it) }
+        val pasted = pastedToken()
+        val poolTokens = pool().map { it.first }
+        val total = poolTokens.size + (if (pasted != null) 1 else 0)
+        android.util.Log.i(TAG, "allDead check: poolRawLen=${poolRaw.length} poolSize=${poolTokens.size} pasted=${pasted != null} deadInMem=${deadUntil.size}")
+        if (total == 0) return false // no credentials at all — not "expired"
+        pasted?.let { if (!isDead(it)) return false }
+        return poolTokens.all { isDead(it) }
     }
 
     /** Test-only: wipe persisted pasted state + in-memory dead flags. */
@@ -159,6 +169,7 @@ class QbdlxCredentialStore @Inject constructor(
     }
 
     companion object {
+        private const val TAG = "QbdlxCredentialStore"
         const val MAX_REGION_TRIES = 3
 
         /** Dead-token cooldown before a token is retried (circuit-breaker style). */

@@ -64,7 +64,11 @@ class QbdlxApiClient @Inject constructor(
                 .addQueryParameter("intent", "stream")
                 .build()
             val raw = get(url.toString(), token)
-            classify(json.decodeFromString<QbdlxFileUrl>(raw))
+            val result = classify(json.decodeFromString<QbdlxFileUrl>(raw))
+            if (result is QbdlxResolveResult.TokenDead) {
+                android.util.Log.w(TAG, "getFileUrl classified TokenDead for track=$trackId fmt=$formatId; raw=${raw.take(300)}")
+            }
+            result
         }
 
     private fun classify(f: QbdlxFileUrl): QbdlxResolveResult {
