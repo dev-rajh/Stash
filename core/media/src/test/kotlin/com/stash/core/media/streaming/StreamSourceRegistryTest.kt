@@ -78,15 +78,14 @@ class StreamSourceRegistryTest {
     }
 
     /**
-     * Both Qobuz proxies miss → the registry falls through to youtube.
+     * The active lossless sources (qbdlx, amz) miss → the registry falls
+     * through to youtube. The parked proxies (kennyy/squid/arcod) are never
+     * consulted.
      */
     @Test
-    fun resolve_falls_to_youtube_when_qobuz_misses() = runTest {
+    fun resolve_falls_to_youtube_when_lossless_misses() = runTest {
         coEvery { streamingPreference.isForceAmzOnly() } returns false
         coEvery { streamingPreference.isForceYouTubeFallback() } returns false
-        coEvery { kennyy.resolve(any()) } returns null
-        coEvery { qobuz.resolve(any()) } returns null
-        coEvery { arcod.resolve(any()) } returns null
         coEvery { amz.resolve(any()) } returns null
         coEvery { qbdlx.resolve(any()) } returns null
         coEvery { youtube.resolve(any(), any()) } returns null
@@ -94,50 +93,48 @@ class StreamSourceRegistryTest {
 
         registry().resolve(track, allowYouTube = true)
 
-        coVerify { kennyy.resolve(track) }
-        coVerify { qobuz.resolve(track) }
-        coVerify { arcod.resolve(track) }
-        coVerify { amz.resolve(track) }
         coVerify { qbdlx.resolve(track) }
+        coVerify { amz.resolve(track) }
         coVerify { youtube.resolve(track, allowYtDlp = true) }
+        coVerify(exactly = 0) { kennyy.resolve(any()) } // parked
+        coVerify(exactly = 0) { qobuz.resolve(any()) } // parked
+        coVerify(exactly = 0) { arcod.resolve(any()) } // parked
     }
 
     /**
-     * arcod sits after kennyy/squid and before youtube: when both proxies miss
-     * but arcod produces a [StreamUrl], the registry returns the arcod result
-     * and never consults amz or the YouTube fallback.
+     * qbdlx is the PRIMARY lossless source, tried ahead of amz: when qbdlx
+     * produces a [StreamUrl], the registry returns it and never consults amz
+     * or the YouTube fallback.
      */
     @Test
-    fun resolve_uses_arcod_after_proxies_before_youtube() = runTest {
+    fun resolve_uses_qbdlx_before_amz_and_youtube() = runTest {
         coEvery { streamingPreference.isForceYouTubeFallback() } returns false
-        coEvery { kennyy.resolve(any()) } returns null
-        coEvery { qobuz.resolve(any()) } returns null
-        coEvery { arcod.resolve(any()) } returns stubStreamUrl("arcod")
+        coEvery { qbdlx.resolve(any()) } returns stubStreamUrl("qbdlx")
         coEvery { amz.resolve(any()) } returns null
         coEvery { youtube.resolve(any(), any()) } returns null
         val track = stubTrack()
 
         val result = registry().resolve(track, allowYouTube = true)
 
-        assertThat(result?.origin).isEqualTo("arcod")
-        coVerify { kennyy.resolve(track) }
-        coVerify { qobuz.resolve(track) }
-        coVerify { arcod.resolve(track) }
+        assertThat(result?.origin).isEqualTo("qbdlx")
+        coVerify { qbdlx.resolve(track) }
+        coVerify(exactly = 0) { amz.resolve(any()) }
         coVerify(exactly = 0) { youtube.resolve(any(), any()) }
+        coVerify(exactly = 0) { kennyy.resolve(any()) } // parked
+        coVerify(exactly = 0) { qobuz.resolve(any()) } // parked
+        coVerify(exactly = 0) { arcod.resolve(any()) } // parked
     }
 
     /**
-     * amz sits AFTER kennyy/squid/arcod and BEFORE youtube: when the Qobuz
-     * proxies and arcod all miss but amz has a match, amz serves it and
-     * youtube is never consulted.
+     * amz sits AFTER qbdlx and BEFORE youtube: when qbdlx misses but amz has a
+     * match, amz serves it and youtube is never consulted. The parked proxies
+     * are skipped.
      */
     @Test
-    fun resolve_amz_consulted_after_qobuz_before_youtube() = runTest {
+    fun resolve_amz_consulted_after_qbdlx_before_youtube() = runTest {
         coEvery { streamingPreference.isForceAmzOnly() } returns false
         coEvery { streamingPreference.isForceYouTubeFallback() } returns false
-        coEvery { kennyy.resolve(any()) } returns null
-        coEvery { qobuz.resolve(any()) } returns null
-        coEvery { arcod.resolve(any()) } returns null
+        coEvery { qbdlx.resolve(any()) } returns null
         coEvery { amz.resolve(any()) } returns StreamUrl(
             url = "https://amz.squid.wtf/api/stream?asin=B00X",
             expiresAtMs = Long.MAX_VALUE,
@@ -150,11 +147,12 @@ class StreamSourceRegistryTest {
 
         assertThat(result).isNotNull()
         assertThat(result!!.origin).isEqualTo("amz")
-        coVerify { kennyy.resolve(track) }
-        coVerify { qobuz.resolve(track) }
-        coVerify { arcod.resolve(track) }
+        coVerify { qbdlx.resolve(track) }
         coVerify { amz.resolve(track) }
         coVerify(exactly = 0) { youtube.resolve(any(), any()) }
+        coVerify(exactly = 0) { kennyy.resolve(any()) } // parked
+        coVerify(exactly = 0) { qobuz.resolve(any()) } // parked
+        coVerify(exactly = 0) { arcod.resolve(any()) } // parked
     }
 
     /**

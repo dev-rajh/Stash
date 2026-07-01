@@ -268,15 +268,8 @@ fun HomeScreen(
             )
         }
 
-        // ── Powered-by-ARCOD strip (subordinate to the supporter pill) ────
-        item {
-            PartnerStrip(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 20.dp)
-                    .padding(bottom = 12.dp),
-            )
-        }
+        // ── Powered-by-ARCOD strip: removed 2026-07-01 while ARCOD is parked
+        // (host down for us). PartnerStrip + ArcodPartner kept for re-enabling.
 
         // ── Lossless connect nudge ───────────────────────────────────
         // Shown when the user has lossless toggled OFF and hasn't

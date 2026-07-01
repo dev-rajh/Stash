@@ -42,7 +42,6 @@ fun SettingsPlaybackScreen(
     val streamingEnabled by viewModel.streamingEnabled.collectAsStateWithLifecycle()
     val streamOnCellular by viewModel.streamOnCellular.collectAsStateWithLifecycle()
     val forceYouTubeFallback by viewModel.forceYouTubeFallback.collectAsStateWithLifecycle()
-    val forceArcodOnly by viewModel.forceArcodOnly.collectAsStateWithLifecycle()
     val forceAmzOnly by viewModel.forceAmzOnly.collectAsStateWithLifecycle()
     val forceQbdlxOnly by viewModel.forceQbdlxOnly.collectAsStateWithLifecycle()
     val crossfadeEnabled by viewModel.crossfadeEnabled.collectAsStateWithLifecycle()
@@ -76,14 +75,10 @@ fun SettingsPlaybackScreen(
                             onCheckedChange = viewModel::setForceYouTubeFallback,
                         )
                     },
-                    {
-                        SettingsToggleRow(
-                            title = "Force ARCOD only (test)",
-                            subtitle = "Route streaming and downloads through ARCOD alone — no Qobuz proxies, no YouTube. For testing the ARCOD source. Turn off after testing.",
-                            checked = forceArcodOnly,
-                            onCheckedChange = viewModel::setForceArcodOnly,
-                        )
-                    },
+                    // Force-ARCOD toggle row: removed 2026-07-01 while ARCOD is
+                    // parked (host down). The pref + registry branch stay; restore
+                    // this row (checked = forceArcodOnly,
+                    // onCheckedChange = viewModel::setForceArcodOnly) to re-enable.
                     {
                         SettingsToggleRow(
                             title = "Stream via amz (test)",

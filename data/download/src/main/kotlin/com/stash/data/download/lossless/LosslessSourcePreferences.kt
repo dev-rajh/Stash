@@ -310,33 +310,26 @@ class LosslessSourcePreferences @Inject constructor(
          * preserve their value.
          *
          * Order:
-         * 1. squid_qobuz — Qobuz Hi-Res FLAC via qobuz.squid.wtf (existing
-         *    integration since v0.9.0; proven matching, well-known catalog)
-         * 2. kennyy_qobuz — Qobuz Hi-Res FLAC via qobuz.kennyy.com.br
-         *    (added in v0.9.10; sibling Qobuz-DL proxy, different operator,
-         *    no captcha gate — outages uncorrelated with squid.wtf)
-         * 3. arcod — Qobuz Hi-Res FLAC via arcod.xyz, an independent third
-         *    Qobuz-DL operator (per-user Supabase session, job-based render).
-         *    Runs on one operator-paid account and is rate-limited hard, so
-         *    it sits behind the two direct Qobuz proxies.
-         * 4. amz — Amazon Music FLAC via amz.squid.wtf (independent Amazon
-         *    catalog, different upstream from the Qobuz proxies). An
-         *    uncorrelated, different-catalog fallback when every Qobuz source
-         *    misses.
-         * 5. qbdlx_qobuz — Qobuz Hi-Res FLAC via a direct www.qobuz.com call
-         *    (MD5 request signing + a rotating token pool, no proxy operator).
-         *    Ranked LAST among lossless: it runs on shared real Qobuz accounts
-         *    whose tokens expire/rotate, so it's the deliberate last-resort
-         *    lossless attempt, tried just before the lossy YouTube fallback.
-         *    The registry appends unranked Set sources non-deterministically,
-         *    so this explicit entry is the only way to pin it last.
+         * 1. qbdlx_qobuz — Qobuz Hi-Res FLAC via a direct www.qobuz.com call
+         *    (MD5 request signing + a rotating token pool). Ranked FIRST: it's
+         *    the fastest lossless path — plain Range-seekable FLAC, no proxy
+         *    operator and no client-side decryption (unlike amz).
+         * 2. squid_qobuz — Qobuz Hi-Res FLAC via qobuz.squid.wtf.
+         * 3. kennyy_qobuz — Qobuz Hi-Res FLAC via qobuz.kennyy.com.br.
+         * 4. arcod — Qobuz Hi-Res FLAC via arcod.xyz (per-user Supabase session).
+         *    2–4 are currently PARKED (hosts down for us) — see
+         *    [LosslessSourceRegistry.PARKED_SOURCE_IDS]; the code + this ranking
+         *    stay so re-enabling is a one-line change when they recover.
+         * 5. amz — Amazon Music FLAC via amz.squid.wtf. Ranked LAST: its stream
+         *    path decrypts the whole file client-side (tens of seconds), so it's
+         *    the slow, different-catalog fallback after every Qobuz source.
          */
         val DEFAULT_PRIORITY: List<String> = listOf(
+            "qbdlx_qobuz",
             "squid_qobuz",
             "kennyy_qobuz",
             "arcod",
             "amz",
-            "qbdlx_qobuz",
         )
     }
 }

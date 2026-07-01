@@ -223,13 +223,19 @@ class StashApplication : Application(), Configuration.Provider {
         ProcessLifecycleOwner.get().lifecycle.addObserver(
             object : DefaultLifecycleObserver {
                 override fun onStart(owner: LifecycleOwner) {
-                    squidCookieAutoRefresher.start()
-                    kennyyHealthProbe.start() // immediate probe sets Kennyy health before first play
+                    // PARKED 2026-07-01: kennyy + squid are out of the lossless
+                    // chain (hosts down for us — see
+                    // LosslessSourceRegistry.PARKED_SOURCE_IDS), so their
+                    // background keep-alives are parked too: no point probing
+                    // kennyy health or refreshing the squid captcha cookie for
+                    // sources nothing consults. Uncomment on re-enable.
+                    // squidCookieAutoRefresher.start()
+                    // kennyyHealthProbe.start()
                 }
 
                 override fun onStop(owner: LifecycleOwner) {
-                    squidCookieAutoRefresher.stop()
-                    kennyyHealthProbe.stop()
+                    // squidCookieAutoRefresher.stop()
+                    // kennyyHealthProbe.stop()
                 }
             },
         )
