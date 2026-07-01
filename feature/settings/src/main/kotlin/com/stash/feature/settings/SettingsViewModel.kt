@@ -235,6 +235,21 @@ class SettingsViewModel @Inject constructor(
     /** Internal mutable UI state that is combined with token-manager flows. */
     private val _localState = MutableStateFlow(LocalState())
 
+    /**
+     * True when every qbdlx token (pasted + pool) is dead — drives the
+     * Settings "expired, paste a fresh token" badge. The store exposes only a
+     * suspend `allDead()`, so we poll it on construction and after each paste
+     * (the only events that flip it). ponytail: poll-on-change, add a store
+     * Flow if another surface needs live updates.
+     *
+     * MUST be declared above the [init] block: Kotlin initializes properties
+     * top-to-bottom, and `init`'s refreshQbdlxExpired() writes to this field
+     * (synchronously, when allDead()'s DataStore read hits its cache) — a
+     * below-init declaration left it null → NPE opening Settings.
+     */
+    private val _qbdlxExpired = MutableStateFlow(false)
+    val qbdlxExpired: StateFlow<Boolean> = _qbdlxExpired
+
     init {
         // Refresh on construction so the Diagnostics card shows the
         // correct enabled/disabled state on first frame. Cheap (a
@@ -1060,16 +1075,6 @@ class SettingsViewModel @Inject constructor(
             started = SharingStarted.WhileSubscribed(5_000),
             initialValue = true,
         )
-
-    /**
-     * True when every qbdlx token (pasted + pool) is dead — drives the
-     * Settings "expired, paste a fresh token" badge. The store exposes only a
-     * suspend `allDead()`, so we poll it on construction and after each paste
-     * (the only events that flip it). ponytail: poll-on-change, add a store
-     * Flow if another surface needs live updates.
-     */
-    private val _qbdlxExpired = MutableStateFlow(false)
-    val qbdlxExpired: StateFlow<Boolean> = _qbdlxExpired
 
     /** Persist the qbdlx enable flip. */
     fun onQbdlxEnabledChange(enabled: Boolean) {
