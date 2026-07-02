@@ -59,6 +59,7 @@ class SearchViewModel @Inject constructor(
     val losslessPrefetcher: LosslessUrlPrefetcher,
     private val playerRepository: PlayerRepository,
     private val streamingPreference: StreamingPreference,
+    private val recentSearchesStore: RecentSearchesStore,
 ) : ViewModel() {
 
     companion object {
@@ -116,6 +117,34 @@ class SearchViewModel @Inject constructor(
     fun onCreatePlaylistAndAdd(name: String) {
         _playlistSheetItem.value?.let { delegate.createPlaylistAndAdd(it, name) }
         _playlistSheetItem.value = null
+    }
+
+    /** Recent search queries (most-recent-first), shown in the empty state. */
+    val recentSearches: StateFlow<List<String>> =
+        recentSearchesStore.recent.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    /**
+     * Record the current query as a recent search. Call on COMMITTED searches
+     * only — the keyboard Search action or a result tap — NOT on every
+     * keystroke (that would save every prefix: "bea", "beat", "beatl"…).
+     */
+    fun onSearchCommitted() {
+        val q = _uiState.value.query.trim()
+        if (q.isNotEmpty()) viewModelScope.launch { recentSearchesStore.record(q) }
+    }
+
+    /** Re-run a tapped recent search. */
+    fun onRecentSearchTapped(query: String) {
+        onQueryChanged(query)
+        onSearchCommitted()
+    }
+
+    fun removeRecentSearch(query: String) {
+        viewModelScope.launch { recentSearchesStore.remove(query) }
+    }
+
+    fun clearRecentSearches() {
+        viewModelScope.launch { recentSearchesStore.clear() }
     }
 
     /** Drives [flatMapLatest] — every keystroke replaces the value. */
@@ -205,6 +234,8 @@ class SearchViewModel @Inject constructor(
      * identically when a stream-routing refusal fires.
      */
     fun onResultTap(item: TrackItem) {
+        // Tapping a result means the current query was useful — record it.
+        onSearchCommitted()
         viewModelScope.launch {
             _tappedTrackId.value = item.syntheticId()
             try {

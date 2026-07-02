@@ -292,6 +292,9 @@ class SearchViewModelTest {
         streamingPreference: StreamingPreference = mock {
             onBlocking { current() } doReturn false
         },
+        recentSearchesStore: RecentSearchesStore = mock {
+            on { recent } doReturn kotlinx.coroutines.flow.flowOf(emptyList())
+        },
     ): SearchViewModel = SearchViewModel(
         api = api,
         prefetcher = prefetcher,
@@ -299,6 +302,7 @@ class SearchViewModelTest {
         losslessPrefetcher = mock(),
         playerRepository = playerRepository,
         streamingPreference = streamingPreference,
+        recentSearchesStore = recentSearchesStore,
     )
 
     private fun sampleTrack(): TrackItem = TrackItem(
@@ -323,5 +327,51 @@ class SearchViewModelTest {
         on { downloadingIds } doReturn MutableStateFlow<Set<String>>(emptySet()).asStateFlow()
         on { downloadedIds } doReturn MutableStateFlow<Set<String>>(emptySet()).asStateFlow()
         on { previewLoadingId } doReturn MutableStateFlow<String?>(null).asStateFlow()
+        on { userPlaylists } doReturn kotlinx.coroutines.flow.flowOf(emptyList())
+    }
+
+    // ------------------------------------------------------------------
+    // Recent searches: record on commit, NOT on keystroke
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `onQueryChanged does not record a recent search`() = runTest {
+        val store = mock<RecentSearchesStore> {
+            on { recent } doReturn kotlinx.coroutines.flow.flowOf(emptyList())
+        }
+        val vm = newVm(recentSearchesStore = store)
+
+        vm.onQueryChanged("beatles")
+        advanceUntilIdle()
+
+        verifyBlocking(store, never()) { record(any()) }
+    }
+
+    @Test
+    fun `onSearchCommitted records the trimmed query`() = runTest {
+        val store = mock<RecentSearchesStore> {
+            on { recent } doReturn kotlinx.coroutines.flow.flowOf(emptyList())
+        }
+        val vm = newVm(recentSearchesStore = store)
+
+        vm.onQueryChanged("  beatles  ")
+        vm.onSearchCommitted()
+        advanceUntilIdle()
+
+        verifyBlocking(store) { record("beatles") }
+    }
+
+    @Test
+    fun `onSearchCommitted with blank query records nothing`() = runTest {
+        val store = mock<RecentSearchesStore> {
+            on { recent } doReturn kotlinx.coroutines.flow.flowOf(emptyList())
+        }
+        val vm = newVm(recentSearchesStore = store)
+
+        vm.onQueryChanged("   ")
+        vm.onSearchCommitted()
+        advanceUntilIdle()
+
+        verifyBlocking(store, never()) { record(any()) }
     }
 }
