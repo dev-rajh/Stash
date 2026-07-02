@@ -35,6 +35,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SearchOff
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -45,6 +46,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -108,6 +110,7 @@ fun SearchScreen(
     val tappedTrackId by viewModel.tappedTrackId.collectAsStateWithLifecycle()
     val playlistSheetItem by viewModel.playlistSheetItem.collectAsStateWithLifecycle()
     val userPlaylists by viewModel.userPlaylists.collectAsStateWithLifecycle()
+    val recentSearches by viewModel.recentSearches.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
 
     LaunchedEffect(viewModel) {
@@ -132,10 +135,16 @@ fun SearchScreen(
                 query = state.query,
                 onQueryChanged = viewModel::onQueryChanged,
                 onClear = { viewModel.onQueryChanged("") },
+                onSearch = viewModel::onSearchCommitted,
             )
 
             when (val status = state.status) {
-                SearchStatus.Idle -> EmptySearchPrompt()
+                SearchStatus.Idle -> RecentSearches(
+                    queries = recentSearches,
+                    onTap = viewModel::onRecentSearchTapped,
+                    onRemove = viewModel::removeRecentSearch,
+                    onClearAll = viewModel::clearRecentSearches,
+                )
                 SearchStatus.Loading -> LoadingSkeletons()
                 is SearchStatus.Results -> SectionedResultsList(
                     sections = status.sections,
@@ -184,6 +193,7 @@ private fun SearchBar(
     query: String,
     onQueryChanged: (String) -> Unit,
     onClear: () -> Unit,
+    onSearch: () -> Unit = {},
 ) {
     val focusRequester = remember { FocusRequester() }
     val keyboardController = LocalSoftwareKeyboardController.current
@@ -234,13 +244,84 @@ private fun SearchBar(
         ),
         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
         keyboardActions = KeyboardActions(
-            onSearch = { keyboardController?.hide() },
+            onSearch = { keyboardController?.hide(); onSearch() },
         ),
     )
 
     // Auto-focus the search field when the screen opens
     LaunchedEffect(Unit) {
         focusRequester.requestFocus()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Recent searches (empty-state)
+// ---------------------------------------------------------------------------
+
+/**
+ * Shown in the idle/empty state: the user's recent committed search queries,
+ * most-recent-first. Tapping a row re-runs it; the ✕ removes one; "Clear all"
+ * empties the list. Falls back to [EmptySearchPrompt] when there are none.
+ */
+@Composable
+private fun RecentSearches(
+    queries: List<String>,
+    onTap: (String) -> Unit,
+    onRemove: (String) -> Unit,
+    onClearAll: () -> Unit,
+) {
+    if (queries.isEmpty()) {
+        EmptySearchPrompt()
+        return
+    }
+    LazyColumn(modifier = Modifier.fillMaxSize()) {
+        item {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 16.dp, end = 8.dp, top = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "Recent searches",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(onClick = onClearAll) { Text("Clear all") }
+            }
+        }
+        items(queries, key = { it }) { q ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onTap(q) }
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.Schedule,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(modifier = Modifier.width(12.dp))
+                Text(
+                    text = q,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                IconButton(onClick = { onRemove(q) }) {
+                    Icon(
+                        imageVector = Icons.Default.Clear,
+                        contentDescription = "Remove",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
     }
 }
 
