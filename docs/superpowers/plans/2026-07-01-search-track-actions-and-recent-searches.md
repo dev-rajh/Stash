@@ -360,10 +360,14 @@ Confirm the exact `canonicalize` used by the coordinator (`SearchDownloadCoordin
         )
     }
 
+    // EXACT copy of SearchDownloadCoordinator.canonicalize (line 518) — the
+    // bodies MUST match or the delegate's findByCanonicalIdentity computes a
+    // different key than the download path and duplicate rows appear.
     private fun canonicalize(s: String): String =
-        s.lowercase().replace(Regex("[^a-z0-9]"), "").trim()
-        // NOTE: copy the EXACT body from SearchDownloadCoordinator.canonicalize
-        // (line ~518) so identity matching agrees with the download path.
+        s.lowercase()
+            .replace(Regex("[^\\p{L}\\p{N}\\s]"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
 
     /** Add [item] to an existing playlist. Inserts a streamable stub if the
      *  track isn't in the library yet (NOT downloaded). */
