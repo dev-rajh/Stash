@@ -10,6 +10,7 @@ import com.stash.core.media.PlayerRepository
 import com.stash.core.media.StreamRoutingResult
 import com.stash.core.media.actions.TrackActionsDelegate
 import com.stash.core.media.preview.LosslessUrlPrefetcher
+import com.stash.core.model.Playlist
 import com.stash.core.model.TrackItem
 import com.stash.data.ytmusic.YTMusicApiClient
 import com.stash.data.ytmusic.model.SearchResultSection
@@ -22,6 +23,7 @@ import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -29,6 +31,7 @@ import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -56,6 +59,7 @@ class SearchViewModel @Inject constructor(
     val losslessPrefetcher: LosslessUrlPrefetcher,
     private val playerRepository: PlayerRepository,
     private val streamingPreference: StreamingPreference,
+    private val recentSearchesStore: RecentSearchesStore,
 ) : ViewModel() {
 
     companion object {
@@ -94,6 +98,54 @@ class SearchViewModel @Inject constructor(
      */
     private val _userMessages = MutableSharedFlow<String>(extraBufferCapacity = 4)
     val userMessages: SharedFlow<String> = _userMessages.asSharedFlow()
+
+    // Add-to-playlist picker: the item awaiting a playlist choice (null = sheet closed).
+    private val _playlistSheetItem = MutableStateFlow<TrackItem?>(null)
+    val playlistSheetItem: StateFlow<TrackItem?> = _playlistSheetItem.asStateFlow()
+
+    val userPlaylists: StateFlow<List<Playlist>> =
+        delegate.userPlaylists.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    fun onPlayNext(item: TrackItem) = delegate.playNext(item)
+    fun onAddToQueue(item: TrackItem) = delegate.addToQueue(item)
+    fun onRequestAddToPlaylist(item: TrackItem) { _playlistSheetItem.value = item }
+    fun onDismissPlaylistSheet() { _playlistSheetItem.value = null }
+    fun onSaveToPlaylist(playlistId: Long) {
+        _playlistSheetItem.value?.let { delegate.addToPlaylist(it, playlistId) }
+        _playlistSheetItem.value = null
+    }
+    fun onCreatePlaylistAndAdd(name: String) {
+        _playlistSheetItem.value?.let { delegate.createPlaylistAndAdd(it, name) }
+        _playlistSheetItem.value = null
+    }
+
+    /** Recent search queries (most-recent-first), shown in the empty state. */
+    val recentSearches: StateFlow<List<String>> =
+        recentSearchesStore.recent.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    /**
+     * Record the current query as a recent search. Call on COMMITTED searches
+     * only — the keyboard Search action or a result tap — NOT on every
+     * keystroke (that would save every prefix: "bea", "beat", "beatl"…).
+     */
+    fun onSearchCommitted() {
+        val q = _uiState.value.query.trim()
+        if (q.isNotEmpty()) viewModelScope.launch { recentSearchesStore.record(q) }
+    }
+
+    /** Re-run a tapped recent search. */
+    fun onRecentSearchTapped(query: String) {
+        onQueryChanged(query)
+        onSearchCommitted()
+    }
+
+    fun removeRecentSearch(query: String) {
+        viewModelScope.launch { recentSearchesStore.remove(query) }
+    }
+
+    fun clearRecentSearches() {
+        viewModelScope.launch { recentSearchesStore.clear() }
+    }
 
     /** Drives [flatMapLatest] — every keystroke replaces the value. */
     private val queryFlow = MutableStateFlow("")
@@ -182,6 +234,8 @@ class SearchViewModel @Inject constructor(
      * identically when a stream-routing refusal fires.
      */
     fun onResultTap(item: TrackItem) {
+        // Tapping a result means the current query was useful — record it.
+        onSearchCommitted()
         viewModelScope.launch {
             _tappedTrackId.value = item.syntheticId()
             try {
