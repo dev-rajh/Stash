@@ -77,6 +77,8 @@ fun SettingsAudioQualityScreen(
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val qbdlxEnabled by viewModel.qbdlxEnabled.collectAsStateWithLifecycle()
     val qbdlxExpired by viewModel.qbdlxExpired.collectAsStateWithLifecycle()
+    val qbdlxTokenChoices by viewModel.qbdlxTokenChoices.collectAsStateWithLifecycle()
+    val qbdlxPinnedToken by viewModel.qbdlxPinnedToken.collectAsStateWithLifecycle()
 
     SettingsScaffold(title = "Audio & Quality", onBack = onBack, modifier = modifier) {
         // (a) Download tier — only when lossless OFF. The standalone yt-dlp
@@ -161,6 +163,31 @@ fun SettingsAudioQualityScreen(
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.error,
                                     )
+                                }
+                                if (qbdlxTokenChoices.size > 1) {
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = "Account",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                    )
+                                    Column(modifier = Modifier.selectableGroup()) {
+                                        SettingsPickerRow(
+                                            selected = qbdlxPinnedToken == null,
+                                            title = "Auto",
+                                            subtitle = "Recommended — uses a working account and fails over",
+                                            onClick = { viewModel.onQbdlxTokenPinned(null) },
+                                        )
+                                        qbdlxTokenChoices.forEach { choice ->
+                                            SettingsPickerRow(
+                                                selected = qbdlxPinnedToken == choice.token,
+                                                title = choice.label,
+                                                subtitle = choice.country +
+                                                    if (choice.live) "" else " · offline",
+                                                onClick = { viewModel.onQbdlxTokenPinned(choice.token) },
+                                            )
+                                        }
+                                    }
                                 }
                                 Spacer(modifier = Modifier.height(4.dp))
                                 var qbdlxToken by remember { mutableStateOf("") }
