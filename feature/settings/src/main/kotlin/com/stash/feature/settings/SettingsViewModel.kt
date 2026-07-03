@@ -40,6 +40,7 @@ import com.stash.data.download.lossless.LosslessQualityTier
 import com.stash.data.download.lossless.LosslessSourcePreferences
 import com.stash.data.download.lossless.arcod.ArcodCredentialStore
 import com.stash.data.download.lossless.qbdlx.QbdlxCredentialStore
+import com.stash.data.download.lossless.qbdlx.QbdlxTokenChoice
 import com.stash.data.download.lossless.qobuz.QobuzSource
 import com.stash.data.download.prefs.StreamingQualityPreferences
 import com.stash.feature.settings.components.squidCaptchaStatus
@@ -262,6 +263,12 @@ class SettingsViewModel @Inject constructor(
     private val _qbdlxExpired = MutableStateFlow(false)
     val qbdlxExpired: StateFlow<Boolean> = _qbdlxExpired
 
+    private val _qbdlxTokenChoices = MutableStateFlow<List<QbdlxTokenChoice>>(emptyList())
+    val qbdlxTokenChoices: StateFlow<List<QbdlxTokenChoice>> = _qbdlxTokenChoices
+
+    private val _qbdlxPinnedToken = MutableStateFlow<String?>(null)
+    val qbdlxPinnedToken: StateFlow<String?> = _qbdlxPinnedToken
+
     init {
         // Refresh on construction so the Diagnostics card shows the
         // correct enabled/disabled state on first frame. Cheap (a
@@ -270,6 +277,7 @@ class SettingsViewModel @Inject constructor(
         // top-to-bottom and refreshDiagnostics() writes to _localState.
         refreshDiagnostics()
         refreshQbdlxExpired()
+        refreshQbdlxTokens()
     }
 
     /**
@@ -1098,11 +1106,28 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch {
             qbdlxCredentialStore.setPastedToken(token.ifBlank { null })
             _qbdlxExpired.value = qbdlxCredentialStore.allDead()
+            _qbdlxTokenChoices.value = qbdlxCredentialStore.poolForPicker()
         }
     }
 
     private fun refreshQbdlxExpired() {
         viewModelScope.launch { _qbdlxExpired.value = qbdlxCredentialStore.allDead() }
+    }
+
+    private fun refreshQbdlxTokens() {
+        viewModelScope.launch {
+            _qbdlxTokenChoices.value = qbdlxCredentialStore.poolForPicker()
+            _qbdlxPinnedToken.value = qbdlxCredentialStore.pinnedToken()
+        }
+    }
+
+    /** Pin a specific pool token (or null = Auto), then refresh the picker state. */
+    fun onQbdlxTokenPinned(token: String?) {
+        viewModelScope.launch {
+            qbdlxCredentialStore.setPinnedToken(token)
+            _qbdlxPinnedToken.value = qbdlxCredentialStore.pinnedToken()
+            _qbdlxTokenChoices.value = qbdlxCredentialStore.poolForPicker()
+        }
     }
 
     // -- Streaming quality (per-network tiers + Save Data) -------------------
