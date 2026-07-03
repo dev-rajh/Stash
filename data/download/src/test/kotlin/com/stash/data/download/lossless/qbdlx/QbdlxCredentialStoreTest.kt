@@ -38,28 +38,34 @@ class QbdlxCredentialStoreTest {
     }
 
     @Test
-    fun `round-robin advances across live pool tokens`() = runTest {
-        val s = store("a:FR,b:GB")
-        val first = s.activeToken(); val second = s.activeToken()
-        assertThat(setOf(first, second)).isEqualTo(setOf("a", "b"))
-    }
-
-    @Test
     fun `markDead skips dead token within cooldown`() = runTest {
         val s = store("a:FR,b:GB"); s.markDead("a")
         repeat(4) { assertThat(s.activeToken()).isEqualTo("b") }
     }
 
     @Test
-    fun `dead token is retried after the cooldown elapses`() = runTest {
+    fun `activeToken is sticky - same token until it dies, then advances`() = runTest {
+        val s = store("a:FR,b:GB")
+        val first = s.activeToken()
+        assertThat(s.activeToken()).isEqualTo(first)   // sticky: no rotation
+        assertThat(s.activeToken()).isEqualTo(first)
+        s.markDead(first!!)
+        val second = s.activeToken()
+        assertThat(second).isNotEqualTo(first)          // advanced to the other live token
+        assertThat(s.activeToken()).isEqualTo(second)   // sticky on the new primary
+    }
+
+    @Test
+    fun `a token recovers as a candidate after its cooldown elapses`() = runTest {
         var now = 1_000L
         val s = store("a:FR,b:GB").also { it.clock = { now } }
-        s.markDead("a")
-        assertThat(s.activeToken()).isEqualTo("b") // a is dead
-        now += QbdlxCredentialStore.DEAD_COOLDOWN_MS + 1 // cooldown elapsed
-        // a is live again → round-robin includes it
-        val seen = (0..3).map { s.activeToken() }.toSet()
-        assertThat(seen).contains("a")
+        val primary = s.activeToken()                   // canonical-first live token
+        s.markDead(primary!!)
+        val other = s.activeToken()
+        assertThat(other).isNotEqualTo(primary)         // advanced; primary in cooldown
+        now += QbdlxCredentialStore.DEAD_COOLDOWN_MS + 1
+        s.markDead(other!!)                            // now-primary dies; original cooldown elapsed
+        assertThat(s.activeToken()).isEqualTo(primary)  // original live again → reused
     }
 
     @Test
