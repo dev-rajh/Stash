@@ -1,4 +1,10 @@
+import java.security.MessageDigest
+import java.security.SecureRandom
+import java.util.Base64
 import java.util.Properties
+import javax.crypto.Cipher
+import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.SecretKeySpec
 
 plugins {
     id("stash.android.library")
@@ -37,6 +43,33 @@ val qbdlxAppId = qbdlxProp("qbdlx.appId", "QBDLX_APP_ID")
 val qbdlxAppSecret = qbdlxProp("qbdlx.appSecret", "QBDLX_APP_SECRET")
 val qbdlxTokenPool = qbdlxProp("qbdlx.tokenPool", "QBDLX_TOKEN_POOL")
 
+// AES-256-GCM encrypt the pool at build time (mirrors the runtime
+// QbdlxPoolCipher — keep the two in sync; QbdlxPoolCipherTest's fixture guards
+// drift). Blank pool → emit "" so an unconfigured build still hits the paste
+// path (not a blob that decrypts to "").
+fun encryptPool(plain: String): String {
+    if (plain.isBlank()) return ""
+    val pass = "stash" + "-qbdlx-" + "pool-" + "v1"
+    val digest = MessageDigest.getInstance("SHA-256").digest(pass.toByteArray())
+    val key = SecretKeySpec(digest, "AES")
+    val iv = ByteArray(12).also { SecureRandom().nextBytes(it) }
+    val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+    cipher.init(Cipher.ENCRYPT_MODE, key, GCMParameterSpec(128, iv))
+    return Base64.getEncoder().encodeToString(iv + cipher.doFinal(plain.toByteArray()))
+}
+// sha256(plaintextPool)[:8], lowercase hex — matches `printf %s "$POOL" | sha256sum | head -c 8`
+// in release.yml. Non-secret; the CI verify step greps the dex for it to prove the
+// CURRENT, non-blank pool actually shipped (the v0.9.69 blank/stale failure class).
+// NOTE: `it.toInt() and 0xFF` is REQUIRED — a bare "%02x".format(byte) sign-extends
+// negative bytes to 8 hex chars, so the fp would never match sha256sum.
+fun poolFp(plain: String): String =
+    if (plain.isBlank()) "" else
+        MessageDigest.getInstance("SHA-256").digest(plain.toByteArray())
+            .joinToString("") { "%02x".format(it.toInt() and 0xFF) }.take(8)
+
+val qbdlxTokenPoolEnc = encryptPool(qbdlxTokenPool)
+val qbdlxPoolFp = poolFp(qbdlxTokenPool)
+
 android {
     namespace = "com.stash.data.download"
 
@@ -47,7 +80,8 @@ android {
         buildConfigField("String", "ARCOD_STREAM_BASE", "\"$arcodStreamBase\"")
         buildConfigField("String", "QBDLX_APP_ID", "\"$qbdlxAppId\"")
         buildConfigField("String", "QBDLX_APP_SECRET", "\"$qbdlxAppSecret\"")
-        buildConfigField("String", "QBDLX_TOKEN_POOL", "\"$qbdlxTokenPool\"")
+        buildConfigField("String", "QBDLX_TOKEN_POOL", "\"$qbdlxTokenPoolEnc\"")
+        buildConfigField("String", "QBDLX_POOL_FP", "\"$qbdlxPoolFp\"")
     }
 
     buildFeatures {

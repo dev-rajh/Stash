@@ -44,7 +44,19 @@ abstract class QbdlxModule {
 
         @Provides
         @Singleton
-        fun provideQbdlxPoolProvider(): QbdlxPoolProvider =
-            QbdlxPoolProvider { QbdlxPoolCipher.decrypt(BuildConfig.QBDLX_TOKEN_POOL) }
+        fun provideQbdlxPoolProvider(): QbdlxPoolProvider = QbdlxPoolProvider {
+            val pool = QbdlxPoolCipher.decrypt(BuildConfig.QBDLX_TOKEN_POOL)
+            val fp = BuildConfig.QBDLX_POOL_FP
+            if (fp.isNotBlank()) {
+                val actual = if (pool.isBlank()) "" else
+                    java.security.MessageDigest.getInstance("SHA-256")
+                        .digest(pool.toByteArray())
+                        .joinToString("") { "%02x".format(it.toInt() and 0xFF) }.take(8)
+                if (actual != fp) {
+                    android.util.Log.w("QbdlxPool", "pool fp mismatch — embed/runtime crypto drift?")
+                }
+            }
+            pool
+        }
     }
 }
