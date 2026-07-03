@@ -108,4 +108,43 @@ class QbdlxCredentialStoreTest {
         s.setPastedToken("p")
         assertThat(s.allDead()).isFalse() // paste is the recovery path
     }
+
+    @Test
+    fun `pasted beats pinned beats sticky-auto`() = runTest {
+        val s = store("a:FR,b:GB")
+        s.setPinnedToken("b")
+        assertThat(s.activeToken()).isEqualTo("b")      // pinned over auto
+        s.setPastedToken("p")
+        assertThat(s.activeToken()).isEqualTo("p")      // pasted over pinned
+    }
+
+    @Test
+    fun `dead pinned token advances to auto`() = runTest {
+        val s = store("a:FR,b:GB")
+        s.setPinnedToken("a"); s.markDead("a")
+        assertThat(s.activeToken()).isEqualTo("b")      // pinned dead → auto picks live
+    }
+
+    @Test
+    fun `pin to a token not in the pool is ignored`() = runTest {
+        val s = store("a:FR,b:GB")
+        s.setPinnedToken("ghost")
+        assertThat(s.activeToken()).isAnyOf("a", "b")   // stale pin ignored, auto used
+    }
+
+    @Test
+    fun `poolForPicker labels stable under input reordering, live reflects deadUntil`() = runTest {
+        val s1 = store("a:FR,b:GB")
+        val s2 = store("b:GB,a:FR")                     // reversed input
+        assertThat(s1.poolForPicker().map { it.label to it.token })
+            .isEqualTo(s2.poolForPicker().map { it.label to it.token })
+        s1.markDead("a")
+        assertThat(s1.poolForPicker().first { it.token == "a" }.live).isFalse()
+        assertThat(s1.poolForPicker().first { it.token == "b" }.live).isTrue()
+    }
+
+    @Test
+    fun `poolForPicker is empty for an empty pool`() = runTest {
+        assertThat(store("").poolForPicker()).isEmpty()
+    }
 }

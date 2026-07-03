@@ -14,6 +14,14 @@ import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.flow.first
 
+/** One anonymized pool token for the Settings picker. `token` is the id only, never shown. */
+data class QbdlxTokenChoice(
+    val label: String,
+    val token: String,
+    val country: String,
+    val live: Boolean,
+)
+
 /**
  * Its own preferences DataStore (mirrors
  * [com.stash.data.download.lossless.arcod.ArcodCredentialStore]) so the qbdlx
@@ -111,6 +119,32 @@ class QbdlxCredentialStore @Inject constructor(
     /** The picker-pinned pool token, or null for Auto. */
     suspend fun pinnedToken(): String? =
         context.qbdlxCredentialsDataStore.data.first()[pinnedTokenKey]?.takeIf { it.isNotBlank() }
+
+    /** Pin a pool token for the Settings picker, or clear (null) for Auto. */
+    suspend fun setPinnedToken(token: String?) {
+        val t = token?.trim()
+        context.qbdlxCredentialsDataStore.edit { prefs ->
+            if (t.isNullOrEmpty()) prefs.remove(pinnedTokenKey) else prefs[pinnedTokenKey] = t
+        }
+    }
+
+    /**
+     * The pool as anonymized picker choices, in stable canonical order
+     * (by token hash, so "Token 2" is the same account across pool refreshes —
+     * NOT array position, and createdAt is dropped in the build-time flatten).
+     * The raw token is the id behind the label only; it never becomes UI text.
+     * [live] is a point-in-time hint (isDead at compute time), not a live flow.
+     */
+    suspend fun poolForPicker(): List<QbdlxTokenChoice> =
+        pool().sortedWith(compareBy({ it.first.hashCode() }, { it.first }))
+            .mapIndexed { i, (token, country) ->
+                QbdlxTokenChoice(
+                    label = "Token ${i + 1}",
+                    token = token,
+                    country = country,
+                    live = !isDead(token),
+                )
+            }
 
     /**
      * The token to use now (sticky, not round-robin):
