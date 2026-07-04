@@ -44,9 +44,12 @@ val qbdlxAppSecret = qbdlxProp("qbdlx.appSecret", "QBDLX_APP_SECRET")
 val qbdlxTokenPool = qbdlxProp("qbdlx.tokenPool", "QBDLX_TOKEN_POOL")
 
 // AES-256-GCM encrypt the pool at build time (mirrors the runtime
-// QbdlxPoolCipher — keep the two in sync; QbdlxPoolCipherTest's fixture guards
-// drift). Blank pool → emit "" so an unconfigured build still hits the paste
-// path (not a blob that decrypts to "").
+// QbdlxPoolCipher — keep the two in sync). The fixture test guards the RUNTIME
+// decrypt only; nothing statically re-runs THIS encrypt, so a build-side-only
+// scheme change ships a blob the runtime can't decrypt → silent empty pool. The
+// catches for that are the runtime fp-mismatch Log.w (QbdlxModule) and the
+// MANDATORY on-device verify (empty pool shows as the Settings paste prompt).
+// Blank pool → emit "" so an unconfigured build still hits the paste path.
 fun encryptPool(plain: String): String {
     if (plain.isBlank()) return ""
     val pass = "stash" + "-qbdlx-" + "pool-" + "v1"

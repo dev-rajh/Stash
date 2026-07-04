@@ -133,7 +133,7 @@ class QbdlxQobuzSource @Inject constructor(
 
     /**
      * Resolve [track] to a signed FLAC URL, rotating tokens on death/region
-     * lock. TokenDead → markDead + next round-robin token; RegionLocked →
+     * lock. TokenDead → markDead + next live token (sticky-advance); RegionLocked →
      * iterate [QbdlxCredentialStore.tokensForRegion] (bounded). Bounded by the
      * tried-set + [MAX_TOKEN_ATTEMPTS].
      */

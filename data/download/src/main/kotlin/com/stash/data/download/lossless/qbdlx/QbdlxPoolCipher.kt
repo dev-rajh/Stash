@@ -22,7 +22,10 @@ import javax.crypto.spec.SecretKeySpec
  * If you change key derivation, IV size, tag length, or byte layout you MUST
  * change BOTH and regenerate FIXTURE_BLOB in QbdlxPoolCipherTest — otherwise
  * shipped builds embed a blob this runtime can't decrypt → silent empty pool.
- * QBDLX_POOL_FP + the release.yml verify step + on-device verify are the guards.
+ * Note the fixture test guards only THIS (runtime) half; the FP gate hashes the
+ * PLAINTEXT so it won't notice a wrong encrypt key. The actual catches for a
+ * build-side-only change are the runtime fp-mismatch Log.w (QbdlxModule) and the
+ * mandatory on-device verify (empty pool → the Settings paste prompt).
  *
  * ponytail: fragment-concat key, not real key management — matches the
  * "past casual grep" bar; a real KMS is the deferred broker's job.
