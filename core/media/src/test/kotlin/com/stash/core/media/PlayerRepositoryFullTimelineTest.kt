@@ -1,8 +1,6 @@
 package com.stash.core.media
 
-import android.os.Bundle
 import androidx.media3.common.MediaItem
-import androidx.media3.common.MediaMetadata
 import androidx.media3.session.MediaController
 import androidx.test.core.app.ApplicationProvider
 import com.google.common.truth.Truth.assertThat
@@ -17,6 +15,7 @@ import com.stash.core.model.Track
 import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.slot
 import io.mockk.verify
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.test.runTest
@@ -26,15 +25,14 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 
 /**
- * Skip must ALWAYS advance — never a no-op. When the timeline can advance
- * (the next item is materialized), it seeks instantly (respecting shuffle).
- * When the timeline can't advance — the frontier was reached because the
- * background fill couldn't pre-resolve the next streaming track — it routes
- * the LOGICAL next through the resolve-with-spinner path instead of doing
- * nothing.
+ * Full-timeline queue: setQueue hands ExoPlayer EVERY playable track as a
+ * MediaItem immediately (stream tracks as stash-resolve:// placeholders), so
+ * native next/prev/repeat/shuffle operate on the whole queue and the old
+ * rolling-window machinery (fill window, pending-nav skip chain, end-of-
+ * timeline recovery, repeat-all wrap patches) is gone.
  */
 @RunWith(RobolectricTestRunner::class)
-class PlayerRepositorySkipUpgradeTest {
+class PlayerRepositoryFullTimelineTest {
 
     private val playbackStateStore: PlaybackStateStore = mockk(relaxed = true)
     private val musicRepository: MusicRepository = mockk {
@@ -65,18 +63,22 @@ class PlayerRepositorySkipUpgradeTest {
         repo.controllerDeferred = controller
     }
 
-    private fun currentItem(trackId: Long) = MediaItem.Builder()
-        .setMediaId(trackId.toString())
-        .setUri("https://x/$trackId")
-        .setMediaMetadata(
-            MediaMetadata.Builder().setExtras(
-                Bundle().apply { putLong(EXTRA_TRACK_ID, trackId) },
-            ).build(),
-        )
-        .build()
+    @Test
+    fun `setQueue materializes the whole queue as media items immediately`() = runTest {
+        coEvery { streamingPreference.current() } returns true
+        val tracks = (1L..57L).map { Track(id = it, title = "t$it", artist = "a") }
+        val items = slot<List<MediaItem>>()
+        every { controller.setMediaItems(capture(items), any<Int>(), any<Long>()) } returns Unit
+
+        repo.setQueue(tracks, startIndex = 0)
+
+        assertThat(items.captured).hasSize(57)
+        assertThat(items.captured[5].localConfiguration?.uri?.scheme).isEqualTo("stash-resolve")
+        assertThat(items.captured[5].mediaMetadata.extras?.getLong(EXTRA_TRACK_ID)).isEqualTo(6L)
+    }
 
     @Test
-    fun `skipNext seeks instantly when the timeline can advance`() = runTest {
+    fun `skipNext is always a native seek`() = runTest {
         every { controller.hasNextMediaItem() } returns true
 
         repo.skipNext()
@@ -85,7 +87,7 @@ class PlayerRepositorySkipUpgradeTest {
     }
 
     @Test
-    fun `skipPrevious seeks instantly when the timeline can go back`() = runTest {
+    fun `skipPrevious is always a native seek`() = runTest {
         every { controller.hasPreviousMediaItem() } returns true
 
         repo.skipPrevious()
@@ -94,19 +96,14 @@ class PlayerRepositorySkipUpgradeTest {
     }
 
     @Test
-    fun `rapid skipNext at the frontier advances the pending target without seeking`() = runTest {
-        // Timeline can't advance (frontier). Each tap must move ONE further
-        // from the pending target — not re-target the same next track — and
-        // must never fall back to a no-op seek.
-        every { controller.hasNextMediaItem() } returns false
-        repo.currentQueueTracks = (10L..13L).map { Track(id = it, title = "t$it", artist = "a") }
-        every { controller.currentMediaItem } returns currentItem(10) // logical index 0
+    fun `setQueue starts playback at the tapped index`() = runTest {
+        coEvery { streamingPreference.current() } returns true
+        val tracks = (1L..20L).map { Track(id = it, title = "t$it", artist = "a") }
 
-        repo.skipNext()
-        assertThat(repo.pendingNavIndex).isEqualTo(1)
-        repo.skipNext()
-        assertThat(repo.pendingNavIndex).isEqualTo(2)
+        repo.setQueue(tracks, startIndex = 7)
 
-        verify(exactly = 0) { controller.seekToNextMediaItem() }
+        verify { controller.setMediaItems(any(), 7, 0L) }
+        verify { controller.prepare() }
+        verify { controller.play() }
     }
 }

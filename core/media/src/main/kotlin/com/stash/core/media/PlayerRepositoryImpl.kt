@@ -24,6 +24,7 @@ import com.stash.core.media.streaming.StreamSourceRegistry
 import com.stash.core.media.streaming.StreamUrl
 import com.stash.core.media.streaming.StreamUrlCache
 import com.stash.core.media.streaming.YouTubeStreamResolver
+import com.stash.core.media.streaming.stashResolveUri
 import com.stash.core.model.PlayerState
 import com.stash.core.model.RepeatMode
 import com.stash.core.model.Track
@@ -63,9 +64,8 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.guava.await
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withContext
 import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -184,10 +184,9 @@ class PlayerRepositoryImpl @Inject constructor(
                 .distinctUntilChanged()
                 .collect { idx ->
                     // Quality layer: upgrade the immediate next-up via the full
-                    // chain (arcod/amz FLAC). Stability layer: keep the rolling
-                    // fast-lane buffer topped up so the timeline never runs dry.
+                    // chain (arcod/amz FLAC) so the common auto-advance never
+                    // falls back to the cold LazyResolvingDataSource path.
                     prefetchNextTrack(idx)
-                    topUpBuffer()
                 }
         }
     }
@@ -229,20 +228,13 @@ class PlayerRepositoryImpl @Inject constructor(
     private var librarySnapshot: List<Track> = emptyList()
 
     /**
-     * The LOGICAL playback queue — the user-intended track order, independent
-     * of which entries currently have a resolved MediaItem in the controller
-     * timeline (the fast-lane background fill silently drops what it can't
-     * resolve; antra is excluded from fill entirely).
-     *
-     * Three consumers:
-     *  1. The next-track prefetch watcher, which looks up the next-to-play
-     *     Track here so dropped stragglers are still discovered and resolved
-     *     just-in-time.
-     *  2. The queue display ([updateState] via [QueueDisplay.compute]) — the
-     *     sheet shows THIS list, not the sparse timeline.
-     *  3. The queue ops ([skipToQueueIndex]/[removeFromQueue]/[moveInQueue]),
-     *     whose incoming indices refer to this list when the display is
-     *     logical (see [logicalDisplayActive]).
+     * The LOGICAL playback queue — the user-intended track order. Since the
+     * full-timeline migration (2026-07-04) the controller timeline mirrors
+     * this list 1:1 (every playable track gets a MediaItem at queue time;
+     * stream tracks as stash-resolve:// placeholders), so it survives mainly
+     * as the Track-typed source for the prefetch watcher, the queue display
+     * ([QueueDisplay.compute]), and the logical-index queue ops
+     * ([skipToQueueIndex]/[removeFromQueue]/[moveInQueue]).
      *
      * Every queue mutation path must keep it in sync: [setQueue] (replace),
      * [shuffleLibrary] (replace), [growLibraryShuffle] (append), [addNext]
@@ -260,58 +252,15 @@ class PlayerRepositoryImpl @Inject constructor(
     private val growMutex = Mutex()
 
     /**
-     * Background coroutine that resolves the rest of the queue while
-     * the user is already listening to the first track. Cancelled when
-     * [setQueue] is invoked again so a stale fill can't pollute a new
-     * playlist's queue.
+     * Cached Track view of the controller timeline, rebuilt in [updateState]
+     * only when [timelineDirty] is set by `onTimelineChanged` (or the count
+     * drifts). Keeps per-event state refreshes O(1) in queue size now that
+     * the full timeline holds every queue track.
      */
+    private var cachedTimelineQueue: List<Track> = emptyList()
+
     @Volatile
-    private var queueBuildJob: Job? = null
-
-    /**
-     * The in-flight skip navigation (optimistic advance + resolve). A new skip
-     * cancels the prior one so rapid Next/Prev taps don't each run a full
-     * resolve to completion (which burns a job-based source's quota) — only the
-     * settled target resolves and plays.
-     */
-    private var skipNavJob: Job? = null
-
-    /**
-     * The logical-queue index the user is optimistically navigating toward via
-     * rapid skips, before any of them has resolved+landed. Lets each tap
-     * advance one more track from the PENDING target rather than from the
-     * (not-yet-changed) currently-playing track. Cleared once a navigation
-     * lands or a fresh queue is set. internal as a test seam.
-     */
-    internal var pendingNavIndex: Int? = null
-
-    /**
-     * Monotonic counter incremented on every [setQueue] entry. Used as
-     * a race guard for slow resolves: when a foreground resolve finally
-     * returns, we check that no newer setQueue has been called in the
-     * meantime before applying its result to the controller. Without
-     * this, taps on a long-resolving track (e.g. yt-dlp fallback at
-     * ~20-60s) would still end up calling `controller.setMediaItems`
-     * minutes later, clobbering whatever the user is currently playing.
-     */
-    @Volatile
-    internal var setQueueEpoch: Long = 0L
-
-    /**
-     * Epoch of the [setQueue] tapped-track resolve currently in flight, or
-     * -1 when none. While it matches [setQueueEpoch], [computeIsBuffering]
-     * keeps [PlayerState.isBuffering] true: the previous queue keeps
-     * playing during the resolve, and its controller events re-run
-     * [updateState] — without this flag they stomp setQueue's optimistic
-     * spinner back to false mid-resolve (invisible at yt-dlp's ~11s, but
-     * an antra job takes 60-120s and the player looked frozen/broken).
-     * Set after the optimistic emit; cleared on the failure path and just
-     * before playback starts on success. A superseding setQueue overwrites
-     * it with its own epoch, so a stale resolve can't hold the spinner.
-     * Internal (with [setQueueEpoch]) as a test seam.
-     */
-    @Volatile
-    internal var tapResolveEpoch: Long = -1L
+    private var timelineDirty: Boolean = true
 
     /**
      * Last queue id-list + shuffle state persisted to [PlaybackStateStore].
@@ -372,171 +321,17 @@ class PlayerRepositoryImpl @Inject constructor(
     override suspend fun skipNext() {
         cascadeGuard.onUserTransport()
         val controller = ensureController() ?: return
-        // Skip must ALWAYS advance — never a no-op. If the timeline can advance
-        // (the next item is materialized), seek to it instantly; this also
-        // respects Media3's shuffle order. If it can't — the timeline frontier
-        // was reached because the background fill couldn't pre-resolve the next
-        // streaming track — route the LOGICAL next through skipToQueueIndex,
-        // which resolves it (with a buffering spinner) and plays it. Either way
-        // the user moves forward.
-        if (controller.hasNextMediaItem() && pendingNavIndex == null &&
-            !nativeSeekWouldMisWrap(controller, currentQueueTracks.size, forward = true)
-        ) {
-            // The next track is already materialized in the timeline — advance
-            // instantly (this also respects Media3 shuffle order).
-            controller.seekToNextMediaItem()
-        } else {
-            // Timeline frontier (the background fill couldn't pre-resolve the
-            // next streaming track), a rapid-skip chain already in flight, OR
-            // repeat-all would wrap the partial timeline window back to its
-            // first item instead of the logical successor ("skip 10 tracks and
-            // the 11th is the first one I skipped"): advance one more from the
-            // pending target, optimistically.
-            val base = pendingNavIndex ?: currentLogicalIndex(controller)
-            if (base < 0) return
-            var target = base + 1
-            if (target >= currentQueueTracks.size) {
-                // True end of the LOGICAL queue: repeat-all wraps to track 0.
-                if (controller.repeatMode != Player.REPEAT_MODE_ALL) return
-                target = 0
-            }
-            if (currentQueueTracks.isNotEmpty()) navigateToLogical(target)
-        }
+        // Full timeline: ExoPlayer sees the whole queue, so the native seek is
+        // always correct (shuffle order, repeat-all wraparound included).
+        // hasNextMediaItem() is false only at the true end with repeat off —
+        // the correct no-op.
+        if (controller.hasNextMediaItem()) controller.seekToNextMediaItem()
     }
 
     override suspend fun skipPrevious() {
         cascadeGuard.onUserTransport()
         val controller = ensureController() ?: return
-        if (controller.hasPreviousMediaItem() && pendingNavIndex == null &&
-            !nativeSeekWouldMisWrap(controller, currentQueueTracks.size, forward = false)
-        ) {
-            controller.seekToPreviousMediaItem()
-        } else {
-            val base = pendingNavIndex ?: currentLogicalIndex(controller)
-            if (base < 0) return
-            var target = base - 1
-            if (target < 0) {
-                // True start of the LOGICAL queue: repeat-all wraps to the last track.
-                if (controller.repeatMode != Player.REPEAT_MODE_ALL) return
-                target = currentQueueTracks.size - 1
-            }
-            if (target in currentQueueTracks.indices) navigateToLogical(target)
-        }
-    }
-
-    /**
-     * Optimistic, debounced navigation to a logical-queue index — the engine
-     * behind a skip when the target isn't already playable in the timeline.
-     *
-     * Cancels any prior in-flight skip resolve (so rapid taps don't each run a
-     * full, quota-spending resolve — only the settled target does), records the
-     * [pendingNavIndex] so the next tap advances one further, then re-anchors
-     * the queue at [targetIndex] via [setQueueInternal] with `optimisticDisplay`
-     * on: Now Playing flips to the target with a spinner and the current track
-     * pauses immediately, so the skip feels instant even while the (possibly
-     * slow) resolve runs in the background. Once it lands, [pendingNavIndex]
-     * clears.
-     */
-    private fun navigateToLogical(targetIndex: Int) {
-        if (targetIndex !in currentQueueTracks.indices) return
-        pendingNavIndex = targetIndex
-        skipNavJob?.cancel()
-        skipNavJob = scope.launch {
-            // Debounce: a rapid skip-storm cancels this job before the delay
-            // elapses, so only the settled target reaches the expensive resolve
-            // below. (Cancelling the job alone doesn't help — the resolve runs
-            // on PreviewUrlExtractor's detached scope and keeps burning the
-            // cap-1 yt-dlp slot — so we must stop it from STARTING.)
-            delay(SKIP_RESOLVE_DEBOUNCE_MS)
-            setQueueInternal(
-                currentQueueTracks,
-                targetIndex,
-                startPositionMs = 0L,
-                optimisticDisplay = true,
-            )
-            // Landed (resolve applied) — unless a newer skip superseded us, in
-            // which case it owns pendingNavIndex now.
-            if (pendingNavIndex == targetIndex) pendingNavIndex = null
-        }
-    }
-
-    /**
-     * The current track's position in the LOGICAL queue ([currentQueueTracks]),
-     * matched by [EXTRA_TRACK_ID] identity rather than the timeline index — the
-     * two diverge whenever the background fill dropped unresolved entries from
-     * the timeline. Returns -1 when the current item carries no track id (can't
-     * locate it). Used by skip to find the logical neighbour when the timeline
-     * itself can't advance.
-     */
-    private fun currentLogicalIndex(controller: MediaController): Int {
-        val currentId = controller.currentMediaItem
-            ?.mediaMetadata?.extras?.getLong(EXTRA_TRACK_ID, -1L) ?: return -1
-        if (currentId <= 0L) return -1
-        return currentQueueTracks.indexOfFirst { it.id == currentId }
-    }
-
-    /**
-     * Safety net for when the player runs off the end of the bounded timeline
-     * into [Player.STATE_ENDED] while the LOGICAL queue still has more tracks
-     * (the rolling buffer fell behind a slow/failing resolve). Resolves and
-     * continues the next logical track via [navigateToLogical] — turning a
-     * permanent stop into a brief re-resolve. No-op when:
-     *  - a repeat mode is active (don't override the user's repeat intent —
-     *    ExoPlayer handles repeat-one/all itself),
-     *  - the current item carries no track id (can't locate it logically),
-     *  - the current track is genuinely the last in the queue (clean stop).
-     *
-     * Re-entrancy is safe: a successful recovery plays the next track, whose
-     * own end re-fires STATE_ENDED → recovers the one after it; a failed
-     * resolve leaves the player stopped (no STATE_ENDED re-fire), so it can't
-     * spin.
-     */
-    internal fun maybeRecoverFromEnd(controller: MediaController) {
-        if (controller.repeatMode != Player.REPEAT_MODE_OFF) return
-        val currentLogical = currentLogicalIndex(controller)
-        if (currentLogical < 0) return
-        val nextLogical = currentLogical + 1
-        if (nextLogical >= currentQueueTracks.size) return // genuinely the end
-        Log.i(TAG, "end-of-timeline recovery: continuing to logical track $nextLogical")
-        navigateToLogical(nextLogical)
-    }
-
-    /**
-     * Repairs ExoPlayer's own repeat-all wrap of the bounded rolling window.
-     * The timeline is a partial window over [currentQueueTracks], so when
-     * auto-advance runs off its last item under REPEAT_MODE_ALL, Media3 wraps
-     * to timeline index 0 — the first item of the WINDOW, not the logical
-     * successor. Detects that wrap (last→first window transition while the
-     * timeline holds fewer items than the logical queue) and re-routes to the
-     * logical next track (wrapping to logical 0 only at the true queue end).
-     * No-op for repeat OFF/ONE and for fully-materialized timelines, where the
-     * native wrap is already correct. Internal as a test seam.
-     */
-    internal fun maybeRedirectRepeatAllWindowWrap(
-        controller: MediaController,
-        oldIndex: Int,
-        newIndex: Int,
-        oldItem: MediaItem?,
-    ) {
-        if (controller.repeatMode != Player.REPEAT_MODE_ALL) return
-        val logical = currentQueueTracks
-        val count = controller.mediaItemCount
-        if (count == 0 || count >= logical.size) return
-        val timeline = controller.currentTimeline
-        val shuffled = controller.shuffleModeEnabled
-        if (oldIndex != timeline.getLastWindowIndex(shuffled)) return
-        if (newIndex != timeline.getFirstWindowIndex(shuffled)) return
-        val oldId = oldItem?.mediaMetadata?.extras?.getLong(EXTRA_TRACK_ID, -1L) ?: return
-        if (oldId <= 0L) return
-        val oldLogical = logical.indexOfFirst { it.id == oldId }
-        if (oldLogical < 0) return
-        val target = if (oldLogical + 1 >= logical.size) 0 else oldLogical + 1
-        Log.i(
-            TAG,
-            "repeat-all wrapped the partial window (timeline $oldIndex->$newIndex); " +
-                "redirecting to logical track $target",
-        )
-        navigateToLogical(target)
+        if (controller.hasPreviousMediaItem()) controller.seekToPreviousMediaItem()
     }
 
     override suspend fun seekTo(positionMs: Long) {
@@ -558,202 +353,49 @@ class PlayerRepositoryImpl @Inject constructor(
         tracks: List<Track>,
         startIndex: Int,
         startPositionMs: Long,
-        optimisticDisplay: Boolean = false,
     ) {
-        // Any prior background fill belongs to a previous queue; kill it
-        // so its addMediaItem calls can't pollute the new one.
-        queueBuildJob?.cancel()
-        queueBuildJob = null
-
-        // A real new-queue tap (NOT a skip navigation) ends any in-flight skip
-        // chain and resets its pending target. The skip path itself runs with
-        // optimisticDisplay = true, so it never cancels its own job here.
-        if (!optimisticDisplay) {
-            skipNavJob?.cancel()
-            skipNavJob = null
-            pendingNavIndex = null
-        }
-
         // Any explicit setQueue (playlist tap, single-song play, etc.) leaves
         // library-shuffle mode behind. Snapshot is cleared so a stale Track
         // list doesn't grow back into a different queue later.
         libraryShuffleActive = false
         librarySnapshot = emptyList()
 
-        // Snapshot the requested queue early so the next-track prefetch watcher
-        // can look up idx+1 even for entries that background fill (fast-lane
-        // allowYtDlp=false) silently drops from the controller's timeline. New queue overwrites
-        // the old; any prefetch in flight from the previous queue completes
-        // harmlessly against the old reference it already captured.
-        currentQueueTracks = tracks
-
         val controller = ensureController() ?: return
         if (tracks.isEmpty()) return
 
         val streamingOn = streamingPreference.current()
         val safeStart = startIndex.coerceIn(0, tracks.size - 1)
-        val semaphore = Semaphore(STREAM_RESOLVE_PARALLELISM)
-        // Record this call's epoch so the resolve below can refuse to
-        // apply its result if a newer setQueue has come in meanwhile.
-        val myEpoch = ++setQueueEpoch
-        val tappedTrack = tracks[safeStart]
 
-        // Optimistic loading state. With an idle player the mini player is
-        // hidden, so showing the tapped track + spinner is the only feedback
-        // that the tap registered (a yt-dlp resolve takes ~11 s; arcod/amz can
-        // be 30-50 s on a slow link). When a track IS loaded, an arbitrary tap
-        // does NOT swap the display (that would turn the play/pause button into
-        // a disabled spinner mid-song, hijacking still-playing audio).
-        //
-        // [optimisticDisplay] = true overrides that for an explicit forward/back
-        // NAVIGATION (skip): the user asked to leave the current track, so we
-        // immediately pause it, swap Now Playing to the target, and show the
-        // spinner while it resolves — the skip feels instant even when the
-        // resolve is slow. See [navigateToLogical].
-        if (controller.currentMediaItem == null || optimisticDisplay) {
-            if (optimisticDisplay) controller.pause()
-            _playerState.value = _playerState.value.copy(
-                currentTrack = tappedTrack,
-                isPlaying = false,
-                isBuffering = true,
-            )
-            // Keep the spinner alive across updateState() calls for the whole
-            // resolve — see [tapResolveEpoch].
-            tapResolveEpoch = myEpoch
+        // Full timeline: EVERY playable track becomes a MediaItem now.
+        // Downloaded → file://; stream → stash-resolve:// placeholder resolved
+        // just-in-time by LazyResolvingDataSource at open(). Native next/prev/
+        // repeat/shuffle are correct because ExoPlayer sees the whole queue.
+        // Item building does per-track disk checks (filePathExistsOnDisk), so
+        // it runs off the main thread; a 2.6k-track queue must not jank the UI.
+        val playable = tracks.filter { track ->
+            track.isDownloaded || (streamingOn && !track.isUnavailableForDisplay)
         }
-
-        // Resolve ONLY the tapped track. Earlier revisions probed forward
-        // through the next few entries looking for *anything* playable,
-        // but that has two real-user pathologies: (1) it silently
-        // substitutes the track the user actually picked, and worse,
-        // (2) when the user is already playing a track from this queue
-        // and taps a different one that fails to resolve, the probe
-        // falls forward into the currently-playing track and calls
-        // setMediaItems on it — restarting it from 0. Better to fail
-        // visibly (snackbar + log) than to surprise-restart the user's
-        // music. See #75 follow-up.
-        val startItem = resolveTrackToMediaItem(
-            tappedTrack,
-            semaphore,
-            streamingOn,
-            allowYouTube = true,
-            allowYtDlp = true,
-        )
-
-        // Race guard: if another setQueue came in while we were
-        // resolving (e.g. user tapped a different track during a slow
-        // yt-dlp fallback), don't clobber the newer playback intent.
-        if (myEpoch != setQueueEpoch) {
-            Log.d(
-                TAG,
-                "setQueue[epoch=$myEpoch]: superseded by newer call (now=$setQueueEpoch); " +
-                    "discarding result for track[$safeStart] '${tappedTrack.title}'",
-            )
+        val items = withContext(Dispatchers.IO) {
+            playable.map { it.toQueueMediaItem() }
+        }
+        if (items.isEmpty()) {
+            _userMessages.tryEmit("Nothing in this queue is playable right now.")
             return
         }
+        // startIndex maps through the playable filter by track id.
+        val startId = tracks[safeStart].id
+        val startInPlayable = playable.indexOfFirst { it.id == startId }.coerceAtLeast(0)
 
-        if (startItem == null) {
-            Log.w(
-                TAG,
-                "setQueue[epoch=$myEpoch]: track[$safeStart] '${tappedTrack.title}' failed to " +
-                    "resolve — preserving current playback",
-            )
-            _userMessages.tryEmit("Couldn't play this track right now.")
-            // Clear the optimistic spinner — nothing is going to play.
-            tapResolveEpoch = -1L
-            _playerState.value = _playerState.value.copy(isBuffering = false)
-            return
-        }
-
-        Log.i(
-            TAG,
-            "setQueue[epoch=$myEpoch]: starting playback on track $safeStart; " +
-                "${tracks.size - 1} more to resolve in background",
-        )
-
-        // Hand the spinner over to real controller state: prepare() puts
-        // ExoPlayer into STATE_BUFFERING, which computeIsBuffering passes
-        // through, so there is no visible gap.
-        tapResolveEpoch = -1L
-        controller.setMediaItems(listOf(startItem), /* startIndex = */ 0, startPositionMs)
+        currentQueueTracks = playable
+        controller.setMediaItems(items, startInPlayable, startPositionMs)
         controller.prepare()
         controller.play()
 
-        // Kick the next-track prefetch for the tapped track's successor
-        // explicitly. The init-block watcher keys on currentIndex CHANGES,
-        // and the tapped track sits at timeline index 0 — if the previous
-        // queue was also at index 0 (or idle), distinctUntilChanged swallows
-        // the emission and the first track's next-up never prefetches.
-        // Matters most when the background fill can't pre-resolve anything
-        // (Qobuz-proxy outage / antra drill): without this, the timeline
-        // holds only the tapped track and playback dies at its end instead
-        // of flowing into the prefetched-and-inserted next track.
-        scope.launch { prefetchNextTrack(0) }
+        Log.i(TAG, "setQueue: full timeline, ${items.size} items, start=$startInPlayable")
 
-        // Fill the rest of the queue in the background. Tracks after the
-        // start anchor are appended first (skip-next is the common case);
-        // tracks before are prepended afterwards so skip-back still works
-        // once the fill catches up. Cancellable — see queueBuildJob KDoc.
-        //
-        // Background-fill uses the InnerTube FAST LANE
-        // (allowYouTube=true, allowYtDlp=false). InnerTube resolves in
-        // parallel (cap-8) and builds the WHOLE queue in order, so
-        // YouTube-only tracks stay in the timeline instead of being
-        // dropped (the old allowYouTube=false fill silently skipped every
-        // YouTube track, leaving ~2-item queues and skipping all
-        // streamable tracks in mixed downloaded+stream mixes). Note the
-        // cap-8 here is NOT the Semaphore(STREAM_RESOLVE_PARALLELISM)=16
-        // fill semaphore in this file (that is the outer fan-out); the
-        // effective InnerTube bottleneck is its own cap-8 extractor
-        // semaphore (INNERTUBE_CONCURRENCY) inside PreviewUrlExtractor in
-        // another module. Behavior delta: background fill now performs real
-        // InnerTube resolution for EVERY streamable track (bounded by that
-        // cap-8), whereas the old allowYouTube=false fill resolved zero
-        // YouTube tracks — relevant if InnerTube ever rate-limits. Only the
-        // SLOW yt-dlp engine is withheld from fill: it has a single
-        // serialized extraction slot (cap-1) that must stay free for the
-        // foreground tap and the next-up prefetch — a long Liked Songs
-        // queue funneling stragglers through it would saturate that slot
-        // for minutes and stall the next user-tap. Any iOS-miss track that
-        // InnerTube can't resolve is skipped from this batch and recovered
-        // by prefetchNextTrack (which runs with allowYtDlp=true), so it is
-        // re-resolved just-in-time before it's reached.
-        // Bounded fill window — NOT the whole rest of the queue. The rolling
-        // single-next-up prefetch keeps auto-advance seamless; this only
-        // pre-warms a couple of skip slots. Resolving a 1000+ track queue up
-        // front is a huge waste (and for amz, which decrypts a whole FLAC per
-        // resolve, it tried to download the entire library and starved the
-        // next-up prefetch so playback couldn't advance).
-        val (forward, backward) = computeFillWindow(tracks, safeStart)
-        queueBuildJob = scope.launch {
-            try {
-                // allowYtDlp = false: the fill is speculative, so it uses the
-                // fast InnerTube engine only — a 15-35s yt-dlp invocation must
-                // never sit on the queue's critical path. The tapped track and
-                // the single next-up prefetch (prefetchNextTrack /
-                // PrefetchOrchestrator) keep allowYtDlp = true.
-                fillQueueAppend(controller, forward, semaphore, streamingOn, allowYouTube = true, allowYtDlp = false)
-                fillQueuePrepend(controller, backward, semaphore, streamingOn, allowYouTube = true, allowYtDlp = false)
-                Log.i(TAG, "setQueue: background fill complete (${tracks.size} tracks)")
-                // Kick the next-up prefetch for the FIRST track explicitly. The
-                // reactive watcher (playerState.currentIndex.distinctUntilChanged)
-                // suppresses the initial idx=0 emission for a freshly-started
-                // queue (the state already sits at 0), so without this the first
-                // track never gets its next resolved+inserted. This matters when
-                // the fast-lane fill (allowYtDlp=false) couldn't resolve the
-                // second track (an iOS-miss straggler) and dropped it: prefetch
-                // re-resolves it here with allowYtDlp=true and inserts it so the
-                // first auto-advance works. Idempotent: a no-op when the next is
-                // already present (the common case now that fill is in-order) or
-                // not streamable.
-                prefetchNextTrack(controller.currentMediaItemIndex)
-            } catch (e: CancellationException) {
-                // Expected when the user starts a new queue. Don't log as failure.
-                throw e
-            } catch (e: Exception) {
-                Log.w(TAG, "setQueue: background fill failed", e)
-            }
-        }
+        // Warm the next-up URL so auto-advance never waits on a cold resolve
+        // (the placeholder path is the cold-jump fallback, not the happy path).
+        scope.launch { prefetchNextTrack(controller.currentMediaItemIndex) }
     }
 
     override fun resumeLastQueue() {
@@ -783,69 +425,6 @@ class PlayerRepositoryImpl @Inject constructor(
     }
 
     /**
-     * Resolves [tracks] in parallel batches of [BACKGROUND_FILL_BATCH] and
-     * appends each batch to the controller's timeline as it completes.
-     * Order within the input list is preserved. Failed resolutions are
-     * silently dropped — they would only contribute URI-less MediaItems
-     * that ExoPlayer can't play anyway.
-     */
-    private suspend fun fillQueueAppend(
-        controller: MediaController,
-        tracks: List<Track>,
-        semaphore: Semaphore,
-        streamingOn: Boolean,
-        allowYouTube: Boolean = true,
-        allowYtDlp: Boolean = true,
-    ) {
-        tracks.chunked(BACKGROUND_FILL_BATCH).forEach { batch ->
-            if (!currentCoroutineActive()) return
-            val resolved = resolveBatchParallel(batch, semaphore, streamingOn, allowYouTube, allowYtDlp)
-            if (resolved.isNotEmpty()) controller.addMediaItems(resolved)
-        }
-    }
-
-    /**
-     * Like [fillQueueAppend] but prepends. The input is iterated in reverse
-     * batch chunks so the *first* tracks of the original list end up at
-     * index 0 of the controller's timeline once fill completes.
-     */
-    private suspend fun fillQueuePrepend(
-        controller: MediaController,
-        tracks: List<Track>,
-        semaphore: Semaphore,
-        streamingOn: Boolean,
-        allowYouTube: Boolean = true,
-        allowYtDlp: Boolean = true,
-    ) {
-        // Process from the END of [tracks] backwards in chunks. The chunk
-        // closest to the current playback head is processed last so the
-        // skip-prev experience improves monotonically.
-        val reversed = tracks.asReversed()
-        reversed.chunked(BACKGROUND_FILL_BATCH).forEach { batchReversed ->
-            if (!currentCoroutineActive()) return
-            // Resolve the batch in original (forward) order so the
-            // semaphore-bounded async fan-out doesn't reshuffle results.
-            val batch = batchReversed.asReversed()
-            val resolved = resolveBatchParallel(batch, semaphore, streamingOn, allowYouTube, allowYtDlp)
-            if (resolved.isNotEmpty()) controller.addMediaItems(/* index = */ 0, resolved)
-        }
-    }
-
-    private suspend fun resolveBatchParallel(
-        batch: List<Track>,
-        semaphore: Semaphore,
-        streamingOn: Boolean,
-        allowYouTube: Boolean = true,
-        allowYtDlp: Boolean = true,
-    ): List<MediaItem> = coroutineScope {
-        batch.map { track ->
-            async(Dispatchers.IO) {
-                resolveTrackToMediaItem(track, semaphore, streamingOn, allowYouTube, allowYtDlp)
-            }
-        }.awaitAll().filterNotNull()
-    }
-
-    /**
      * Eager-resolve the next-up track (the successor of the currently-playing
      * track in `currentQueueTracks`, matched by identity — see the body) and
      * either refresh its existing timeline slot's URI, or — when it was dropped
@@ -864,56 +443,6 @@ class PlayerRepositoryImpl @Inject constructor(
      * MediaItem stays in place and [RefreshingDataSourceFactory] handles
      * any 403 at playback time, exactly as before this prefetch existed.
      */
-    /** Guards [topUpBuffer] so overlapping advances don't double-append. */
-    private val bufferTopUpInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
-
-    /**
-     * Stability layer: keep [BACKGROUND_FILL_LOOKAHEAD] tracks resolved ahead of
-     * the current one in the timeline, topped up on every advance via the FAST
-     * lane (`allowYtDlp = false` → kennyy/squid/youtube; the slow, quota-capped
-     * arcod/amz are foreground-only and stay out of the speculative buffer).
-     * youtube backfills quickly and almost always resolves, so the timeline
-     * never runs dry between advances — playback stays seamless even while the
-     * Qobuz proxies are down. Bounded by [bufferTopUpSlice] so it never resolves
-     * the whole queue. Cheap when the buffer is already full (early return).
-     */
-    private fun topUpBuffer() {
-        if (!bufferTopUpInFlight.compareAndSet(false, true)) return
-        scope.launch {
-            try {
-                val controller = controllerDeferred ?: return@launch
-                if (!streamingPreference.current()) return@launch
-                val tracks = currentQueueTracks
-                val count = controller.mediaItemCount
-                if (count == 0) return@launch
-                val currentId = controller.currentMediaItem
-                    ?.mediaMetadata?.extras?.getLong(EXTRA_TRACK_ID, -1L) ?: return@launch
-                val lastId = controller.getMediaItemAt(count - 1)
-                    .mediaMetadata?.extras?.getLong(EXTRA_TRACK_ID, -1L) ?: return@launch
-                val currentLogical = tracks.indexOfFirst { it.id == currentId }
-                val lastLogical = tracks.indexOfFirst { it.id == lastId }
-                val aheadInTimeline = count - 1 - controller.currentMediaItemIndex
-                val existingIds = (0 until count).mapNotNullTo(HashSet()) {
-                    controller.getMediaItemAt(it).mediaMetadata?.extras
-                        ?.getLong(EXTRA_TRACK_ID, -1L)?.takeIf { id -> id > 0L }
-                }
-                val slice = bufferTopUpSlice(tracks, currentLogical, lastLogical, aheadInTimeline, existingIds)
-                if (slice.isEmpty()) return@launch
-                val semaphore = Semaphore(STREAM_RESOLVE_PARALLELISM)
-                fillQueueAppend(
-                    controller, slice, semaphore, streamingOn = true,
-                    allowYouTube = true, allowYtDlp = false,
-                )
-            } catch (ce: CancellationException) {
-                throw ce
-            } catch (e: Exception) {
-                Log.w(TAG, "topUpBuffer failed: ${e.message}")
-            } finally {
-                bufferTopUpInFlight.set(false)
-            }
-        }
-    }
-
     private suspend fun prefetchNextTrack(currentIndex: Int) {
         val controller = controllerDeferred ?: return
         val tracks = currentQueueTracks
@@ -982,32 +511,27 @@ class PlayerRepositoryImpl @Inject constructor(
         streamUrlCache.put(next.id, resolved)
         Log.d("LATDIAG", "prefetch-next-end id=${next.id} dt=${System.currentTimeMillis() - t0}ms outcome=url expiresAt=${resolved.expiresAtMs}")
 
-        // If the next track is already a slot in the controller's timeline,
-        // refresh its URI in place. If it ISN'T — because the fast-lane
-        // (allowYtDlp=false) background fill skipped it (an iOS-miss straggler
-        // InnerTube couldn't resolve) — the timeline has no next item, so
-        // ExoPlayer can't auto-advance and the Next button is a no-op. Insert
-        // the next track right after the current item so playback flows. We
-        // build a real MediaItem from the now-cached URL (cache hit — no extra
-        // yt-dlp slot) with proper EXTRA_TRACK_ID metadata: the proven eager
-        // path, NOT the reverted stash-lazy:// placeholder/synthetic-id scheme.
-        val swapped = refreshControllerMediaItem(controller, next, resolved)
-        if (!swapped) {
-            val item = (buildMediaItemForTrack(entity, allowYouTube = true, allowYtDlp = true) as? StreamRoutingResult.Item)?.mediaItem
-            if (item != null) insertNextMediaItem(controller, next.id, item)
-        }
+        // Upgrade the next-up's timeline slot in place: the full-timeline queue
+        // seeds every stream track as a stash-resolve:// placeholder, and this
+        // swap gives it a real resolved URL + quality extras BEFORE ExoPlayer
+        // reaches it — so the common auto-advance never blocks on the cold
+        // LazyResolvingDataSource resolve (that path is the cold-jump fallback;
+        // see docs/superpowers/plans/2026-07-04-full-timeline-lazy-resolve.md).
+        // The URL is also in StreamUrlCache, so even an unswapped placeholder
+        // opens instantly on a cache hit.
+        refreshControllerMediaItem(controller, next, resolved)
     }
 
     /**
      * Swap the timeline slot matching [next] in place to the freshly-[resolved]
-     * stream. Updates the URI AND the quality/origin extras — the slot was
-     * usually a provisional YouTube AAC item from the background fill, and the
-     * prefetch upgrades it to lossless; without refreshing
+     * stream. Updates the URI AND the quality/origin extras — the slot is
+     * usually a stash-resolve:// placeholder (or a stale earlier resolve), and
+     * the prefetch upgrades it to the real lossless URL; without refreshing
      * [EXTRA_STREAM_ORIGIN]/codec/bit-depth Now Playing would keep showing the
-     * stale "via YT" / AAC badge even though the audio is now FLAC. Preserves
-     * mediaId and the rest of the metadata. Returns `true` if the slot was
-     * found and refreshed, `false` if [next] isn't in the controller's timeline
-     * (the caller then inserts it — see [insertNextMediaItem]).
+     * stale badge even though the audio is now FLAC. Preserves mediaId and the
+     * rest of the metadata. Returns `true` if the slot was found and refreshed;
+     * `false` only when [next] isn't in the timeline (shouldn't happen with the
+     * full timeline — the URL is still cached, so the placeholder plays fine).
      */
     private fun refreshControllerMediaItem(
         controller: MediaController,
@@ -1037,75 +561,6 @@ class PlayerRepositoryImpl @Inject constructor(
             }
         }
         return false
-    }
-
-    /**
-     * Insert the freshly-resolved next track right after the current item so
-     * ExoPlayer has a next MediaItem to auto-advance to (and Next works). Used
-     * only when the track was dropped from the timeline by the fast-lane
-     * (allowYtDlp=false) background fill (iOS-miss straggler). Re-scans first so a
-     * racing prefetch can't double-insert; the scan + insert run synchronously
-     * on the controller thread, so they are atomic. Bounded to one track ahead
-     * by the prefetch watcher, so it never floods the yt-dlp extraction slots.
-     *
-     * Caveat: inserts the LINEAR next track at the current position + 1. With
-     * shuffle ON and a sparse (YT-fallback) timeline, ExoPlayer advances in its
-     * own shuffle order, which won't match this linear-next — but this branch
-     * only runs in the genuine all-streaming-down case where the alternative is
-     * a dead single-item timeline, so it's still strictly better than stopping.
-     * It never runs on a healthy (full-timeline) lossless queue.
-     */
-    private fun insertNextMediaItem(controller: MediaController, trackId: Long, item: MediaItem) {
-        val count = controller.mediaItemCount
-        for (i in 0 until count) {
-            val id = controller.getMediaItemAt(i).mediaMetadata.extras?.getLong(EXTRA_TRACK_ID) ?: continue
-            if (id == trackId) return // already placed (e.g. by a concurrent prefetch)
-        }
-        val insertAt = (controller.currentMediaItemIndex + 1).coerceIn(0, count)
-        controller.addMediaItem(insertAt, item)
-    }
-
-    /**
-     * Helper that bridges [isActive] (a CoroutineScope extension) into a
-     * plain suspend function context. Returns false once the enclosing
-     * job has been cancelled so background-fill loops can bail out.
-     */
-    private suspend fun currentCoroutineActive(): Boolean =
-        kotlin.coroutines.coroutineContext[Job]?.isActive ?: true
-
-    /**
-     * Resolves a single [Track] to a Media3 [MediaItem] with a playable URI,
-     * or `null` if the track is unplayable in the current mode.
-     *
-     * - Downloaded tracks: returns the local file:// MediaItem immediately
-     *   (no network needed even when streaming is on — local is faster).
-     * - Streaming-only tracks: when streaming is enabled, acquires a
-     *   [semaphore] permit and resolves via [buildMediaItemForTrack] which
-     *   consults the URL cache and falls through to [streamResolver].
-     * - Streaming off + no file: returns `null` (dropped from the queue).
-     */
-    private suspend fun resolveTrackToMediaItem(
-        track: Track,
-        semaphore: Semaphore,
-        streamingOn: Boolean,
-        allowYouTube: Boolean = true,
-        allowYtDlp: Boolean = true,
-    ): MediaItem? {
-        val localPath = track.filePath
-        if (track.isDownloaded && !localPath.isNullOrBlank() && filePathExistsOnDisk(localPath)) {
-            return track.toMediaItem()
-        }
-        if (!streamingOn) return null
-
-        return semaphore.withPermit {
-            val entity = trackDao.getById(track.id) ?: track.toEntity()
-            val result = buildMediaItemForTrack(
-                entity,
-                allowYouTube = allowYouTube,
-                allowYtDlp = allowYtDlp,
-            )
-            (result as? StreamRoutingResult.Item)?.mediaItem
-        }
     }
 
     override suspend fun shuffleLibrary() {
@@ -1173,12 +628,11 @@ class PlayerRepositoryImpl @Inject constructor(
     override suspend fun addNext(track: Track) {
         val controller = ensureController() ?: return
         val wasEmpty = controller.mediaItemCount == 0
-        val streamingOn = streamingPreference.current()
-        // Single-track resolve — no parallelism needed, semaphore size 1.
-        val semaphore = Semaphore(1)
-        val mediaItem = resolveTrackToMediaItem(track, semaphore, streamingOn) ?: return
+        // Instant add: stream tracks enter as stash-resolve:// placeholders
+        // (resolved at play time), so the queue grows immediately instead of
+        // waiting out a slow resolve.
         val insertIndex = controller.currentMediaItemIndex + 1
-        controller.addMediaItem(insertIndex, mediaItem)
+        controller.addMediaItem(insertIndex, track.toQueueMediaItem())
         // Mirror into the logical queue right after the playing track's
         // logical position (falling back to append) so the queue sheet
         // shows the Play-Next insert where it will actually play.
@@ -1203,11 +657,7 @@ class PlayerRepositoryImpl @Inject constructor(
     override suspend fun addToQueue(track: Track) {
         val controller = ensureController() ?: return
         val wasEmpty = controller.mediaItemCount == 0
-        val streamingOn = streamingPreference.current()
-        // Single-track resolve — no parallelism needed, semaphore size 1.
-        val semaphore = Semaphore(1)
-        val mediaItem = resolveTrackToMediaItem(track, semaphore, streamingOn) ?: return
-        controller.addMediaItem(mediaItem)
+        controller.addMediaItem(track.toQueueMediaItem())
         currentQueueTracks = if (wasEmpty) listOf(track) else currentQueueTracks + track
         if (wasEmpty) {
             controller.prepare()
@@ -1219,25 +669,12 @@ class PlayerRepositoryImpl @Inject constructor(
         if (tracks.isEmpty()) return
         val controller = ensureController() ?: return
         val wasEmpty = controller.mediaItemCount == 0
-        val streamingOn = streamingPreference.current()
-        val semaphore = Semaphore(STREAM_RESOLVE_PARALLELISM)
-        val beforeCount = controller.mediaItemCount
-        Log.d(TAG, "addToQueue(batch) start: ${tracks.size} tracks, controller.mediaItemCount=$beforeCount")
-        // Parallel-resolve; preserve input order so the user's queue matches
-        // the order they tapped Add-to-Queue.
-        val resolved = coroutineScope {
-            tracks.map { track ->
-                async { resolveTrackToMediaItem(track, semaphore, streamingOn) }
-            }.awaitAll()
-        }.filterNotNull()
-        Log.d(TAG, "addToQueue(batch) resolved ${resolved.size}/${tracks.size} tracks")
-        // Append ALL requested tracks (not just the resolved subset) to the
-        // logical queue — unresolved ones are recovered just-in-time by
-        // prefetchNextTrack / skipToQueueIndex, and the sheet should show them.
+        // Instant batch add: every track becomes a MediaItem now (placeholders
+        // for streams), preserving tap order — no resolve fan-out, no dropped
+        // rows, "Added N tracks" is finally literally true.
+        val items = withContext(Dispatchers.IO) { tracks.map { it.toQueueMediaItem() } }
         currentQueueTracks = if (wasEmpty) tracks else currentQueueTracks + tracks
-        if (resolved.isEmpty()) return
-        controller.addMediaItems(resolved)
-        Log.d(TAG, "addToQueue(batch) after addMediaItems: controller.mediaItemCount=${controller.mediaItemCount}")
+        controller.addMediaItems(items)
         if (wasEmpty) {
             controller.prepare()
             controller.play()
@@ -1701,25 +1138,6 @@ class PlayerRepositoryImpl @Inject constructor(
     /** Listener that forwards Media3 player events into [_playerState]. */
     private val playerListener = object : Player.Listener {
 
-        override fun onPositionDiscontinuity(
-            oldPosition: Player.PositionInfo,
-            newPosition: Player.PositionInfo,
-            reason: Int,
-        ) {
-            // Auto-advance under repeat-all can wrap the bounded timeline
-            // window back to its first item instead of the logical successor —
-            // see [maybeRedirectRepeatAllWindowWrap]. User seeks (REASON_SEEK)
-            // are already routed correctly by skipNext/skipPrevious.
-            if (reason != Player.DISCONTINUITY_REASON_AUTO_TRANSITION) return
-            val controller = controllerDeferred ?: return
-            maybeRedirectRepeatAllWindowWrap(
-                controller,
-                oldIndex = oldPosition.mediaItemIndex,
-                newIndex = newPosition.mediaItemIndex,
-                oldItem = oldPosition.mediaItem,
-            )
-        }
-
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
             val controller = controllerDeferred ?: return
             // Defense in depth: the existing onPlayerError recovery catches
@@ -1760,19 +1178,7 @@ class PlayerRepositoryImpl @Inject constructor(
         }
 
         override fun onPlaybackStateChanged(playbackState: Int) {
-            val controller = controllerDeferred
-            // End-of-timeline recovery. The background fill / rolling buffer is
-            // bounded (it must NOT resolve a 1000+ track queue up front), so a
-            // slow or failing next-up resolve during a Qobuz outage can let the
-            // player run off the end of the short timeline into STATE_ENDED.
-            // ExoPlayer has no notion of our LOGICAL queue beyond the timeline,
-            // so it stops there permanently — the "playback stops after a few
-            // tracks" bug. If the logical queue has more tracks, resolve-and-
-            // continue instead of stopping.
-            if (playbackState == Player.STATE_ENDED && controller != null) {
-                maybeRecoverFromEnd(controller)
-            }
-            controller?.let { updateState(it) }
+            controllerDeferred?.let { updateState(it) }
         }
 
         override fun onIsPlayingChanged(isPlaying: Boolean) {
@@ -1798,6 +1204,9 @@ class PlayerRepositoryImpl @Inject constructor(
          * Play Next but the song doesn't appear in the queue."
          */
         override fun onTimelineChanged(timeline: androidx.media3.common.Timeline, reason: Int) {
+            // Adds/removes/moves AND the prefetch's replaceMediaItem land here —
+            // invalidate the cached snapshot so updateState rebuilds it once.
+            timelineDirty = true
             controllerDeferred?.let { updateState(it) }
         }
 
@@ -1879,19 +1288,6 @@ class PlayerRepositoryImpl @Inject constructor(
 
     private fun MediaController.recoverOrStop() {
         if (hasNextMediaItem()) {
-            if (nativeSeekWouldMisWrap(this, currentQueueTracks.size, forward = true)) {
-                // Repeat-all + partial window: the native seek would restart
-                // the window instead of continuing. Route the recovery through
-                // the logical queue (wrapping at the true end).
-                val current = currentLogicalIndex(this)
-                if (current >= 0 && currentQueueTracks.isNotEmpty()) {
-                    val next = current + 1
-                    navigateToLogical(if (next >= currentQueueTracks.size) 0 else next)
-                } else {
-                    stop()
-                }
-                return
-            }
             seekToNextMediaItem()
             prepare()
             play()
@@ -1952,14 +1348,13 @@ class PlayerRepositoryImpl @Inject constructor(
      * [_playerState]. Also persists the current position via [PlaybackStateStore].
      */
     /**
-     * `true` while the active track is loading from the user's point of
-     * view: ExoPlayer is genuinely buffering, OR a [setQueue] tapped-track
-     * resolve is still in flight ([tapResolveEpoch] matches the current
-     * [setQueueEpoch] — a stale epoch from a superseded call doesn't count).
+     * `true` while the active track is loading from the user's point of view.
+     * Purely the controller's own buffering now: tapped-track URL resolution
+     * happens inside [LazyResolvingDataSource] while ExoPlayer sits in
+     * STATE_BUFFERING, so no separate resolve-in-flight flag exists.
      */
     internal fun computeIsBuffering(controllerBuffering: Boolean): Boolean =
-        controllerBuffering ||
-            (tapResolveEpoch != -1L && tapResolveEpoch == setQueueEpoch)
+        controllerBuffering
 
     /**
      * `true` when the active track is being streamed rather than read from
@@ -1975,11 +1370,19 @@ class PlayerRepositoryImpl @Inject constructor(
     private fun updateState(controller: MediaController) {
         val currentItem = controller.currentMediaItem
         val track = currentItem?.toTrack()
-        val timelineQueue = buildList {
-            for (i in 0 until controller.mediaItemCount) {
-                add(controller.getMediaItemAt(i).toTrack())
+        // Timeline snapshot rebuilt only when the timeline actually changes
+        // (onTimelineChanged sets the dirty flag). updateState fires on every
+        // player event, and with the full timeline holding the whole queue a
+        // per-event O(n) rebuild of a 2.6k-item list would jank the main thread.
+        if (timelineDirty || cachedTimelineQueue.size != controller.mediaItemCount) {
+            cachedTimelineQueue = buildList {
+                for (i in 0 until controller.mediaItemCount) {
+                    add(controller.getMediaItemAt(i).toTrack())
+                }
             }
+            timelineDirty = false
         }
+        val timelineQueue = cachedTimelineQueue
 
         // Display the LOGICAL queue (the Track list handed to setQueue), not
         // the raw timeline. The fast-lane background fill drops stream tracks
@@ -2019,13 +1422,10 @@ class PlayerRepositoryImpl @Inject constructor(
             queue = display.queue,
             currentIndex = display.currentIndex,
             isStreaming = isStreaming,
-            // STATE_BUFFERING covers normal buffering AND the in-data-source
-            // 403→yt-dlp re-resolve (RefreshingDataSource blocks the loader
-            // thread while a skipped-to YouTube placeholder is recovered).
-            // The tapped-track resolve gap (yt-dlp ~11s, antra 60-120s) is
-            // covered by the [tapResolveEpoch] term inside computeIsBuffering
-            // — setQueue's optimistic emit alone gets stomped by the first
-            // controller event from the still-playing previous queue.
+            // STATE_BUFFERING covers normal buffering AND every in-data-source
+            // blocking resolve: the 403→yt-dlp re-resolve (RefreshingDataSource)
+            // and the placeholder just-in-time resolve (LazyResolvingDataSource)
+            // both block the loader thread while the player reports buffering.
             isBuffering = computeIsBuffering(
                 controller.playbackState == Player.STATE_BUFFERING,
             ),
@@ -2074,35 +1474,34 @@ class PlayerRepositoryImpl @Inject constructor(
         /** How many tracks each grow appends. Big enough to outpace a fast-skipping user. */
         private const val LIBRARY_SHUFFLE_GROW_BATCH = 50
 
-        /**
-         * Max in-flight Kennyy resolves while building a streaming queue.
-         * Higher = faster queue-build but risks overwhelming the Qobuz
-         * proxy (it's a community resource, not an SLA endpoint). 16 was
-         * comfortably handled by a 2.6k-track Liked Songs queue in
-         * dogfood testing.
-         */
-        private const val STREAM_RESOLVE_PARALLELISM = 16
-
-        /**
-         * Tracks per background-fill batch. Each batch fires off a
-         * parallel resolve fan-out up to [STREAM_RESOLVE_PARALLELISM] in
-         * flight. Same value as the resolve cap so one batch saturates
-         * the semaphore — keeps proxy pressure consistent.
-         */
-        private const val BACKGROUND_FILL_BATCH = 16
-
         /** Refresh prefetch if cached URL has less than this margin remaining. */
         private const val PREFETCH_FRESH_THRESHOLD_MS = 60_000L
+    }
 
-        /**
-         * Debounce before a skip actually resolves its target. Rapid skips each
-         * cancel the prior [skipNavJob] during this window, so only the SETTLED
-         * track runs the (cap-1, ~3s) yt-dlp resolve — without it, every skipped
-         * track fires a full resolve that serializes on the single slot and the
-         * landed track waits behind the whole storm (observed on-device
-         * 2026-06-26). Short enough to feel instant on a single deliberate skip.
-         */
-        private const val SKIP_RESOLVE_DEBOUNCE_MS = 350L
+    /**
+     * Queue-time MediaItem: downloaded-and-on-disk → the eager file:// item;
+     * otherwise a stash-resolve:// placeholder that [LazyResolvingDataSource]
+     * resolves at play time. Carries the SAME identity extras as [toMediaItem]
+     * so every downstream consumer (offline silent-skip, scrobbler, likes,
+     * resume, prefetch matching) keeps working unchanged.
+     */
+    private fun Track.toQueueMediaItem(): MediaItem {
+        val localPath = filePath
+        if (isDownloaded && !localPath.isNullOrBlank() && filePathExistsOnDisk(localPath)) {
+            return toMediaItem()
+        }
+        // Resolver inputs ride the URI's query params so even a track with no
+        // Room row (search-surface synthetic id) can resolve at open() time.
+        val placeholder = stashResolveUri(
+            trackId = id,
+            youtubeId = youtubeId,
+            title = title,
+            artist = artist,
+            album = album,
+            durationMs = durationMs,
+            isrc = isrc,
+        )
+        return toMediaItem().buildUpon().setUri(placeholder).build()
     }
 
     /**
@@ -2190,108 +1589,3 @@ class PlayerRepositoryImpl @Inject constructor(
     }
 }
 
-/**
- * Target depth of the rolling buffer: how many tracks AHEAD of the current one
- * stay resolved in the player timeline. The initial background fill seeds this
- * many, and [PlayerRepositoryImpl.topUpBuffer] re-tops it up on every advance
- * (via the fast lane — youtube backfills quickly, so the timeline never runs
- * dry). This is the STABILITY layer: a deep, cheap cushion so a single slow or
- * failing next-up resolve can't end playback. The single-next-up
- * [PlayerRepositoryImpl.prefetchNextTrack] is the separate QUALITY layer (it
- * upgrades the immediate next track to arcod/amz FLAC via the full chain).
- *
- * Bounded on purpose: a streaming queue must NEVER resolve the whole library up
- * front (a 1000+ track Liked-Songs queue resolving everything is a huge
- * data/CPU waste, and for amz — which fetches + decrypts a whole FLAC per
- * resolve — it tried to download the entire library on one tap). Kept too small
- * (was 3) it went the other way: the timeline ran dry between advances and
- * playback stopped after a few tracks. 10 is the balance — a real cushion, a
- * reasonable amount of background loading.
- */
-internal const val BACKGROUND_FILL_LOOKAHEAD = 10
-
-/** How many tracks BEHIND the tapped track the fill pre-warms (for skip-back). */
-internal const val BACKGROUND_FILL_LOOKBEHIND = 1
-
-/**
- * True when a native next/previous seek on [player] would WRAP its bounded
- * timeline window under REPEAT_MODE_ALL instead of reaching the logical
- * neighbour. The timeline is a rolling window over the logical queue
- * ([BACKGROUND_FILL_LOOKAHEAD] ahead of the tapped track, topped up on each
- * advance), so with repeat-all Media3 reports `hasNextMediaItem() == true` at
- * the window frontier and `seekToNextMediaItem()` lands on the window's FIRST
- * item — for a rapid 10-skip storm that is literally the first track the user
- * skipped. Wrapping is only correct when the timeline holds the whole logical
- * queue ([logicalCount] items or more); every caller that would natively seek
- * across an edge of a PARTIAL window must route through the logical queue
- * instead.
- *
- * Pure and top-level for direct unit testing; shared by the repository's skip
- * paths, error recovery, and the service's session-command interception (the
- * notification / Bluetooth / Android Auto Next buttons bypass the repository).
- */
-internal fun nativeSeekWouldMisWrap(player: Player, logicalCount: Int, forward: Boolean): Boolean {
-    if (player.repeatMode != Player.REPEAT_MODE_ALL) return false
-    val count = player.mediaItemCount
-    if (count == 0 || count >= logicalCount) return false
-    val timeline = player.currentTimeline
-    val shuffled = player.shuffleModeEnabled
-    return if (forward) {
-        player.currentMediaItemIndex == timeline.getLastWindowIndex(shuffled)
-    } else {
-        player.currentMediaItemIndex == timeline.getFirstWindowIndex(shuffled)
-    }
-}
-
-/** A bounded slice of the logical queue to background-fill around [safeStart]. */
-internal data class FillWindow(
-    val forward: List<Track>,
-    val backward: List<Track>,
-)
-
-/**
- * Bounded background-fill window around the tapped track at [safeStart] in
- * [tracks]: up to [BACKGROUND_FILL_LOOKAHEAD] tracks after it and
- * [BACKGROUND_FILL_LOOKBEHIND] before it, clamped to the queue bounds. Replaces
- * the old "fill the entire rest of the queue" behavior.
- */
-internal fun computeFillWindow(tracks: List<Track>, safeStart: Int): FillWindow {
-    val fwdStart = safeStart + 1
-    val fwdEnd = minOf(fwdStart + BACKGROUND_FILL_LOOKAHEAD, tracks.size)
-    val forward = if (fwdStart < fwdEnd) tracks.subList(fwdStart, fwdEnd) else emptyList()
-
-    val bwdStart = maxOf(0, safeStart - BACKGROUND_FILL_LOOKBEHIND)
-    val backward = if (bwdStart < safeStart) tracks.subList(bwdStart, safeStart) else emptyList()
-
-    return FillWindow(forward, backward)
-}
-
-/**
- * Pure decision for the rolling buffer top-up: which logical tracks to resolve
- * and append so the timeline keeps [BACKGROUND_FILL_LOOKAHEAD] tracks ahead of
- * the current one. Returns the slice to append (in order), or empty when the
- * buffer is already deep enough or the queue has no more tracks.
- *
- * @param currentLogical index of the currently-playing track in [tracks].
- * @param lastLogical index of the timeline's last (frontier) item in [tracks].
- * @param aheadInTimeline how many materialized items sit after the current one.
- * @param existingIds track ids already in the timeline (never re-appended).
- *
- * Starts at `max(lastLogical+1, currentLogical+2)` so it never touches the
- * immediate next-up — that slot belongs to the full-chain quality prefetch, and
- * skipping it avoids a duplicate-insert race with it.
- */
-internal fun bufferTopUpSlice(
-    tracks: List<Track>,
-    currentLogical: Int,
-    lastLogical: Int,
-    aheadInTimeline: Int,
-    existingIds: Set<Long>,
-): List<Track> {
-    if (currentLogical < 0 || lastLogical < 0) return emptyList()
-    if (aheadInTimeline >= BACKGROUND_FILL_LOOKAHEAD) return emptyList()
-    val from = maxOf(lastLogical + 1, currentLogical + 2)
-    val to = minOf(currentLogical + 1 + BACKGROUND_FILL_LOOKAHEAD, tracks.size)
-    if (from >= to) return emptyList()
-    return tracks.subList(from, to).filter { it.id !in existingIds && !it.isUnavailableForDisplay }
-}

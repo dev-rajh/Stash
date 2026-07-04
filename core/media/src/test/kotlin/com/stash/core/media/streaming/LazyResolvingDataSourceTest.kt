@@ -91,6 +91,31 @@ class LazyResolvingDataSourceTest {
     }
 
     @Test
+    fun `dao miss falls back to resolver inputs carried in the uri query params`() {
+        // Search-surface tracks have synthetic ids with NO Room row — the
+        // placeholder URI must carry enough for the resolver on its own.
+        every { urlCache.get(99L) } returns null
+        coEvery { trackDao.getById(99L) } returns null
+        val entity = slot<TrackEntity>()
+        coEvery { resolver.resolve(capture(entity), any(), any()) } returns
+            stream("https://cdn/z.m4a", "youtube")
+        every { httpSource.open(any()) } returns 100L
+
+        val uri = stashResolveUri(
+            trackId = 99L, youtubeId = "vid123",
+            title = "Song", artist = "Artist", album = "Album",
+            durationMs = 123_000L, isrc = "USX123",
+        )
+        source().open(DataSpec.Builder().setUri(uri).build())
+
+        assertThat(entity.captured.youtubeId).isEqualTo("vid123")
+        assertThat(entity.captured.title).isEqualTo("Song")
+        assertThat(entity.captured.artist).isEqualTo("Artist")
+        assertThat(entity.captured.isrc).isEqualTo("USX123")
+        verify { httpSource.open(any()) }
+    }
+
+    @Test
     fun `failed resolve throws IOException so the cascade guard owns the failure`() {
         every { urlCache.get(42L) } returns null
         coEvery { trackDao.getById(42L) } returns null

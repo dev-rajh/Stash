@@ -7,6 +7,7 @@ import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.TransferListener
 import com.stash.core.data.db.dao.TrackDao
+import com.stash.core.data.db.entity.TrackEntity
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -29,8 +30,36 @@ import java.io.IOException
  */
 const val STASH_RESOLVE_SCHEME = "stash-resolve"
 
-/** Builds the placeholder URI for [trackId]. */
-fun stashResolveUri(trackId: Long): Uri = Uri.parse("$STASH_RESOLVE_SCHEME://track/$trackId")
+/**
+ * Builds the placeholder URI for [trackId]. The optional query params carry
+ * the [StreamSourceRegistry] resolver inputs so a track that has NO Room row
+ * (search-surface synthetic id — see TrackActionsDelegate.toDomainTrack) can
+ * still resolve at open() time: the DAO lookup misses and
+ * [LazyResolvingDataSource] falls back to an entity built from these params
+ * (the DataSource-layer equivalent of the old eager path's toEntity()
+ * fallback).
+ */
+fun stashResolveUri(
+    trackId: Long,
+    youtubeId: String? = null,
+    title: String? = null,
+    artist: String? = null,
+    album: String? = null,
+    durationMs: Long = 0L,
+    isrc: String? = null,
+): Uri = Uri.Builder()
+    .scheme(STASH_RESOLVE_SCHEME)
+    .authority("track")
+    .appendPath(trackId.toString())
+    .apply {
+        youtubeId?.let { appendQueryParameter("yt", it) }
+        title?.takeIf { it.isNotBlank() }?.let { appendQueryParameter("t", it) }
+        artist?.takeIf { it.isNotBlank() }?.let { appendQueryParameter("a", it) }
+        album?.takeIf { it.isNotBlank() }?.let { appendQueryParameter("al", it) }
+        if (durationMs > 0) appendQueryParameter("d", durationMs.toString())
+        isrc?.let { appendQueryParameter("isrc", it) }
+    }
+    .build()
 
 /**
  * DataSource that turns a `stash-resolve://track/<id>` placeholder into a
@@ -78,7 +107,7 @@ class LazyResolvingDataSource(
         // StreamUrlCache.get() checks expiry internally (evicts + returns null
         // when stale — see its monotonic-TTL KDoc), so no freshness re-check here.
         val fresh = urlCache.get(trackId)
-            ?: resolveBlocking(trackId)
+            ?: resolveBlocking(trackId, uri)
             ?: throw IOException("stream resolve failed for track $trackId")
 
         val realSpec = dataSpec.buildUpon().setUri(Uri.parse(fresh.url)).build()
@@ -92,15 +121,42 @@ class LazyResolvingDataSource(
         return delegate.open(spec)
     }
 
-    private fun resolveBlocking(trackId: Long): StreamUrl? = try {
+    private fun resolveBlocking(trackId: Long, uri: Uri): StreamUrl? = try {
         runBlocking {
             withTimeout(resolveDeadlineMs) {
-                val entity = trackDao.getById(trackId) ?: return@withTimeout null
+                // DAO first; a track with no Room row (search-surface synthetic
+                // id) falls back to the resolver inputs carried in the URI's
+                // query params — see [stashResolveUri].
+                val entity = trackDao.getById(trackId)
+                    ?: entityFromUri(trackId, uri)
+                    ?: return@withTimeout null
                 resolver.resolve(entity, allowYouTube = true, allowYtDlp = true)
             }
         }?.also { urlCache.put(trackId, it) }
     } catch (e: TimeoutCancellationException) {
         throw IOException("stream resolve deadline (${resolveDeadlineMs}ms) for track $trackId", e)
+    }
+
+    /**
+     * Rebuilds a resolver-input [TrackEntity] from the placeholder URI's query
+     * params. Null when the URI carries neither a youtubeId nor a
+     * title+artist pair — nothing the resolver chain could look up.
+     */
+    private fun entityFromUri(trackId: Long, uri: Uri): TrackEntity? {
+        val youtubeId = uri.getQueryParameter("yt")
+        val title = uri.getQueryParameter("t").orEmpty()
+        val artist = uri.getQueryParameter("a").orEmpty()
+        if (youtubeId == null && (title.isBlank() || artist.isBlank())) return null
+        return TrackEntity(
+            id = trackId,
+            title = title,
+            artist = artist,
+            album = uri.getQueryParameter("al").orEmpty(),
+            durationMs = uri.getQueryParameter("d")?.toLongOrNull() ?: 0L,
+            isrc = uri.getQueryParameter("isrc"),
+            youtubeId = youtubeId,
+            isStreamable = true,
+        )
     }
 
     override fun read(buffer: ByteArray, offset: Int, length: Int): Int =
