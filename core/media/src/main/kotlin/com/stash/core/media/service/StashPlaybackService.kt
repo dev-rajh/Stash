@@ -32,8 +32,10 @@ import com.stash.core.media.equalizer.LoudnessController
 import com.stash.core.media.equalizer.StashRenderersFactory
 import com.stash.core.media.equalizer.computeGain
 import com.stash.core.media.PlaybackResumer
+import com.stash.core.media.PlayerRepositoryImpl
 import com.stash.core.media.ResumePlayGate
 import com.stash.core.media.ResumeStreamResolver
+import com.stash.core.media.nativeSeekWouldMisWrap
 import com.stash.core.media.streaming.PrefetchOrchestrator
 import com.stash.core.media.streaming.StashMediaSourceFactory
 import com.stash.core.media.streaming.StreamingMediaSourceFactory
@@ -82,6 +84,15 @@ class StashPlaybackService : MediaLibraryService() {
     @Inject lateinit var playbackResumer: PlaybackResumer
     @Inject lateinit var resumeStreamResolver: ResumeStreamResolver
     @Inject lateinit var crossfadePreference: CrossfadePreference
+
+    /**
+     * Lazy handle to the app's player repository — used ONLY to re-route
+     * session Next/Previous commands that would mis-wrap the bounded timeline
+     * window under repeat-all (see [StashSessionCallback.onPlayerCommandRequest]).
+     * Lazy so injection doesn't eagerly construct the repository (and its
+     * MediaController connection back to this very service) during onCreate.
+     */
+    @Inject lateinit var playerRepository: dagger.Lazy<PlayerRepositoryImpl>
 
     /**
      * Shared, interceptor-bearing OkHttp client (carries `AmzCaptchaInterceptor`).
@@ -1324,6 +1335,42 @@ class StashPlaybackService : MediaLibraryService() {
                 .setAvailableSessionCommands(sessionCommands.build())
                 .setAvailablePlayerCommands(playerCommands)
                 .build()
+        }
+
+        /**
+         * Notification, Bluetooth, and Android Auto skips act on the session
+         * player directly, bypassing [PlayerRepositoryImpl.skipNext] /
+         * [PlayerRepositoryImpl.skipPrevious]. When repeat-all would wrap the
+         * bounded timeline window (a partial view of the logical queue), the
+         * native seek lands on the window's FIRST item — not the logical
+         * successor ("rapid-skip 10 tracks and the 11th is the first one
+         * skipped"). Intercept exactly that case and route through the
+         * repository's logical-queue skip; everything else passes through.
+         */
+        override fun onPlayerCommandRequest(
+            session: MediaSession,
+            controller: MediaSession.ControllerInfo,
+            playerCommand: Int,
+        ): Int {
+            val forward = when (playerCommand) {
+                Player.COMMAND_SEEK_TO_NEXT, Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM -> true
+                Player.COMMAND_SEEK_TO_PREVIOUS, Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM -> false
+                else -> return super.onPlayerCommandRequest(session, controller, playerCommand)
+            }
+            val player = session.player
+            // COMMAND_SEEK_TO_PREVIOUS restarts the current track when far
+            // enough in — no wrap involved; let it through untouched.
+            if (playerCommand == Player.COMMAND_SEEK_TO_PREVIOUS &&
+                player.currentPosition > player.maxSeekToPreviousPosition
+            ) {
+                return super.onPlayerCommandRequest(session, controller, playerCommand)
+            }
+            val repo = playerRepository.get()
+            if (!nativeSeekWouldMisWrap(player, repo.currentQueueTracks.size, forward)) {
+                return super.onPlayerCommandRequest(session, controller, playerCommand)
+            }
+            serviceScope.launch { if (forward) repo.skipNext() else repo.skipPrevious() }
+            return SessionResult.RESULT_INFO_SKIPPED
         }
 
         override fun onCustomCommand(

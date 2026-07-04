@@ -379,29 +379,48 @@ class PlayerRepositoryImpl @Inject constructor(
         // streaming track — route the LOGICAL next through skipToQueueIndex,
         // which resolves it (with a buffering spinner) and plays it. Either way
         // the user moves forward.
-        if (controller.hasNextMediaItem() && pendingNavIndex == null) {
+        if (controller.hasNextMediaItem() && pendingNavIndex == null &&
+            !nativeSeekWouldMisWrap(controller, currentQueueTracks.size, forward = true)
+        ) {
             // The next track is already materialized in the timeline — advance
             // instantly (this also respects Media3 shuffle order).
             controller.seekToNextMediaItem()
         } else {
             // Timeline frontier (the background fill couldn't pre-resolve the
-            // next streaming track) OR a rapid-skip chain is already in flight:
-            // advance one more from the pending target, optimistically.
+            // next streaming track), a rapid-skip chain already in flight, OR
+            // repeat-all would wrap the partial timeline window back to its
+            // first item instead of the logical successor ("skip 10 tracks and
+            // the 11th is the first one I skipped"): advance one more from the
+            // pending target, optimistically.
             val base = pendingNavIndex ?: currentLogicalIndex(controller)
-            val target = base + 1
-            if (target in 1 until currentQueueTracks.size) navigateToLogical(target)
+            if (base < 0) return
+            var target = base + 1
+            if (target >= currentQueueTracks.size) {
+                // True end of the LOGICAL queue: repeat-all wraps to track 0.
+                if (controller.repeatMode != Player.REPEAT_MODE_ALL) return
+                target = 0
+            }
+            if (currentQueueTracks.isNotEmpty()) navigateToLogical(target)
         }
     }
 
     override suspend fun skipPrevious() {
         cascadeGuard.onUserTransport()
         val controller = ensureController() ?: return
-        if (controller.hasPreviousMediaItem() && pendingNavIndex == null) {
+        if (controller.hasPreviousMediaItem() && pendingNavIndex == null &&
+            !nativeSeekWouldMisWrap(controller, currentQueueTracks.size, forward = false)
+        ) {
             controller.seekToPreviousMediaItem()
         } else {
             val base = pendingNavIndex ?: currentLogicalIndex(controller)
-            val target = base - 1
-            if (target in 0 until currentQueueTracks.size) navigateToLogical(target)
+            if (base < 0) return
+            var target = base - 1
+            if (target < 0) {
+                // True start of the LOGICAL queue: repeat-all wraps to the last track.
+                if (controller.repeatMode != Player.REPEAT_MODE_ALL) return
+                target = currentQueueTracks.size - 1
+            }
+            if (target in currentQueueTracks.indices) navigateToLogical(target)
         }
     }
 
@@ -480,6 +499,44 @@ class PlayerRepositoryImpl @Inject constructor(
         if (nextLogical >= currentQueueTracks.size) return // genuinely the end
         Log.i(TAG, "end-of-timeline recovery: continuing to logical track $nextLogical")
         navigateToLogical(nextLogical)
+    }
+
+    /**
+     * Repairs ExoPlayer's own repeat-all wrap of the bounded rolling window.
+     * The timeline is a partial window over [currentQueueTracks], so when
+     * auto-advance runs off its last item under REPEAT_MODE_ALL, Media3 wraps
+     * to timeline index 0 — the first item of the WINDOW, not the logical
+     * successor. Detects that wrap (last→first window transition while the
+     * timeline holds fewer items than the logical queue) and re-routes to the
+     * logical next track (wrapping to logical 0 only at the true queue end).
+     * No-op for repeat OFF/ONE and for fully-materialized timelines, where the
+     * native wrap is already correct. Internal as a test seam.
+     */
+    internal fun maybeRedirectRepeatAllWindowWrap(
+        controller: MediaController,
+        oldIndex: Int,
+        newIndex: Int,
+        oldItem: MediaItem?,
+    ) {
+        if (controller.repeatMode != Player.REPEAT_MODE_ALL) return
+        val logical = currentQueueTracks
+        val count = controller.mediaItemCount
+        if (count == 0 || count >= logical.size) return
+        val timeline = controller.currentTimeline
+        val shuffled = controller.shuffleModeEnabled
+        if (oldIndex != timeline.getLastWindowIndex(shuffled)) return
+        if (newIndex != timeline.getFirstWindowIndex(shuffled)) return
+        val oldId = oldItem?.mediaMetadata?.extras?.getLong(EXTRA_TRACK_ID, -1L) ?: return
+        if (oldId <= 0L) return
+        val oldLogical = logical.indexOfFirst { it.id == oldId }
+        if (oldLogical < 0) return
+        val target = if (oldLogical + 1 >= logical.size) 0 else oldLogical + 1
+        Log.i(
+            TAG,
+            "repeat-all wrapped the partial window (timeline $oldIndex->$newIndex); " +
+                "redirecting to logical track $target",
+        )
+        navigateToLogical(target)
     }
 
     override suspend fun seekTo(positionMs: Long) {
@@ -1644,6 +1701,25 @@ class PlayerRepositoryImpl @Inject constructor(
     /** Listener that forwards Media3 player events into [_playerState]. */
     private val playerListener = object : Player.Listener {
 
+        override fun onPositionDiscontinuity(
+            oldPosition: Player.PositionInfo,
+            newPosition: Player.PositionInfo,
+            reason: Int,
+        ) {
+            // Auto-advance under repeat-all can wrap the bounded timeline
+            // window back to its first item instead of the logical successor —
+            // see [maybeRedirectRepeatAllWindowWrap]. User seeks (REASON_SEEK)
+            // are already routed correctly by skipNext/skipPrevious.
+            if (reason != Player.DISCONTINUITY_REASON_AUTO_TRANSITION) return
+            val controller = controllerDeferred ?: return
+            maybeRedirectRepeatAllWindowWrap(
+                controller,
+                oldIndex = oldPosition.mediaItemIndex,
+                newIndex = newPosition.mediaItemIndex,
+                oldItem = oldPosition.mediaItem,
+            )
+        }
+
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
             val controller = controllerDeferred ?: return
             // Defense in depth: the existing onPlayerError recovery catches
@@ -1803,6 +1879,19 @@ class PlayerRepositoryImpl @Inject constructor(
 
     private fun MediaController.recoverOrStop() {
         if (hasNextMediaItem()) {
+            if (nativeSeekWouldMisWrap(this, currentQueueTracks.size, forward = true)) {
+                // Repeat-all + partial window: the native seek would restart
+                // the window instead of continuing. Route the recovery through
+                // the logical queue (wrapping at the true end).
+                val current = currentLogicalIndex(this)
+                if (current >= 0 && currentQueueTracks.isNotEmpty()) {
+                    val next = current + 1
+                    navigateToLogical(if (next >= currentQueueTracks.size) 0 else next)
+                } else {
+                    stop()
+                }
+                return
+            }
             seekToNextMediaItem()
             prepare()
             play()
@@ -2123,6 +2212,36 @@ internal const val BACKGROUND_FILL_LOOKAHEAD = 10
 
 /** How many tracks BEHIND the tapped track the fill pre-warms (for skip-back). */
 internal const val BACKGROUND_FILL_LOOKBEHIND = 1
+
+/**
+ * True when a native next/previous seek on [player] would WRAP its bounded
+ * timeline window under REPEAT_MODE_ALL instead of reaching the logical
+ * neighbour. The timeline is a rolling window over the logical queue
+ * ([BACKGROUND_FILL_LOOKAHEAD] ahead of the tapped track, topped up on each
+ * advance), so with repeat-all Media3 reports `hasNextMediaItem() == true` at
+ * the window frontier and `seekToNextMediaItem()` lands on the window's FIRST
+ * item — for a rapid 10-skip storm that is literally the first track the user
+ * skipped. Wrapping is only correct when the timeline holds the whole logical
+ * queue ([logicalCount] items or more); every caller that would natively seek
+ * across an edge of a PARTIAL window must route through the logical queue
+ * instead.
+ *
+ * Pure and top-level for direct unit testing; shared by the repository's skip
+ * paths, error recovery, and the service's session-command interception (the
+ * notification / Bluetooth / Android Auto Next buttons bypass the repository).
+ */
+internal fun nativeSeekWouldMisWrap(player: Player, logicalCount: Int, forward: Boolean): Boolean {
+    if (player.repeatMode != Player.REPEAT_MODE_ALL) return false
+    val count = player.mediaItemCount
+    if (count == 0 || count >= logicalCount) return false
+    val timeline = player.currentTimeline
+    val shuffled = player.shuffleModeEnabled
+    return if (forward) {
+        player.currentMediaItemIndex == timeline.getLastWindowIndex(shuffled)
+    } else {
+        player.currentMediaItemIndex == timeline.getFirstWindowIndex(shuffled)
+    }
+}
 
 /** A bounded slice of the logical queue to background-fill around [safeStart]. */
 internal data class FillWindow(
