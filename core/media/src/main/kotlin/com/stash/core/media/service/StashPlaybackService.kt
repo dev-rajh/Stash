@@ -83,6 +83,11 @@ class StashPlaybackService : MediaLibraryService() {
     @Inject lateinit var resumeStreamResolver: ResumeStreamResolver
     @Inject lateinit var crossfadePreference: CrossfadePreference
 
+    /** Deps for the full-timeline lazy-resolve chain (LazyResolvingDataSource). */
+    @Inject lateinit var streamResolver: com.stash.core.media.streaming.StreamSourceRegistry
+    @Inject lateinit var streamUrlCache: com.stash.core.media.streaming.StreamUrlCache
+
+
     /**
      * Shared, interceptor-bearing OkHttp client (carries `AmzCaptchaInterceptor`).
      * Used by [StashMediaSourceFactory] to stream amz-origin items through an
@@ -350,6 +355,11 @@ class StashPlaybackService : MediaLibraryService() {
                 (scheme == "http" || scheme == "https") && origin == "amz"
             },
             amzHttpClient = okHttpClient,
+            // Full-timeline queue: stash-resolve:// placeholders resolve
+            // just-in-time inside LazyResolvingDataSource at open().
+            resolver = streamResolver,
+            urlCache = streamUrlCache,
+            trackDao = trackDao,
         )
 
         // Two-player crossfade engine (role-swap). Both players build with
