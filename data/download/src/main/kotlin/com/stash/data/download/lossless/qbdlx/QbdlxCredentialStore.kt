@@ -8,13 +8,19 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
-import com.stash.data.download.BuildConfig
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicInteger
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.flow.first
+
+/** One anonymized pool token for the Settings picker. `token` is the id only, never shown. */
+data class QbdlxTokenChoice(
+    val label: String,
+    val token: String,
+    val country: String,
+    val live: Boolean,
+)
 
 /**
  * Its own preferences DataStore (mirrors
@@ -34,10 +40,11 @@ private val Context.qbdlxCredentialsDataStore: DataStore<Preferences> by prefere
  * out (~monthly).
  *
  * Responsibilities:
- *  - [activeToken]: the token to use now — pasted (if live) first, else
- *    round-robin across the live (non-dead) pool tokens to spread load (the
- *    breaker is per-source, but Qobuz ban-risk is per-account, so we don't pin
- *    one token). Null when nothing is live.
+ *  - [activeToken]: the token to use now — sticky, not round-robin. Priority:
+ *    pasted (if live) > pinned pool token (if live and still a pool member) >
+ *    the sticky primary (if still live) > else the first live token in canonical
+ *    order, which becomes the new sticky primary. One token carries load until it
+ *    dies, then we advance. Null when nothing is live.
  *  - [tokensForRegion]: ordered live tokens for a region-locked retry,
  *    country-matched first, bounded at [MAX_REGION_TRIES] so one locked track
  *    can't fan out across every account.
@@ -53,21 +60,18 @@ private val Context.qbdlxCredentialsDataStore: DataStore<Preferences> by prefere
 @Singleton
 class QbdlxCredentialStore @Inject constructor(
     @ApplicationContext private val context: Context,
+    poolProvider: QbdlxPoolProvider,
 ) {
     private val pastedTokenKey = stringPreferencesKey("pasted_token")
 
     /**
      * Test seam: the raw `token:country,token:country` pool. Defaults to the
-     * bundled BuildConfig value; tests override it with a known pool so they
-     * don't depend on BuildConfig.
+     * decrypted BuildConfig blob (via [QbdlxPoolProvider]); tests override it.
      */
-    internal var poolRaw: String = BuildConfig.QBDLX_TOKEN_POOL
+    internal var poolRaw: String = poolProvider.rawPool()
 
     /** Injectable clock (epoch ms) for the dead-token cooldown; overridable in tests. */
     internal var clock: () -> Long = { System.currentTimeMillis() }
-
-    /** Round-robin cursor across live pool tokens. In-memory (per process). */
-    private val rrIndex = AtomicInteger(0)
 
     /**
      * Token → epoch-ms until which it is considered dead. IN-MEMORY and
@@ -80,6 +84,15 @@ class QbdlxCredentialStore @Inject constructor(
      * left the whole pool stuck on one transient 401 ("token expired" forever).
      */
     private val deadUntil = ConcurrentHashMap<String, Long>()
+
+    /**
+     * Sticky primary: the token we keep using until it dies (replaces round-robin).
+     * @Volatile for visibility only — two concurrent resolves both picking a live
+     * token is benign (last write wins, no corruption). Nulled on markDead of the
+     * primary so the next call advances. In-memory (per process).
+     */
+    @Volatile
+    private var activePrimary: String? = null
 
     /** Parsed pool: (token, ISO-2 country). Split on the LAST ':' defensively. */
     private fun pool(): List<Pair<String, String>> =
@@ -101,12 +114,59 @@ class QbdlxCredentialStore @Inject constructor(
     private suspend fun pastedToken(): String? =
         context.qbdlxCredentialsDataStore.data.first()[pastedTokenKey]?.takeIf { it.isNotBlank() }
 
-    /** The token to use now: pasted (if live) first, else round-robin over live pool tokens. */
+    private val pinnedTokenKey = stringPreferencesKey("pinned_token")
+
+    /** The picker-pinned pool token, or null for Auto. */
+    suspend fun pinnedToken(): String? =
+        context.qbdlxCredentialsDataStore.data.first()[pinnedTokenKey]?.takeIf { it.isNotBlank() }
+
+    /** Pin a pool token for the Settings picker, or clear (null) for Auto. */
+    suspend fun setPinnedToken(token: String?) {
+        val t = token?.trim()
+        context.qbdlxCredentialsDataStore.edit { prefs ->
+            if (t.isNullOrEmpty()) prefs.remove(pinnedTokenKey) else prefs[pinnedTokenKey] = t
+        }
+    }
+
+    /**
+     * The pool as anonymized picker choices, in stable canonical order
+     * (by token hash, so "Token 2" is the same account across pool refreshes —
+     * NOT array position, and createdAt is dropped in the build-time flatten).
+     * The raw token is the id behind the label only; it never becomes UI text.
+     * [live] is a point-in-time hint (isDead at compute time), not a live flow.
+     */
+    suspend fun poolForPicker(): List<QbdlxTokenChoice> =
+        pool().sortedWith(compareBy({ it.first.hashCode() }, { it.first }))
+            .mapIndexed { i, (token, country) ->
+                QbdlxTokenChoice(
+                    label = "Token ${i + 1}",
+                    token = token,
+                    country = country,
+                    live = !isDead(token),
+                )
+            }
+
+    /**
+     * The token to use now (sticky, not round-robin):
+     *   1. pasted token if live (the user's own / monthly-refresh path — wins);
+     *   2. pinned pool token if live AND still a member of the current pool
+     *      (a pin to a since-removed token is ignored → falls through to auto);
+     *   3. the sticky [activePrimary] if still live;
+     *   4. else the first live token in canonical order → pinned as the new primary.
+     * Null when nothing is live.
+     */
     suspend fun activeToken(): String? {
         pastedToken()?.let { if (!isDead(it)) return it }
-        val live = pool().map { it.first }.filter { !isDead(it) }
-        if (live.isEmpty()) return null
-        return live[(rrIndex.getAndIncrement() % live.size + live.size) % live.size]
+        pinnedToken()?.let { p ->
+            if (!isDead(p) && pool().any { it.first == p }) return p
+        }
+        activePrimary?.let { if (!isDead(it)) return it }
+        val next = pool().map { it.first }
+            .filter { !isDead(it) }
+            .sortedWith(compareBy({ it.hashCode() }, { it }))
+            .firstOrNull() ?: return null
+        activePrimary = next
+        return next
     }
 
     /**
@@ -126,6 +186,7 @@ class QbdlxCredentialStore @Inject constructor(
     /** Mark [token] dead for the cooldown window (auth failure). Auto-retried after. */
     fun markDead(token: String) {
         deadUntil[token] = clock() + DEAD_COOLDOWN_MS
+        if (token == activePrimary) activePrimary = null
     }
 
     /** Clear a token's dead flag (a successful call, or a fresh paste). */

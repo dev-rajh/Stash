@@ -77,6 +77,8 @@ fun SettingsAudioQualityScreen(
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val qbdlxEnabled by viewModel.qbdlxEnabled.collectAsStateWithLifecycle()
     val qbdlxExpired by viewModel.qbdlxExpired.collectAsStateWithLifecycle()
+    val qbdlxTokenChoices by viewModel.qbdlxTokenChoices.collectAsStateWithLifecycle()
+    val qbdlxPinnedToken by viewModel.qbdlxPinnedToken.collectAsStateWithLifecycle()
 
     SettingsScaffold(title = "Audio & Quality", onBack = onBack, modifier = modifier) {
         // (a) Download tier — only when lossless OFF. The standalone yt-dlp
@@ -126,25 +128,22 @@ fun SettingsAudioQualityScreen(
                     Column(modifier = Modifier.fillMaxWidth()) {
                         Spacer(modifier = Modifier.height(14.dp))
 
-                        // v0.9.13 ROUTING block — kenny carries lossless on its
-                        // own; squid is an optional second source the user can
-                        // unlock inline if they want the redundancy.
-                        LosslessRoutingStatus(
-                            squidStatus = uiState.squidCaptchaStatus,
-                            onSolveCaptcha = onNavigateToSquidWtfCaptcha,
-                        )
+                        // ROUTING block — Direct Qobuz (primary) + amz fallback.
+                        // kennyy/squid proxies are parked and no longer shown.
+                        LosslessRoutingStatus()
 
                         // ARCOD connect row: removed 2026-07-01 while ARCOD is
                         // parked (host down for us). ArcodConnectScreen + the
                         // onNavigateToArcodConnect route stay wired for re-enabling.
 
-                        // qbdlx — direct www.qobuz.com Hi-Res FLAC (5th source).
-                        // Per-source enable toggle gates BOTH download and
-                        // streaming; the token field is the refresh path when the
-                        // bundled pool ages out, and the badge surfaces all-dead.
+                        // Direct Qobuz — direct www.qobuz.com Hi-Res FLAC, the
+                        // primary lossless source. Per-source enable toggle gates
+                        // BOTH download and streaming; the token field is the
+                        // refresh path when the bundled pool ages out, and the
+                        // badge surfaces all-dead.
                         SettingsToggleRow(
-                            title = "Qobuz (via qbdlx)",
-                            subtitle = "Direct Qobuz Hi-Res FLAC (5th source).",
+                            title = "Direct Qobuz",
+                            subtitle = "Hi-Res FLAC, straight from Qobuz.",
                             checked = qbdlxEnabled,
                             onCheckedChange = viewModel::onQbdlxEnabledChange,
                         )
@@ -161,6 +160,31 @@ fun SettingsAudioQualityScreen(
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.error,
                                     )
+                                }
+                                if (qbdlxTokenChoices.size > 1) {
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = "Account",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                    )
+                                    Column(modifier = Modifier.selectableGroup()) {
+                                        SettingsPickerRow(
+                                            selected = qbdlxPinnedToken == null,
+                                            title = "Auto",
+                                            subtitle = "Recommended — uses a working account and fails over",
+                                            onClick = { viewModel.onQbdlxTokenPinned(null) },
+                                        )
+                                        qbdlxTokenChoices.forEach { choice ->
+                                            SettingsPickerRow(
+                                                selected = qbdlxPinnedToken == choice.token,
+                                                title = choice.label,
+                                                subtitle = choice.country +
+                                                    if (choice.live) "" else " · offline",
+                                                onClick = { viewModel.onQbdlxTokenPinned(choice.token) },
+                                            )
+                                        }
+                                    }
                                 }
                                 Spacer(modifier = Modifier.height(4.dp))
                                 var qbdlxToken by remember { mutableStateOf("") }

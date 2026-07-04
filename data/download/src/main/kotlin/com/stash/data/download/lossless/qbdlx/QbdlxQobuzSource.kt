@@ -43,7 +43,7 @@ class QbdlxQobuzSource @Inject constructor(
 
     override val id: String = SOURCE_ID
 
-    override val displayName: String = "Qobuz (via qbdlx)"
+    override val displayName: String = "Direct Qobuz"
 
     override suspend fun isEnabled(): Boolean =
         losslessPrefs.qbdlxEnabledNow() &&
@@ -133,7 +133,7 @@ class QbdlxQobuzSource @Inject constructor(
 
     /**
      * Resolve [track] to a signed FLAC URL, rotating tokens on death/region
-     * lock. TokenDead → markDead + next round-robin token; RegionLocked →
+     * lock. TokenDead → markDead + next live token (sticky-advance); RegionLocked →
      * iterate [QbdlxCredentialStore.tokensForRegion] (bounded). Bounded by the
      * tried-set + [MAX_TOKEN_ATTEMPTS].
      */
@@ -281,7 +281,7 @@ class QbdlxQobuzSource @Inject constructor(
 
     companion object {
         const val SOURCE_ID = "qbdlx_qobuz"
-        private const val TAG = "QbdlxQobuzSource"
+        private const val TAG = "QbdlxSource" // no "Qobuz" — keeps the source out of shared logcat diagnostics
 
         /**
          * Hard ceiling on token rotations per phase. The tried-set is the real

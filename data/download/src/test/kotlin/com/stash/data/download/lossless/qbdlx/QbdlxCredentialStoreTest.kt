@@ -24,11 +24,11 @@ import org.robolectric.RobolectricTestRunner
 class QbdlxCredentialStoreTest {
 
     private val ctx = ApplicationProvider.getApplicationContext<Context>()
-    private fun store(pool: String) = QbdlxCredentialStore(ctx).also { it.poolRaw = pool }
+    private fun store(pool: String) = QbdlxCredentialStore(ctx) { "" }.also { it.poolRaw = pool }
 
     @Before
     fun setUp() {
-        runBlocking { QbdlxCredentialStore(ctx).clearPersistedForTest() }
+        runBlocking { QbdlxCredentialStore(ctx) { "" }.clearPersistedForTest() }
     }
 
     @Test
@@ -38,28 +38,34 @@ class QbdlxCredentialStoreTest {
     }
 
     @Test
-    fun `round-robin advances across live pool tokens`() = runTest {
-        val s = store("a:FR,b:GB")
-        val first = s.activeToken(); val second = s.activeToken()
-        assertThat(setOf(first, second)).isEqualTo(setOf("a", "b"))
-    }
-
-    @Test
     fun `markDead skips dead token within cooldown`() = runTest {
         val s = store("a:FR,b:GB"); s.markDead("a")
         repeat(4) { assertThat(s.activeToken()).isEqualTo("b") }
     }
 
     @Test
-    fun `dead token is retried after the cooldown elapses`() = runTest {
+    fun `activeToken is sticky - same token until it dies, then advances`() = runTest {
+        val s = store("a:FR,b:GB")
+        val first = s.activeToken()
+        assertThat(s.activeToken()).isEqualTo(first)   // sticky: no rotation
+        assertThat(s.activeToken()).isEqualTo(first)
+        s.markDead(first!!)
+        val second = s.activeToken()
+        assertThat(second).isNotEqualTo(first)          // advanced to the other live token
+        assertThat(s.activeToken()).isEqualTo(second)   // sticky on the new primary
+    }
+
+    @Test
+    fun `a token recovers as a candidate after its cooldown elapses`() = runTest {
         var now = 1_000L
         val s = store("a:FR,b:GB").also { it.clock = { now } }
-        s.markDead("a")
-        assertThat(s.activeToken()).isEqualTo("b") // a is dead
-        now += QbdlxCredentialStore.DEAD_COOLDOWN_MS + 1 // cooldown elapsed
-        // a is live again → round-robin includes it
-        val seen = (0..3).map { s.activeToken() }.toSet()
-        assertThat(seen).contains("a")
+        val primary = s.activeToken()                   // canonical-first live token
+        s.markDead(primary!!)
+        val other = s.activeToken()
+        assertThat(other).isNotEqualTo(primary)         // advanced; primary in cooldown
+        now += QbdlxCredentialStore.DEAD_COOLDOWN_MS + 1
+        s.markDead(other!!)                            // now-primary dies; original cooldown elapsed
+        assertThat(s.activeToken()).isEqualTo(primary)  // original live again → reused
     }
 
     @Test
@@ -101,5 +107,44 @@ class QbdlxCredentialStoreTest {
         assertThat(s.activeToken()).isNull()
         s.setPastedToken("p")
         assertThat(s.allDead()).isFalse() // paste is the recovery path
+    }
+
+    @Test
+    fun `pasted beats pinned beats sticky-auto`() = runTest {
+        val s = store("a:FR,b:GB")
+        s.setPinnedToken("b")
+        assertThat(s.activeToken()).isEqualTo("b")      // pinned over auto
+        s.setPastedToken("p")
+        assertThat(s.activeToken()).isEqualTo("p")      // pasted over pinned
+    }
+
+    @Test
+    fun `dead pinned token advances to auto`() = runTest {
+        val s = store("a:FR,b:GB")
+        s.setPinnedToken("a"); s.markDead("a")
+        assertThat(s.activeToken()).isEqualTo("b")      // pinned dead → auto picks live
+    }
+
+    @Test
+    fun `pin to a token not in the pool is ignored`() = runTest {
+        val s = store("a:FR,b:GB")
+        s.setPinnedToken("ghost")
+        assertThat(s.activeToken()).isAnyOf("a", "b")   // stale pin ignored, auto used
+    }
+
+    @Test
+    fun `poolForPicker labels stable under input reordering, live reflects deadUntil`() = runTest {
+        val s1 = store("a:FR,b:GB")
+        val s2 = store("b:GB,a:FR")                     // reversed input
+        assertThat(s1.poolForPicker().map { it.label to it.token })
+            .isEqualTo(s2.poolForPicker().map { it.label to it.token })
+        s1.markDead("a")
+        assertThat(s1.poolForPicker().first { it.token == "a" }.live).isFalse()
+        assertThat(s1.poolForPicker().first { it.token == "b" }.live).isTrue()
+    }
+
+    @Test
+    fun `poolForPicker is empty for an empty pool`() = runTest {
+        assertThat(store("").poolForPicker()).isEmpty()
     }
 }

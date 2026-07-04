@@ -2,6 +2,8 @@ package com.stash.data.download.lossless.qbdlx.di
 
 import com.stash.data.download.BuildConfig
 import com.stash.data.download.lossless.LosslessSource
+import com.stash.data.download.lossless.qbdlx.QbdlxPoolCipher
+import com.stash.data.download.lossless.qbdlx.QbdlxPoolProvider
 import com.stash.data.download.lossless.qbdlx.QbdlxQobuzSource
 import com.stash.data.download.lossless.qbdlx.QbdlxSigner
 import dagger.Binds
@@ -39,5 +41,22 @@ abstract class QbdlxModule {
         @Provides
         @Singleton
         fun provideQbdlxSigner(): QbdlxSigner = QbdlxSigner(BuildConfig.QBDLX_APP_SECRET)
+
+        @Provides
+        @Singleton
+        fun provideQbdlxPoolProvider(): QbdlxPoolProvider = QbdlxPoolProvider {
+            val pool = QbdlxPoolCipher.decrypt(BuildConfig.QBDLX_TOKEN_POOL)
+            val fp = BuildConfig.QBDLX_POOL_FP
+            if (fp.isNotBlank()) {
+                val actual = if (pool.isBlank()) "" else
+                    java.security.MessageDigest.getInstance("SHA-256")
+                        .digest(pool.toByteArray())
+                        .joinToString("") { "%02x".format(it.toInt() and 0xFF) }.take(8)
+                if (actual != fp) {
+                    android.util.Log.w("QbdlxPool", "pool fp mismatch — embed/runtime crypto drift?")
+                }
+            }
+            pool
+        }
     }
 }
