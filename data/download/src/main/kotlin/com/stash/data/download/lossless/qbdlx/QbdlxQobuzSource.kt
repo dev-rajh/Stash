@@ -43,7 +43,7 @@ class QbdlxQobuzSource @Inject constructor(
 
     override val id: String = SOURCE_ID
 
-    override val displayName: String = "Qobuz (via qbdlx)"
+    override val displayName: String = "Direct Qobuz"
 
     override suspend fun isEnabled(): Boolean =
         losslessPrefs.qbdlxEnabledNow() &&

@@ -89,8 +89,8 @@ fun SettingsPlaybackScreen(
                     },
                     {
                         SettingsToggleRow(
-                            title = "Force qbdlx only (test)",
-                            subtitle = "Route streaming AND downloads through qbdlx (direct Qobuz) only — no other sources, no YouTube. For testing the qbdlx source. Turn off after testing.",
+                            title = "Force Direct Qobuz only (test)",
+                            subtitle = "Route streaming AND downloads through Direct Qobuz only — no other sources, no YouTube. For testing the Direct Qobuz source. Turn off after testing.",
                             checked = forceQbdlxOnly,
                             onCheckedChange = viewModel::setForceQbdlxOnly,
                         )
