@@ -846,20 +846,6 @@ class StashPlaybackService : MediaLibraryService() {
 
     private inner class StashSessionCallback : MediaLibrarySession.Callback {
 
-        fun TrackEntity.toMediaMetadata(): MediaMetadata {
-            return MediaMetadata.Builder()
-                .setTitle(this.title)
-                .setArtist(this.artist)
-                .setAlbumTitle(this.album)
-                .setArtworkUri(this.albumArtUrl?.toUri() ?: this.albumArtPath?.toUri())
-                .setIsPlayable(true)
-                .setIsBrowsable(false)
-                .setExtras(android.os.Bundle().apply {
-                    putLong(EXTRA_TRACK_ID, id)
-                })
-                .build()
-        }
-
         private suspend fun resolveMediaItem(item: MediaItem): MediaItem {
             // 1. If it's already a fully resolved item (has URI), use it
             if (item.localConfiguration?.uri != null) {
@@ -867,29 +853,16 @@ class StashPlaybackService : MediaLibraryService() {
             }
 
             // 2. If it's a library item (has mediaId), resolve it from DB.
-            // For downloaded tracks, set the file URI. Streaming-only items
-            // are pre-resolved upstream in PlayerRepositoryImpl.setQueue
-            // (semaphore-capped Kennyy lookups), so by the time they reach
-            // here they already carry an http(s) URI and short-circuit on
-            // the check above. If we ever see a streaming-only item with
-            // no URI here, leaving URI absent will surface as an
-            // onPlayerError → skip-next recovery.
+            // Downloaded tracks get their file URI; stream tracks get a
+            // stash-resolve:// placeholder resolved just-in-time by
+            // LazyResolvingDataSource (Android Auto taps never pass through
+            // PlayerRepositoryImpl, so nothing is "pre-resolved upstream" —
+            // the old absent-URI fallthrough was why car taps didn't play).
             val trackId = item.mediaId.toLongOrNull()
             if (trackId != null) {
                 val track = trackDao.getById(trackId)
                 if (track != null) {
-                    val builder = item.buildUpon()
-                        .setMediaMetadata(track.toMediaMetadata())
-                    val localPath = track.filePath
-                    if (!localPath.isNullOrBlank()) {
-                        val fileUri = if (localPath.startsWith("/")) {
-                            "file://$localPath".toUri()
-                        } else {
-                            localPath.toUri()
-                        }
-                        builder.setUri(fileUri)
-                    }
-                    return builder.build()
+                    return track.toAutoMediaItem(mediaId = item.mediaId)
                 }
             }
 
@@ -918,15 +891,11 @@ class StashPlaybackService : MediaLibraryService() {
                     val playlistId = mediaItems[0].mediaId.removePrefix(SHUFFLE_PLAY_PREFIX).toLongOrNull()
                     if (playlistId != null) {
                         val tracks = playlistDao.getTracksForPlaylist(playlistId)
-                        // v0.9.37: include streamable tracks so stream-only Mix entries are
-                        // playable. Downloaded-only filter would silently drop them.
-                        val items = tracks.filter{track -> track.isDownloaded || track.isStreamable}.map { track ->
-                            MediaItem.Builder()
-                                .setMediaId(track.id.toString())
-                                .setUri(track.filePath ?: "")
-                                .setMediaMetadata(track.toMediaMetadata())
-                                .build()
-                        }.shuffled()
+                        // isPlayableInAuto, NOT the bare is_streamable flag:
+                        // never-checked synced rows must play (see AutoBrowse.kt).
+                        val items = tracks.filter { it.isPlayableInAuto() }
+                            .map { it.toAutoMediaItem() }
+                            .shuffled()
 
                         kotlinx.coroutines.withContext(Dispatchers.Main) {
                             mediaSession.player.shuffleModeEnabled = true
@@ -951,13 +920,7 @@ class StashPlaybackService : MediaLibraryService() {
                             tappedTrackId = parsed.trackId,
                         )
                         if (plan.tracks.isNotEmpty()) {
-                            val items = plan.tracks.map { track ->
-                                MediaItem.Builder()
-                                    .setMediaId(track.id.toString())
-                                    .setUri(track.filePath ?: "")
-                                    .setMediaMetadata(track.toMediaMetadata())
-                                    .build()
-                            }
+                            val items = plan.tracks.map { it.toAutoMediaItem() }
                             // An explicit in-order tap means in-order playback;
                             // shuffle stays reachable via the Shuffle Play entry.
                             kotlinx.coroutines.withContext(Dispatchers.Main) {
@@ -985,6 +948,9 @@ class StashPlaybackService : MediaLibraryService() {
                 parentId.startsWith(PLAYLIST_PREFIX) ->
                     parentId.removePrefix(PLAYLIST_PREFIX).toLongOrNull()
                         ?.let { playlistDao.getTracksForPlaylist(it) }
+                        // Same predicate as onGetChildren so the queue built
+                        // from a tap matches the rows the car listed.
+                        ?.filter { it.isPlayableInAuto() }
                         ?: emptyList()
                 parentId == RECENTLY_ADDED_ID -> trackDao.getRecentlyAdded(20).first()
                 else -> emptyList()
@@ -1000,13 +966,10 @@ class StashPlaybackService : MediaLibraryService() {
                 if (mediaItems.size == 1 && mediaItems[0].mediaId.startsWith(SHUFFLE_PLAY_PREFIX)) {
                     val playlistId = mediaItems[0].mediaId.removePrefix(SHUFFLE_PLAY_PREFIX).toLongOrNull()
                     if (playlistId != null) {
-                        return@future playlistDao.getTracksForPlaylist(playlistId).map { track ->
-                            MediaItem.Builder()
-                                .setMediaId(track.id.toString())
-                                .setUri(track.filePath ?: "")
-                                .setMediaMetadata(track.toMediaMetadata())
-                                .build()
-                        }.shuffled()
+                        return@future playlistDao.getTracksForPlaylist(playlistId)
+                            .filter { it.isPlayableInAuto() }
+                            .map { it.toAutoMediaItem() }
+                            .shuffled()
                     }
                 }
                 mediaItems.map { item ->
@@ -1071,19 +1034,13 @@ class StashPlaybackService : MediaLibraryService() {
                             val track = trackDao.getById(trackId)
                             if (track != null) {
                                 return@future LibraryResult.ofItem(
-                                    MediaItem.Builder()
-                                        .setMediaId(
-                                            if (mediaId.startsWith(AutoBrowseQueue.PREFIX)) {
-                                                mediaId
-                                            } else {
-                                                track.id.toString()
-                                            },
-                                        )
-                                        .setUri(track.filePath ?: "")
-                                        .setMediaMetadata(
-                                            track.toMediaMetadata(),
-                                        )
-                                        .build(),
+                                    track.toAutoMediaItem(
+                                        mediaId = if (mediaId.startsWith(AutoBrowseQueue.PREFIX)) {
+                                            mediaId
+                                        } else {
+                                            track.id.toString()
+                                        },
+                                    ),
                                     null,
                                 )
                             }
@@ -1212,13 +1169,9 @@ class StashPlaybackService : MediaLibraryService() {
                     }
                     RECENTLY_ADDED_ID -> {
                         trackDao.getRecentlyAdded(20).first().map { track ->
-                            MediaItem.Builder()
-                                .setMediaId(AutoBrowseQueue.childMediaId(parentId, track.id))
-                                .setUri(track.filePath ?: "")
-                                .setMediaMetadata(
-                                    track.toMediaMetadata(),
-                                )
-                                .build()
+                            track.toAutoMediaItem(
+                                mediaId = AutoBrowseQueue.childMediaId(parentId, track.id),
+                            )
                         }
                     }
                     else -> {
@@ -1237,19 +1190,19 @@ class StashPlaybackService : MediaLibraryService() {
                                     )
                                     .build()
 
-                                // v0.9.37: include streamable tracks so stream-only Mix entries are
-                                // playable. Downloaded-only filter would silently drop them.
-                                // mediaId carries the parent playlist (AUTOQ_…) so a tap can
-                                // queue the WHOLE playlist, not a single item — #154/#173.
-                                val tracks = playlistDao.getTracksForPlaylist(playlistId).filter{track -> track.isDownloaded || track.isStreamable}.map { track ->
-                                    MediaItem.Builder()
-                                        .setMediaId(AutoBrowseQueue.childMediaId(parentId, track.id))
-                                        .setUri(track.filePath ?: "")
-                                        .setMediaMetadata(
-                                            track.toMediaMetadata(),
+                                // isPlayableInAuto, NOT the bare is_streamable flag —
+                                // synced rows are "never checked" (is_streamable=0,
+                                // checked_at=null) and the bare flag dropped ALL of
+                                // them: the "playlist opens empty in the car" bug.
+                                // mediaId carries the parent playlist (AUTOQ_…) so a tap
+                                // can queue the WHOLE playlist, not a single item — #154/#173.
+                                val tracks = playlistDao.getTracksForPlaylist(playlistId)
+                                    .filter { it.isPlayableInAuto() }
+                                    .map { track ->
+                                        track.toAutoMediaItem(
+                                            mediaId = AutoBrowseQueue.childMediaId(parentId, track.id),
                                         )
-                                        .build()
-                                }
+                                    }
                                 listOf(shuffleItem) + tracks
                             } else emptyList()
                         } else emptyList()
@@ -1285,15 +1238,7 @@ class StashPlaybackService : MediaLibraryService() {
                     .joinToString(" ") { "$it*" }
 
                 val tracks = trackDao.searchDownloaded(sanitized).first()
-                val items = tracks.map { track ->
-                    MediaItem.Builder()
-                        .setMediaId(track.id.toString())
-                        .setUri(track.filePath ?: "")
-                        .setMediaMetadata(
-                            track.toMediaMetadata(),
-                        )
-                        .build()
-                }
+                val items = tracks.map { it.toAutoMediaItem() }
                 LibraryResult.ofItemList(ImmutableList.copyOf(items), params)
             }
         }
@@ -1308,15 +1253,14 @@ class StashPlaybackService : MediaLibraryService() {
                 SessionCommand(COMMAND_CYCLE_REPEAT, /* extras = */ android.os.Bundle.EMPTY),
                 SessionCommand(COMMAND_TOGGLE_LIKE, /* extras = */ android.os.Bundle.EMPTY),
             )
-            val sessionCommands = MediaSession.ConnectionResult.DEFAULT_SESSION_COMMANDS.buildUpon()
+            // FULL library command set — not DEFAULT_SESSION_COMMANDS plus a
+            // hand-picked subset. The old hand-picked list omitted
+            // COMMAND_CODE_LIBRARY_GET_SEARCH_RESULT (Android Auto could
+            // *start* a search but was denied fetching the results — car
+            // search showed nothing) and COMMAND_CODE_LIBRARY_UNSUBSCRIBE.
+            val sessionCommands =
+                MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS.buildUpon()
             customCommands.forEach { sessionCommands.add(it) }
-
-            //Android auto commands
-            sessionCommands.add(SessionCommand.COMMAND_CODE_LIBRARY_GET_LIBRARY_ROOT)
-            sessionCommands.add(SessionCommand.COMMAND_CODE_LIBRARY_GET_CHILDREN)
-            sessionCommands.add(SessionCommand.COMMAND_CODE_LIBRARY_GET_ITEM)
-            sessionCommands.add(SessionCommand.COMMAND_CODE_LIBRARY_SUBSCRIBE)
-            sessionCommands.add(SessionCommand.COMMAND_CODE_LIBRARY_SEARCH)
 
             // Default availablePlayerCommands omits COMMAND_CHANGE_MEDIA_ITEMS,
             // which is what addMediaItem / removeMediaItem / moveMediaItem
@@ -1326,8 +1270,11 @@ class StashPlaybackService : MediaLibraryService() {
             // "Play Next" and "Add to Queue" appear broken when a queue
             // already existed.
             //
-            // Granting all commands is safe: this MediaSession is internal-
-            // only (no third-party controllers connect to it).
+            // NOTE: third-party controllers DO connect to this session —
+            // Android Auto (com.google.android.projection.gearhead) and
+            // Bluetooth/media-button dispatch are exactly that. Full player
+            // commands remain appropriate: everything they can invoke is a
+            // standard transport/queue op the app also exposes.
             val playerCommands = Player.Commands.Builder().addAllCommands().build()
 
             return MediaSession.ConnectionResult.AcceptedResultBuilder(session)
@@ -1405,39 +1352,21 @@ class StashPlaybackService : MediaLibraryService() {
         }
 
         /**
-         * Builds a resumable [MediaItem] from a DB row, mirroring the URI
-         * resolution in [resolveMediaItem]: downloaded tracks get a
-         * `file://` URI. When [streamUrl] is non-null (the current track was
-         * resolved via [ResumeStreamResolver] for online-mode resume), it is
-         * used as the playback URI. Otherwise a streaming-only row is left
-         * without a URI, which the player surfaces as an onPlayerError →
-         * skip-next recovery (see [resolveMediaItem]).
+         * Builds a resumable [MediaItem] from a DB row. When [streamUrl] is
+         * non-null (the current track was resolved via [ResumeStreamResolver]
+         * for online-mode resume), it is used as the playback URI directly.
+         * Everything else goes through [toAutoMediaItem]: downloaded rows get
+         * their `file://` URI, and stream rows get a `stash-resolve://`
+         * placeholder resolved just-in-time at play — instead of the old
+         * URI-less item that surfaced as an onPlayerError skip.
          */
         private fun buildResumeItem(track: TrackEntity, streamUrl: String? = null): MediaItem {
-            val builder = MediaItem.Builder()
-                .setMediaId(track.id.toString())
-                .setMediaMetadata(track.toMediaMetadata())
-            val localPath = track.filePath
-            when {
-                track.isDownloaded && !localPath.isNullOrBlank() -> {
-                    val uri = if (localPath.startsWith("/")) {
-                        "file://$localPath".toUri()
-                    } else {
-                        localPath.toUri()
-                    }
-                    builder.setUri(uri)
-                }
-                streamUrl != null -> builder.setUri(streamUrl.toUri())
-                !localPath.isNullOrBlank() -> {
-                    val uri = if (localPath.startsWith("/")) {
-                        "file://$localPath".toUri()
-                    } else {
-                        localPath.toUri()
-                    }
-                    builder.setUri(uri)
-                }
+            val item = track.toAutoMediaItem()
+            return if (streamUrl != null && !(track.isDownloaded && !track.filePath.isNullOrBlank())) {
+                item.buildUpon().setUri(streamUrl.toUri()).build()
+            } else {
+                item
             }
-            return builder.build()
         }
 
         @OptIn(UnstableApi::class)
