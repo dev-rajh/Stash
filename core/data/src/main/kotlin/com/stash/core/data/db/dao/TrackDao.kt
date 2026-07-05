@@ -818,12 +818,27 @@ interface TrackDao {
     /**
      * Stamps a single row's `lyrics_fetched_at` column. The lyrics fetch
      * paths pass the current wall clock on success (paired with
-     * [LyricsDao.upsert]) and `0L` when every source returned no usable
-     * lyrics (the confirmed-miss sentinel). Mirror of
+     * [LyricsDao.upsert]) and `0L` when every source returned a definitive
+     * "no lyrics" answer (the confirmed-miss sentinel). `null` clears the
+     * stamp back to never-tried — the Retry path uses this so the sheet
+     * visibly returns to Loading while the re-fetch runs. Mirror of
      * [setMetadataEmbeddedAt] semantics from v0.9.35.
      */
     @Query("UPDATE tracks SET lyrics_fetched_at = :ts WHERE id = :trackId")
-    suspend fun setLyricsFetchedAt(trackId: Long, ts: Long)
+    suspend fun setLyricsFetchedAt(trackId: Long, ts: Long?)
+
+    /**
+     * One-shot repair for miss-stamps written before v0.9.73: transient
+     * failures (timeouts, 429s, DNS drops during bulk post-download bursts)
+     * were conflated with genuine misses and stamped `0L` permanently —
+     * on-device forensics found ~72% of stamped misses had lyrics available.
+     * Resets every miss-stamp to NULL so each track re-fetches on its next
+     * sheet open; genuine misses simply re-stamp `0L` then. Gated to run
+     * once from [com.stash.app.StashApplication] — post-fix `0L` stamps are
+     * trustworthy and must not be wiped again.
+     */
+    @Query("UPDATE tracks SET lyrics_fetched_at = NULL WHERE lyrics_fetched_at = 0")
+    suspend fun resetMissedLyricsStamps(): Int
 
     /**
      * Observe a single row's `lyrics_fetched_at` stamp. The Now Playing lyrics

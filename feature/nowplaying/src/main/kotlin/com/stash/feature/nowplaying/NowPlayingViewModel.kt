@@ -20,6 +20,7 @@ import com.stash.feature.nowplaying.ui.lyricsViewStateFor
 import com.stash.feature.nowplaying.ui.lyricsViewStateForResult
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -116,6 +117,16 @@ class NowPlayingViewModel @Inject constructor(
     private val lyricsFetchInFlight: MutableSet<Long> = java.util.concurrent.ConcurrentHashMap.newKeySet()
 
     /**
+     * Library-track id whose most recent inline lyrics resolve FAILED
+     * (source threw — network/HTTP/parse), as opposed to missing. A failure
+     * leaves `lyrics_fetched_at` NULL (still retryable), which alone would
+     * render Loading forever; this overlay converts exactly that case to
+     * [LyricsViewState.Error] with a Retry CTA. Cleared on track change and
+     * at the start of every new fetch attempt.
+     */
+    private val _lyricsFetchFailedTrackId = MutableStateFlow<Long?>(null)
+
+    /**
      * Re-derives [LyricsViewState] from the currently-playing track and
      * the observed [com.stash.core.data.db.entity.LyricsEntity] row.
      *
@@ -135,7 +146,11 @@ class NowPlayingViewModel @Inject constructor(
         // Streaming-mode tracks all share id==0L; distinguish them by youtubeId so
         // a track change between two streamed Yeat songs still flips the upstream.
         .distinctUntilChanged { old, new -> trackKey(old) == trackKey(new) }
-        .onEach { _streamingLyricsState.value = null }   // reset transient state on track change
+        .onEach {
+            // reset transient state on track change
+            _streamingLyricsState.value = null
+            _lyricsFetchFailedTrackId.value = null
+        }
         .flatMapLatest { track ->
             when {
                 track == null -> flowOf(LyricsViewState.None)
@@ -148,8 +163,16 @@ class NowPlayingViewModel @Inject constructor(
                 track.id > 0L -> combine(
                     lyricsRepository.observe(track.id),
                     lyricsRepository.observeFetchedAt(track.id),
-                ) { row, fetchedAt ->
-                    lyricsViewStateFor(track.copy(lyricsFetchedAt = fetchedAt), row)
+                    _lyricsFetchFailedTrackId,
+                ) { row, fetchedAt, failedId ->
+                    // A NULL stamp normally means "fetch in flight" (Loading),
+                    // but when the inline fetch failed it stays NULL forever —
+                    // surface that as a retryable Error instead.
+                    if (fetchedAt == null && failedId == track.id) {
+                        LyricsViewState.Error(retryable = true)
+                    } else {
+                        lyricsViewStateFor(track.copy(lyricsFetchedAt = fetchedAt), row)
+                    }
                 }
                 // Streaming track (id == 0L). The transient flow is seeded by
                 // onShowLyrics -> fetchStreamingLyrics. Until then, null means
@@ -625,8 +648,9 @@ class NowPlayingViewModel @Inject constructor(
      * Streaming-track lyrics path. Hits the source chain via
      * [LyricsRepository.resolveTransient] (no Room write, no sidecar) and
      * pushes the resulting [LyricsViewState] into [_streamingLyricsState].
-     * Re-entrant: calling on Retry resets to Loading then runs the chain
-     * fresh.
+     * A source failure (throw) renders [LyricsViewState.Error] with Retry —
+     * distinct from a definitive miss (None). Re-entrant: calling on Retry
+     * resets to Loading then runs the chain fresh.
      */
     private fun fetchStreamingLyrics(track: Track) {
         _streamingLyricsState.value = LyricsViewState.Loading
@@ -640,8 +664,13 @@ class NowPlayingViewModel @Inject constructor(
                 durationMs = track.durationMs.takeIf { it > 0 },
                 youtubeVideoId = track.youtubeId,
             )
-            val result = runCatching { lyricsRepository.resolveTransient(query) }.getOrNull()
-            _streamingLyricsState.value = lyricsViewStateForResult(result)
+            _streamingLyricsState.value = try {
+                lyricsViewStateForResult(lyricsRepository.resolveTransient(query))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                LyricsViewState.Error(retryable = true)
+            }
         }
     }
 
@@ -662,15 +691,19 @@ class NowPlayingViewModel @Inject constructor(
      * the result by minutes. The [lyricsViewState] combine observes the row +
      * stamp and flips the sheet the moment this finishes.
      *
-     * Deduped per track so reopening doesn't stack duplicate resolves; [force]
-     * (Retry) bypasses the in-flight guard but a confirmed-miss stamp is cleared
-     * first so the combine returns to Loading while the retry runs.
+     * Deduped per track so reopening doesn't stack duplicate resolves. [force]
+     * (Retry) bypasses the in-flight guard and clears the confirmed-miss stamp
+     * FIRST so the combine visibly returns to Loading while the retry runs.
+     * A source failure sets [_lyricsFetchFailedTrackId] (stamp stays NULL) so
+     * the sheet renders a retryable Error instead of sticking on Loading.
      */
     private fun fetchLibraryLyrics(track: Track, force: Boolean = false) {
         if (!force && !lyricsFetchInFlight.add(track.id)) return
         if (force) lyricsFetchInFlight.add(track.id)
         viewModelScope.launch(Dispatchers.IO) {
             try {
+                _lyricsFetchFailedTrackId.value = null
+                if (force) lyricsRepository.clearFetchStamp(track.id)
                 val query = LyricsQuery(
                     trackId = track.id,
                     title = track.title,
@@ -680,7 +713,13 @@ class NowPlayingViewModel @Inject constructor(
                     durationMs = track.durationMs.takeIf { it > 0 },
                     youtubeVideoId = track.youtubeId,
                 )
-                runCatching { lyricsRepository.resolveAndStore(query) }
+                try {
+                    lyricsRepository.resolveAndStore(query)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    _lyricsFetchFailedTrackId.value = track.id
+                }
             } finally {
                 lyricsFetchInFlight.remove(track.id)
             }

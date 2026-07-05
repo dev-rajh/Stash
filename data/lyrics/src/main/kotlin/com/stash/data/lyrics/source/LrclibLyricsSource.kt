@@ -2,6 +2,7 @@ package com.stash.data.lyrics.source
 
 import com.stash.core.common.AppVersionProvider
 import com.stash.data.lyrics.di.LrclibBaseUrl
+import java.io.IOException
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -34,6 +35,14 @@ class LrclibLyricsSource @Inject constructor(
         .callTimeout(CALL_TIMEOUT_SECONDS, TimeUnit.SECONDS)
         .build()
 
+    /**
+     * Returns null ONLY on a definitive miss (LRCLIB answered and has no
+     * lyrics: get 404, empty search, or all candidates gate-rejected).
+     * Transport errors, non-404 HTTP statuses (429/5xx), and parse failures
+     * THROW instead — the repository must not confuse "couldn't ask" with
+     * "asked, no lyrics". Conflating the two permanently miss-stamped ~72%
+     * of the library's "No lyrics found" tracks (2026-07-05 forensics).
+     */
     override suspend fun resolve(query: LyricsQuery): LyricsResult? = withContext(Dispatchers.IO) {
         // One exact get (artist + title + duration, NO album), then a fuzzy search
         // fallback. We dropped the old 11-rung duration ladder: with lrclib at
@@ -55,11 +64,34 @@ class LrclibLyricsSource @Inject constructor(
             .addQueryParameter("duration", durationSec.toString())
             .build()
         val req = Request.Builder().url(url).header("User-Agent", userAgent()).get().build()
-        return runCatching {
-            client.newCall(req).execute().use { response ->
-                if (!response.isSuccessful) return@runCatching null
-                val body = response.body?.string() ?: return@runCatching null
-                val dto = JSON.decodeFromString<LrclibGetResponse>(body)
+        client.newCall(req).execute().use { response ->
+            // 404 is lrclib's documented "no such track" answer -> definitive miss.
+            if (response.code == HTTP_NOT_FOUND) return null
+            if (!response.isSuccessful) throw IOException("lrclib get HTTP ${response.code}")
+            val body = response.body?.string() ?: throw IOException("lrclib get empty body")
+            val dto = JSON.decodeFromString<LrclibGetResponse>(body)
+            return LyricsResult(
+                sourceId = id,
+                plainText = dto.plainLyrics,
+                syncedLrc = dto.syncedLyrics,
+                instrumental = dto.instrumental,
+                language = null,
+                sourceLyricsId = dto.id.toString(),
+            )
+        }
+    }
+
+    private fun trySearch(query: LyricsQuery): LyricsResult? {
+        val url = "${baseUrl.trimEnd('/')}/api/search".toHttpUrl().newBuilder()
+            .addQueryParameter("q", "${query.artist} ${query.title}")
+            .build()
+        val req = Request.Builder().url(url).header("User-Agent", userAgent()).get().build()
+        client.newCall(req).execute().use { response ->
+            if (!response.isSuccessful) throw IOException("lrclib search HTTP ${response.code}")
+            val body = response.body?.string() ?: throw IOException("lrclib search empty body")
+            val list = JSON.decodeFromString<List<LrclibGetResponse>>(body)
+            if (list.isEmpty()) return null
+            return pickBestSearchHit(query, list)?.let { dto ->
                 LyricsResult(
                     sourceId = id,
                     plainText = dto.plainLyrics,
@@ -69,32 +101,7 @@ class LrclibLyricsSource @Inject constructor(
                     sourceLyricsId = dto.id.toString(),
                 )
             }
-        }.getOrNull()
-    }
-
-    private fun trySearch(query: LyricsQuery): LyricsResult? {
-        val url = "${baseUrl.trimEnd('/')}/api/search".toHttpUrl().newBuilder()
-            .addQueryParameter("q", "${query.artist} ${query.title}")
-            .build()
-        val req = Request.Builder().url(url).header("User-Agent", userAgent()).get().build()
-        return runCatching {
-            client.newCall(req).execute().use { response ->
-                if (!response.isSuccessful) return@runCatching null
-                val body = response.body?.string() ?: return@runCatching null
-                val list = JSON.decodeFromString<List<LrclibGetResponse>>(body)
-                if (list.isEmpty()) return@runCatching null
-                pickBestSearchHit(query, list)?.let { dto ->
-                    LyricsResult(
-                        sourceId = id,
-                        plainText = dto.plainLyrics,
-                        syncedLrc = dto.syncedLyrics,
-                        instrumental = dto.instrumental,
-                        language = null,
-                        sourceLyricsId = dto.id.toString(),
-                    )
-                }
-            }
-        }.getOrNull()
+        }
     }
 
     private fun pickBestSearchHit(query: LyricsQuery, hits: List<LrclibGetResponse>): LrclibGetResponse? {
@@ -120,6 +127,8 @@ class LrclibLyricsSource @Inject constructor(
 
     companion object {
         const val DEFAULT_BASE_URL = "https://lrclib.net/"
+
+        private const val HTTP_NOT_FOUND = 404
 
         // Per-call ceiling. lrclib was observed at 4-14s/call; 20s bounds a true
         // hang without cutting a legitimately slow response.
