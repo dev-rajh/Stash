@@ -144,16 +144,29 @@ class LikeCoordinator internal constructor(
             _mirrorFailures.tryEmit("Couldn't sync your like — will retry")
         }
 
-        // Pacing: min gap between bursts; a 429's Retry-After stretches it.
+        // Pacing: min gap between bursts; a 429's Retry-After stretches it —
+        // but CAPPED. Spotify hands out absurd Retry-Afters (observed 86400s =
+        // 24h); obeying that verbatim froze the single drain loop — and every
+        // OTHER queued op, including YT — for a day. Cap at [MAX_BACKOFF_MS]:
+        // the failed op retries organically on the track's next heart anyway
+        // (dedup column left untouched), so there's nothing to gain by
+        // sleeping the whole queue past a short cooldown.
         val retryAfterMs = results.values
             .mapNotNull { (it.exceptionOrNull() as? SpotifyRateLimitException)?.retryAfterSeconds }
             .maxOrNull()
             ?.times(1_000L) ?: 0L
-        delay(maxOf(minGapMs, retryAfterMs))
+        delay(minOf(maxOf(minGapMs, retryAfterMs), MAX_BACKOFF_MS))
     }
 
     companion object {
         private const val TAG = "LikeCoordinator"
         private const val MIN_GAP_MS_DEFAULT = 1_500L
+
+        /**
+         * Ceiling on the post-op sleep, no matter how large a 429 Retry-After
+         * is. Keeps one rate-limited destination from stalling the whole
+         * mirror queue for hours; the op re-fires on the track's next heart.
+         */
+        private const val MAX_BACKOFF_MS = 5 * 60 * 1_000L
     }
 }
