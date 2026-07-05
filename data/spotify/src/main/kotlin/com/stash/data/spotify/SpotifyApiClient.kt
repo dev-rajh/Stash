@@ -31,8 +31,10 @@ import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.add
 import com.stash.core.model.SyncResult
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import java.net.URLEncoder
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -820,6 +822,140 @@ class SpotifyApiClient @Inject constructor(
         }
 
         return if (allTracks.isNotEmpty()) allTracks else null
+    }
+
+    // ── Library writes (heart button) — GraphQL mutations ───────────────
+
+    /**
+     * Saves [uris] to the user's library (the web player's `addToLibrary`
+     * mutation — the heart button). [uris] are full `spotify:track:…` URIs.
+     * Idempotent: re-saving an already-saved track succeeds.
+     *
+     * This replaced the deprecated + throttled `PUT /v1/me/tracks` REST call:
+     * Spotify removed that endpoint in Feb 2026 and hard-429s it for sp_dc
+     * tokens. This mutation is the real web player's path, on the same token
+     * the library reads already use.
+     */
+    suspend fun addToLibrary(uris: List<String>): SpotifyLibraryWriteResult =
+        mutateLibrary("addToLibrary", uris)
+
+    /** Removes [uris] from the user's library (`removeFromLibrary`, symmetric un-like). */
+    suspend fun removeFromLibrary(uris: List<String>): SpotifyLibraryWriteResult =
+        mutateLibrary("removeFromLibrary", uris)
+
+    /** Seeded hash, swapped for a re-scraped one after a PersistedQueryNotFound. */
+    @Volatile
+    private var libraryMutationHash: String = SpotifyAuthConfig.HASH_LIBRARY_MUTATION
+
+    private suspend fun mutateLibrary(
+        operationName: String,
+        uris: List<String>,
+    ): SpotifyLibraryWriteResult = withContext(Dispatchers.IO) {
+        if (uris.isEmpty()) return@withContext SpotifyLibraryWriteResult.Success
+
+        val accessToken = tokenManager.getSpotifyAccessToken()
+            ?: return@withContext SpotifyLibraryWriteResult.AuthFailed
+        val clientToken = ensureClientToken()
+            ?: return@withContext SpotifyLibraryWriteResult.Failed("no client token")
+
+        // First attempt with the current hash; on PersistedQueryNotFound
+        // (the hash rotated with a new web-player build) re-scrape and retry once.
+        val first = postLibraryMutation(operationName, uris, accessToken, clientToken, libraryMutationHash)
+        if (first !is PersistedQueryMissing) return@withContext first.result
+
+        Log.w(TAG, "mutateLibrary: PersistedQueryNotFound — re-scraping hash")
+        val fresh = spotifyAuthManager.scrapeLibraryMutationHash()
+            ?: return@withContext SpotifyLibraryWriteResult.Failed("persisted-query hash rotated; re-scrape failed")
+        libraryMutationHash = fresh
+        postLibraryMutation(operationName, uris, accessToken, clientToken, fresh).result
+    }
+
+    /** Wraps a mutation outcome so the caller can distinguish the retry-worthy
+     * PersistedQueryNotFound case from a terminal result. */
+    private sealed interface MutationOutcome {
+        val result: SpotifyLibraryWriteResult
+    }
+    private data class Terminal(override val result: SpotifyLibraryWriteResult) : MutationOutcome
+    private data object PersistedQueryMissing : MutationOutcome {
+        override val result = SpotifyLibraryWriteResult.Failed("persisted query not found")
+    }
+
+    private fun postLibraryMutation(
+        operationName: String,
+        uris: List<String>,
+        accessToken: String,
+        clientToken: String,
+        hash: String,
+    ): MutationOutcome {
+        val body = buildJsonObject {
+            put("variables", buildJsonObject {
+                putJsonArray(SpotifyAuthConfig.LIBRARY_MUTATION_URIS_VAR) {
+                    uris.forEach { add(it) }
+                }
+            })
+            put("operationName", operationName)
+            put("extensions", buildJsonObject {
+                put("persistedQuery", buildJsonObject {
+                    put("version", 1)
+                    put("sha256Hash", hash)
+                })
+            })
+        }.toString()
+
+        val request = Request.Builder()
+            .url(SpotifyAuthConfig.GRAPHQL_ENDPOINT)
+            .post(body.toRequestBody("application/json".toMediaType()))
+            .header("Authorization", "Bearer $accessToken")
+            .header("Client-Token", clientToken)
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/json")
+            .header("App-Platform", "WebPlayer")
+            .header("Spotify-App-Version", spotifyAuthManager.getClientVersion())
+            .header("Origin", "https://open.spotify.com")
+            .header("Referer", "https://open.spotify.com/")
+            .header("User-Agent",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+                    "(KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36")
+            .build()
+
+        return okHttpClient.newCall(request).execute().use { response ->
+            val respBody = response.body?.string().orEmpty()
+            when (response.code) {
+                429 -> Terminal(
+                    SpotifyLibraryWriteResult.RateLimited(
+                        response.header("Retry-After")?.toIntOrNull(),
+                    ),
+                )
+                401 -> {
+                    // Invalidate so the next op refreshes; caller retries organically.
+                    cachedClientToken = null
+                    Terminal(SpotifyLibraryWriteResult.AuthFailed)
+                }
+                in 200..299 -> {
+                    // Pathfinder returns 200 with a top-level `errors` array on
+                    // GraphQL failure — including PersistedQueryNotFound when the
+                    // hash has rotated.
+                    if (respBody.contains("PersistedQueryNotFound", ignoreCase = true)) {
+                        PersistedQueryMissing
+                    } else if (respBody.contains("\"errors\"")) {
+                        Terminal(SpotifyLibraryWriteResult.Failed("graphql errors: ${respBody.take(200)}"))
+                    } else {
+                        Terminal(SpotifyLibraryWriteResult.Success)
+                    }
+                }
+                400 -> {
+                    // 400 can also carry PersistedQueryNotFound.
+                    if (respBody.contains("PersistedQueryNotFound", ignoreCase = true)) {
+                        PersistedQueryMissing
+                    } else {
+                        Terminal(SpotifyLibraryWriteResult.Failed("http 400: ${respBody.take(200)}"))
+                    }
+                }
+                else -> Terminal(
+                    SpotifyLibraryWriteResult.Failed("http ${response.code}: ${respBody.take(200)}"),
+                )
+            }
+        }
     }
 
     // ── GraphQL execution ──────────────────────────────────────────────

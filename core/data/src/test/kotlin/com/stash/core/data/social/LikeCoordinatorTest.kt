@@ -148,6 +148,28 @@ class LikeCoordinatorTest {
         coVerify(exactly = 2) { dispatcher.like(any(), any()) }
     }
 
+    @Test fun `an absurd Retry-After is capped so the queue is not frozen`() = runTest {
+        // Spotify has handed out 86400s (24h). Obeying that verbatim froze the
+        // single drain loop — and every other queued op — for a day. The sleep
+        // is capped at 5 min; the next op must fire once the cap elapses.
+        mirrorPrefs(spotify = true, yt = false)
+        coEvery { trackDao.getById(any()) } answers { entity(id = firstArg()) }
+        coEvery { dispatcher.like(any(), any()) } returnsMany listOf(
+            mapOf(Destination.SPOTIFY to Result.failure(SpotifyRateLimitException(86_400))),
+            mapOf(Destination.SPOTIFY to Result.success(Unit)),
+        )
+        val c = coordinator(minGapMs = 1_500L)
+
+        c.setLiked(1L, liked = true)
+        c.setLiked(2L, liked = true)
+        runCurrent()
+        coVerify(exactly = 1) { dispatcher.like(any(), any()) }
+
+        // Well past the 5-min cap but nowhere near 24h.
+        advanceTimeBy(5 * 60 * 1_000L + 1_000L); runCurrent()
+        coVerify(exactly = 2) { dispatcher.like(any(), any()) }
+    }
+
     @Test fun `external failure emits at most one snackbar signal per session`() = runTest {
         mirrorPrefs(spotify = true, yt = false)
         coEvery { trackDao.getById(any()) } answers { entity(id = firstArg()) }
