@@ -93,6 +93,13 @@ is `SharingStarted.WhileSubscribed`, and its only collectors are the bar
 (route-scoped, inside NowPlayingScreen) and the sheet; the MiniPlayer never
 collects it, so its always-alive instance stays quiet.
 
+Concretely: NowPlayingScreen collects `lyricsViewState` **unconditionally at
+top level** (today the collect sits inside the sheet's `if (showLyrics)`
+block — it moves out), and the bar renders conditionally on the state. That
+unconditional collect is what keeps the trigger alive for screen-open. Since
+`stateIn` shares one upstream, the sheet subscribing on top of the bar adds
+no second trigger firing.
+
 With `onShowLyrics` no longer fetching, the subscription-gated trigger and
 Retry are the only fetch entry points, so `fetchStreamingLyrics`'s lack of
 in-flight dedupe (unlike `fetchLibraryLyrics`) cannot double-fire from the
