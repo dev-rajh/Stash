@@ -816,11 +816,12 @@ private fun PlaybackControls(
         }
 
         // Play / Pause — large gradient circle. While the track is still
-        // resolving/buffering (e.g. an ~11 s YouTube-fallback yt-dlp resolve),
-        // show a spinner in place of the icon so it doesn't look frozen.
+        // resolving/buffering, show a spinner in place of the icon so it
+        // doesn't look frozen — but the button STAYS enabled: a slow or hung
+        // stream resolve must never lock the user out of pausing (Media3's
+        // COMMAND_PLAY_PAUSE is valid during STATE_BUFFERING).
         IconButton(
             onClick = onPlayPauseClick,
-            enabled = !isBuffering,
             modifier = Modifier
                 .size(64.dp)
                 .background(

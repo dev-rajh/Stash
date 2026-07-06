@@ -300,6 +300,109 @@ class AggregatorRateLimiterTest {
         job.cancel()
     }
 
+    @Test
+    fun `arcod source ships a preconfigured conservative bucket`() = runTest {
+        // No configure() call — the "arcod" config is wired into the limiter's
+        // init block, so its tuned shape must be observable out of the box.
+        val limiter = AggregatorRateLimiter().apply { clock = virtualClock() }
+
+        // burstCapacity = 2.0 → exactly two immediate acquires, then exhausted.
+        assertTrue(limiter.acquire("arcod"))
+        assertTrue(limiter.acquire("arcod"))
+        val exhausted = limiter.stateOf("arcod")
+        assertTrue("expected <1.0 tokens, got ${exhausted.tokensAvailable}", exhausted.tokensAvailable < 1.0)
+        assertTrue("expected wait > 0, got ${exhausted.msUntilNextToken}", exhausted.msUntilNextToken > 0)
+
+        // tokensPerSecond = 0.5 → ~2s to earn the next token (not the
+        // 8s/token default), so after 2s a token is available again.
+        advanceTimeBy(2_100)
+        assertTrue(limiter.stateOf("arcod").tokensAvailable >= 1.0)
+    }
+
+    @Test
+    fun `arcod 429 applies the configured backoff`() = runTest {
+        val limiter = AggregatorRateLimiter().apply { clock = virtualClock() }
+        assertTrue(limiter.acquire("arcod"))
+        limiter.reportRateLimited("arcod")
+
+        // backoff429Ms = 60_000 → blocked immediately after a 429.
+        val blocked = limiter.stateOf("arcod")
+        assertTrue(blocked.isCircuitBroken || blocked.msUntilUnblock > 0)
+        assertFalse(limiter.acquire("arcod"))
+
+        // Recovers once the 60s backoff elapses.
+        advanceTimeBy(60_001)
+        assertTrue(limiter.acquire("arcod"))
+    }
+
+    @Test
+    fun `arcod 429s never trip the breaker - they are an hourly-cap slow-down`() = runTest {
+        // ARCOD's 429 means the operator's per-hour render cap is hit ("slow
+        // down"), NOT that the source is unhealthy — so arcod is configured with
+        // rateLimitTripsBreaker = false. A burst of 429s must apply backoff but
+        // must NOT open the breaker, otherwise ARCOD goes dark for the 10-min
+        // breaker window and every download/stream silently falls to yt-dlp
+        // (on-device regression 2026-06-16).
+        val limiter = AggregatorRateLimiter().apply { clock = virtualClock() }
+        repeat(10) {
+            limiter.reportRateLimited("arcod")
+            advanceTimeBy(60_001)
+        }
+        // Even after 10 rate-limits, the circuit stays closed; once the last 60s
+        // backoff elapses the source is immediately usable again.
+        assertFalse(
+            "arcod 429s must not open the breaker",
+            limiter.stateOf("arcod").isCircuitBroken,
+        )
+        assertTrue(limiter.acquire("arcod"))
+    }
+
+    @Test
+    fun `amz config is preconfigured with conservative burst and backoff`() = runTest {
+        val limiter = AggregatorRateLimiter().apply { clock = virtualClock() }
+
+        // burstCapacity is 2.0 — exactly two immediate acquires, then exhausted.
+        assertTrue(limiter.acquire("amz"))
+        assertTrue(limiter.acquire("amz"))
+        val state = limiter.stateOf("amz")
+        assertTrue("expected <1.0 tokens, got ${state.tokensAvailable}", state.tokensAvailable < 1.0)
+        assertTrue("expected wait > 0, got ${state.msUntilNextToken}", state.msUntilNextToken > 0)
+    }
+
+    @Test
+    fun `amz backs off for its configured 429 window`() = runTest {
+        val limiter = AggregatorRateLimiter().apply { clock = virtualClock() }
+        assertTrue(limiter.acquire("amz"))
+        limiter.reportRateLimited("amz")
+
+        // Blocked immediately after the 429.
+        assertFalse(limiter.acquire("amz"))
+
+        // Still blocked just before the 10s backoff window elapses.
+        advanceTimeBy(9_000)
+        assertFalse(limiter.acquire("amz"))
+
+        // Usable once the 10s backoff has fully elapsed.
+        advanceTimeBy(1_500)
+        assertTrue(limiter.acquire("amz"))
+    }
+
+    @Test
+    fun `amz circuit breaks after five consecutive failures`() = runTest {
+        val limiter = AggregatorRateLimiter().apply { clock = virtualClock() }
+        // Four failures — still operational.
+        repeat(4) { limiter.reportFailure("amz") }
+        assertTrue(limiter.acquire("amz"))
+
+        // Fifth failure trips the breaker (circuitBreakAfter = 5).
+        limiter.reportFailure("amz")
+        assertTrue(limiter.stateOf("amz").isCircuitBroken)
+
+        // Recovers after the configured 5-minute duration.
+        advanceTimeBy(5 * 60_000L + 1)
+        assertFalse(limiter.stateOf("amz").isCircuitBroken)
+    }
+
     private fun kotlinx.coroutines.test.TestScope.virtualClock(): AggregatorRateLimiter.Clock {
         // Read currentTime through the explicit `testScheduler` member so
         // we don't depend on the (extension-property) shortcut import,

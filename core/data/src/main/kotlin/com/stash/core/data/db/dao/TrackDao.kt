@@ -848,42 +848,27 @@ interface TrackDao {
     )
     fun observeTracksNeedingEmbedCount(): Flow<Int>
 
-    // ── Lyrics fetch backfill (v0.9.36) ─────────────────────────────────
+    // ── Lyrics fetch (v0.9.36) ──────────────────────────────────────────
 
     /**
-     * Stamps a single row's `lyrics_fetched_at` column. The
-     * `LyricsBackfillWorker` passes the current wall clock on
-     * success (paired with [LyricsDao.upsert]) and `0L` when both
-     * LRCLIB and the YT-Music fallback returned no usable lyrics.
-     * Both values remove the row from [getTracksNeedingLyrics]'s
-     * result set so the worker terminates. Mirror of
+     * Stamps a single row's `lyrics_fetched_at` column. The lyrics fetch
+     * paths pass the current wall clock on success (paired with
+     * [LyricsDao.upsert]) and `0L` when every source returned no usable
+     * lyrics (the confirmed-miss sentinel). Mirror of
      * [setMetadataEmbeddedAt] semantics from v0.9.35.
      */
     @Query("UPDATE tracks SET lyrics_fetched_at = :ts WHERE id = :trackId")
     suspend fun setLyricsFetchedAt(trackId: Long, ts: Long)
 
     /**
-     * Paginated scan of tracks whose lyrics fetch has never been
-     * attempted. Drives the `LyricsBackfillWorker`'s resumable batch
-     * loop. Ordered ASC on the primary key for a deterministic
-     * cursor.
-     *
-     * Note: unlike the metadata-embed query this does NOT require
-     * `is_downloaded = 1` — streamable-only tracks still benefit
-     * from sidecar lyrics so the bottom-sheet can display them.
+     * Observe a single row's `lyrics_fetched_at` stamp. The Now Playing lyrics
+     * sheet pairs this with [LyricsDao.observe] so it reflects a fetch completing
+     * live — null = never tried, 0L = tried+missed, non-zero = hit. Without this,
+     * the sheet derives Loading/None from a stale captured value and sticks on
+     * Loading until a close+reopen.
      */
-    @Query("SELECT * FROM tracks WHERE lyrics_fetched_at IS NULL ORDER BY id LIMIT :limit")
-    suspend fun getTracksNeedingLyrics(limit: Int): List<TrackEntity>
-
-    /**
-     * Reactive count of rows still awaiting a lyrics-fetch pass.
-     * Subscribed by the Home banner's `LyricsBackfillBannerState`
-     * so the "Fetching lyrics N…" affordance counts down as the
-     * worker drains the backlog and disappears when the count hits
-     * zero. Mirror of [observeTracksNeedingEmbedCount].
-     */
-    @Query("SELECT COUNT(*) FROM tracks WHERE lyrics_fetched_at IS NULL")
-    fun observeTracksNeedingLyricsCount(): Flow<Int>
+    @Query("SELECT lyrics_fetched_at FROM tracks WHERE id = :trackId")
+    fun observeLyricsFetchedAt(trackId: Long): kotlinx.coroutines.flow.Flow<Long?>
 
     // ── Release-downloads worker (Off→On "release space" path) ──────────
 
@@ -1356,6 +1341,16 @@ interface TrackDao {
     /** Set the YouTube video ID for a track so future syncs don't re-queue it. */
     @Query("UPDATE tracks SET youtube_id = :youtubeId WHERE id = :trackId")
     suspend fun updateYoutubeId(trackId: Long, youtubeId: String)
+
+    /**
+     * Set the Spotify URI for a track — used by the cross-platform like
+     * resolver to persist a match it found for a previously YouTube-only
+     * track, so the next heart dedups and the URI is cached. Can throw on the
+     * `spotify_uri` UNIQUE index if another row already owns it; callers wrap
+     * this best-effort (the resolved URI is still used for the like in-memory).
+     */
+    @Query("UPDATE tracks SET spotify_uri = :spotifyUri WHERE id = :trackId")
+    suspend fun updateSpotifyUri(trackId: Long, spotifyUri: String)
 
     /**
      * Backfill duration_ms when the existing row has 0 (no duration yet —

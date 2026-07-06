@@ -27,7 +27,6 @@ import com.stash.core.data.repository.MusicRepositoryImpl
 import com.stash.core.data.sync.SyncNotificationManager
 import com.stash.data.download.backfill.MetadataBackfillScheduler
 import com.stash.data.download.ytdlp.YtDlpManager
-import com.stash.data.lyrics.backfill.LyricsBackfillScheduler
 import com.stash.core.data.sync.workers.ArtBackfillWorker
 import com.stash.core.data.sync.workers.AutoSaveScrobbler
 import com.stash.core.data.sync.workers.DiscoveryDownloadWorker
@@ -128,6 +127,9 @@ class StashApplication : Application(), Configuration.Provider {
     @Inject
     lateinit var streamingPreference: com.stash.core.data.prefs.StreamingPreference
 
+    @Inject
+    lateinit var streamingQualityPreferences: com.stash.data.download.prefs.StreamingQualityPreferences
+
     /**
      * v0.9.17: eager-bound observer that enqueues [LosslessRetryWorker]
      * on cookie change / lastKnownBadCookie clear / circuit-breaker
@@ -181,15 +183,6 @@ class StashApplication : Application(), Configuration.Provider {
     @Inject
     lateinit var metadataBackfillScheduler: MetadataBackfillScheduler
 
-    /**
-     * v0.9.36: once-per-version auto-enqueue gate for `LyricsBackfillWorker`.
-     * Same idempotency contract as [metadataBackfillScheduler] — gated by a
-     * disjoint key on the shared `BackfillVersionTracker` so the two
-     * backfills fire independently on first launch after each upgrade.
-     */
-    @Inject
-    lateinit var lyricsBackfillScheduler: LyricsBackfillScheduler
-
     /** Application-scoped coroutine scope for one-shot startup tasks. */
     private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -230,13 +223,19 @@ class StashApplication : Application(), Configuration.Provider {
         ProcessLifecycleOwner.get().lifecycle.addObserver(
             object : DefaultLifecycleObserver {
                 override fun onStart(owner: LifecycleOwner) {
-                    squidCookieAutoRefresher.start()
-                    kennyyHealthProbe.start() // immediate probe sets Kennyy health before first play
+                    // PARKED 2026-07-01: kennyy + squid are out of the lossless
+                    // chain (hosts down for us — see
+                    // LosslessSourceRegistry.PARKED_SOURCE_IDS), so their
+                    // background keep-alives are parked too: no point probing
+                    // kennyy health or refreshing the squid captcha cookie for
+                    // sources nothing consults. Uncomment on re-enable.
+                    // squidCookieAutoRefresher.start()
+                    // kennyyHealthProbe.start()
                 }
 
                 override fun onStop(owner: LifecycleOwner) {
-                    squidCookieAutoRefresher.stop()
-                    kennyyHealthProbe.stop()
+                    // squidCookieAutoRefresher.stop()
+                    // kennyyHealthProbe.stop()
                 }
             },
         )
@@ -373,14 +372,15 @@ class StashApplication : Application(), Configuration.Provider {
         applicationScope.launch { maybeBackfillCodecsFromExtension() }
         applicationScope.launch { maybeBackfillTrackAlbums() }
         applicationScope.launch { maybePurgeAntraArtifacts() }
-        // Auto-enqueue the v0.9.35 metadata backfill once per version, plus
-        // the v0.9.36 lyrics backfill. Both are idempotent (re-installing
-        // the same binary does not re-enqueue) and gated by disjoint keys
-        // on the shared BackfillVersionTracker, so they fire independently
-        // on first launch after each upgrade.
+        // One-shot: seed the streaming Wi-Fi quality tier from the user's
+        // current download tier on first run, so existing users' streaming
+        // quality inherits their download choice instead of silently changing.
+        // migrateIfNeeded() is internally idempotent (no-op after first run).
+        applicationScope.launch { streamingQualityPreferences.migrateIfNeeded() }
+        // Auto-enqueue the v0.9.35 metadata backfill once per version.
+        // Idempotent (re-installing the same binary does not re-enqueue).
         applicationScope.launch {
             metadataBackfillScheduler.scheduleIfNeeded()
-            lyricsBackfillScheduler.scheduleIfNeeded()
         }
 
         // v0.9.30 Path A: AvailabilityCheckWorker + AvailabilityRecheckWorker

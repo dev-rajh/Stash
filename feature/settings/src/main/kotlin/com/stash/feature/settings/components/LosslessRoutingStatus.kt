@@ -26,41 +26,23 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 /**
- * v0.9.13 — ROUTING status block for the lossless source chain.
+ * ROUTING status block for the lossless source chain.
  *
- * Replaces the legacy "Connect to squid.wtf" CTA which falsely implied
- * lossless required a captcha to function. Reality: kenny carries
- * lossless without auth or captcha; squid is an optional second source
- * that the user can unlock via captcha. When squid is down, kenny
- * silently fills in.
+ * Shows the live chain: Direct Qobuz (primary) with amz.squid.wtf (Amazon
+ * Music) as an independent fallback for tracks Qobuz doesn't carry. The older
+ * kennyy.com.br / squid.wtf proxies are parked (hosts down for us) and are no
+ * longer advertised here.
  *
- * Visual is dublab-influenced: mono caps header, indented `↳` rows,
- * small status dots (filled = configured, outlined = optional). Solve
- * link inline on the squid row when no cookie is set.
+ * Visual: mono caps header, indented `↳` rows, small status dots.
  *
- * Honesty caveat: we don't have ping/health telemetry yet, so we never
- * claim "live" — we use "active" (= configured and reachable in the
- * resolver chain). v0.9.14 can add real-time health based on the
- * AggregatorRateLimiter / source-success cache.
+ * Honesty caveat: no ping/health telemetry yet, so we never claim "live" — we
+ * use "active" (= reachable in the resolver chain) and "fallback".
  */
 @Composable
 internal fun LosslessRoutingStatus(
-    squidStatus: SquidCaptchaStatus,
-    onSolveCaptcha: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val mono = FontFamily.Monospace
-    val (squidConfigured, squidLabel, showSolveLink) = when (squidStatus) {
-        SquidCaptchaStatus.NotConfigured ->
-            Triple(false, "optional", true)
-        SquidCaptchaStatus.Active ->
-            Triple(true, "active", false)
-        SquidCaptchaStatus.Expired ->
-            // Cookie present but server-rejected — keep the dot filled
-            // (user did set it up) but surface "expired" + the solver
-            // entry-point so they can re-verify in one tap.
-            Triple(true, "expired", true)
-    }
     Column(modifier = modifier.fillMaxWidth()) {
         Text(
             text = "ROUTING",
@@ -72,21 +54,22 @@ internal fun LosslessRoutingStatus(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Spacer(modifier = Modifier.height(4.dp))
+        // Direct Qobuz is the primary lossless source; amz.squid.wtf (Amazon
+        // Music) is an independent fallback for tracks Qobuz doesn't carry.
         RoutingRow(
-            host = "kennyy.com.br",
+            host = "Direct Qobuz",
             configured = true,
             statusLabel = "active",
         )
         RoutingRow(
-            host = "squid.wtf",
-            configured = squidConfigured,
-            statusLabel = squidLabel,
-            actionLabel = if (showSolveLink) "solve captcha →" else null,
-            onAction = if (showSolveLink) onSolveCaptcha else null,
+            host = "amz.squid.wtf",
+            configured = true,
+            statusLabel = "fallback",
         )
         Spacer(modifier = Modifier.height(6.dp))
         Text(
-            text = "Lossless works on any active source. Adding squid gives you a backup host.",
+            text = "Lossless streams from Direct Qobuz; amz.squid.wtf (Amazon Music) " +
+                "fills in when a track isn't on Qobuz.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

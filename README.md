@@ -5,9 +5,9 @@
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-purple.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Android%208.0%2B-purple)](#requirements)
 [![Release](https://img.shields.io/github/v/release/rawnaldclark/Stash?color=purple&include_prereleases)](https://github.com/rawnaldclark/Stash/releases)
-[![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/tbBSMd6dR)
+[![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/vcbjEby5PC)
 
-Stash mirrors your Spotify and YouTube Music libraries to your Android phone. You connect each service once, pick the playlists and mixes you actually want, and Stash either downloads them as real FLAC files for offline playback or surfaces them as a streaming index so you can play any track without filling up your storage. Same library, two modes, one tap to switch.
+Stash mirrors your Spotify and YouTube Music libraries to your Android phone. You connect each service, pick the playlists and mixes you want, and Stash either downloads them as real FLAC files for offline playback or surfaces them as a streaming index so you can stream tracks without filling up your storage. Same library, two modes, one tap to switch.
 
 There's no Stash account. No subscription. No ads. No analytics. Your credentials live on your phone, encrypted, and the only network traffic Stash makes is to Spotify and YouTube themselves.
 
@@ -22,39 +22,35 @@ There's no Stash account. No subscription. No ads. No analytics. Your credential
 
 Stash has two modes. They decide what a sync actually does.
 
-**Offline mode** is the default and the one most people want. Sync downloads each track as a FLAC file (or the closest lossless source available) and stores it on your phone. Once a track is on disk you can play it forever with no connection. It costs storage but no recurring data.
+**Offline mode** Sync downloads each track as a FLAC file (or the closest lossless source available) and stores it on your phone. Once a track is on disk you can play it forever with no connection. It costs storage but no recurring data.
 
-**Online mode** is for people who don't want the storage hit. Sync builds a local index of your library — every track from every synced playlist is visible and playable — but nothing lands on disk. Playback streams from YouTube on demand. Almost no storage, but you need a connection to play.
-
-The Sync tab has a toggle right above the sync button so you can flip modes without leaving the screen. Most people pick one and forget about it.
+**Online mode** is for people who don't want the storage hit. Builds a streamable local index of your library — Almost no storage, but you need a connection to play.
 
 ---
 
-## Features
+## The FLAC backbone
+
+- **[arcod](https://arcod.xyz)** — a third Qobuz source from yet another operator. Connect a free account once and it slots right into the chain.
+- **[amz.squid.wtf](https://amz.squid.wtf)** — Amazon Music lossless. Structurally independent of the Qobuz proxies, so it keeps your music in FLAC even when both of those are down instead of dropping you to a lossy YouTube rip.
+
+These are run by people doing it for the love of it — mostly solo, mostly free. They're the whole reason Stash can hand you a real lossless file instead of a re-encode. If Stash earns a spot on your phone, send a little of that their way: a thank-you, a tip, whatever you've got. We stand on their shoulders. 🙏
+
+---
 
 ### Library
 
 - **Spotify + YouTube Music in one unified library** — liked songs, playlists, daily mixes, every Spotify mix worth syncing
 - **Bulletproof matching** — finds the right version of a track 99% of the time
-- **Custom playlists** you build inside Stash, including ones that mix downloaded and streamed tracks
 - **Last.fm scrobbling**, optional, off by default
 - **Wrong-match flag** — if Stash picked the wrong version, tap once from Now Playing and it queues a re-search
-- **Failed Downloads viewer** — when a track really can't be matched or processed, it shows up here with one-tap retry, not as a silent miss
-
-### Sync
-
-- Per-playlist toggles for everything either service exposes: Daily Mixes 1–6, Release Radar, Discover Weekly, Daylist, Time Capsule, Repeat Rewind, On Repeat, Replay, Liked Songs. Don't want Daily Mix 3? Turn it off.
-- Refresh or Accumulate per source — replace the mix each sync, or stack new tracks on top of the old ones
-- Parallel downloads, eight at a time, running as a foreground service so the sync actually finishes with the screen off
-- Daily auto-sync on a schedule of your choosing, with a battery-aware "only on Wi-Fi" option
-- Auth-expired banner that catches a stale cookie before the sync wastes its time
+- **Likes and History mirroring** — When enabled, each track you like & stream in Stash lands in your Spotify & YouTube accounts.
 
 ### Playback
 
 - 5-band equalizer with presets, bass boost, virtualizer
+- Crossfader
+- Normalizer
 - Synced lyrics, pulled from LRCLIB and scrolled with the track
-- High-res album art, embedded into the file so third-party players see it
-- Background playback that actually keeps playing when the phone is locked
 
 ### Privacy
 
@@ -108,8 +104,8 @@ Stash doesn't use Spotify's or YouTube's official APIs, because the official API
 
 ### Option A — Sign in inside the app (easiest)
 
-1. Open Stash → **Settings** → tap **Spotify** under Accounts → tap **Connect**.
-2. A Spotify login page opens inside the app.
+1. Open Stash → **Settings** → tap **Spotify or YouTube** under Accounts → tap **Connect**.
+2. Spotify & YouTube login page opens inside the app.
 3. Sign in with your email/password, Google, Apple, or Facebook — whatever you normally use.
 4. Stash extracts the cookie automatically once login succeeds. Done.
 
@@ -156,7 +152,7 @@ Stash will start pulling your YouTube Music daily mixes, discover mix, replay mi
 
 ### After setup
 
-Open the Sync tab. Before you tap Sync Now, expand the **Spotify Sync Preferences** card and pick the playlists and mixes you actually want — each playlist has its own toggle. For mixes, decide between **Refresh** mode (each sync replaces the mix's contents, cleaning up old tracks) and **Accumulate** mode (each sync stacks new tracks on top of what's there). Refresh is the default and is probably what you want.
+Open the Sync tab. Before you tap Sync Now, expand the **Spotify Sync Preferences** card and pick the playlists and mixes you actually want — each playlist has its own toggle. For mixes, decide between **Refresh** mode (each sync replaces the mix's contents, cleaning up old tracks) and **Accumulate** mode (each sync stacks new tracks on top of what's there)
 
 The first sync is the slow one — a thousand-song library takes about an hour in Offline mode because every track has to download. After that, scheduled syncs just pick up whatever's new and run quietly in the background.
 
@@ -181,7 +177,7 @@ That isn't a workaround. It's a principled choice: open-source tools that give u
 
 ## Community
 
-Bug reports and feature requests through [GitHub Issues](https://github.com/rawnaldclark/Stash/issues). For everything else — questions, requests, "is this thing on" — the [Stash Discord](https://discord.gg/tbBSMd6dR) is the place. Active dev there, fast answers.
+Bug reports and feature requests through [GitHub Issues](https://github.com/rawnaldclark/Stash/issues). For everything else — questions, requests, "is this thing on" — the [Stash Discord](https://discord.gg/vcbjEby5PC) is the place. Active dev there, fast answers.
 
 ---
 

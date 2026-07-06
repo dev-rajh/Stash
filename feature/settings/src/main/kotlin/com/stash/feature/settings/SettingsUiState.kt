@@ -65,6 +65,26 @@ data class SettingsUiState(
      */
     val losslessQualityTier: LosslessQualityTier = LosslessQualityTier.HI_RES,
     /**
+     * Streaming lossless tier requested while on Wi-Fi. Distinct from the
+     * download tier ([losslessQualityTier]); backed by
+     * [com.stash.data.download.prefs.StreamingQualityPreferences.wifiTier].
+     * Defaults to HI_RES (full quality on unmetered transport).
+     */
+    val streamingWifiTier: LosslessQualityTier = LosslessQualityTier.HI_RES,
+    /**
+     * Streaming lossless tier requested while on cellular. Defaults to CD —
+     * the data-saving floor — so metered streaming stays light unless the
+     * user opts up. Backed by
+     * [com.stash.data.download.prefs.StreamingQualityPreferences.cellularTier].
+     */
+    val streamingCellularTier: LosslessQualityTier = LosslessQualityTier.CD,
+    /**
+     * Master "Save Data" override for streaming. When true, callers force
+     * CD on every network regardless of the per-transport tiers. Backed by
+     * [com.stash.data.download.prefs.StreamingQualityPreferences.saveData].
+     */
+    val streamingSaveData: Boolean = false,
+    /**
      * Manually-pasted `captcha_verified_at` cookie value from
      * `qobuz.squid.wtf`. Bridges the captcha gate when the user
      * prefers manual paste over the in-app WebView solver — they
@@ -86,6 +106,12 @@ data class SettingsUiState(
      * solver from the user. See `squidCaptchaStatus` mapping fn.
      */
     val squidCaptchaStatus: SquidCaptchaStatus = SquidCaptchaStatus.NotConfigured,
+    /**
+     * True when an ARCOD (arcod.xyz) Supabase session is stored — i.e. the
+     * user has connected ARCOD as a third independent lossless source.
+     * Drives the "Connect ARCOD" row's label.
+     */
+    val arcodConnected: Boolean = false,
     val totalStorageBytes: Long = 0,
     val totalTracks: Int = 0,
     val showYouTubeCookieDialog: Boolean = false,

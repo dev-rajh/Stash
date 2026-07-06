@@ -101,6 +101,54 @@ class AggregatorRateLimiter @Inject constructor() {
             circuitBreakAfter = 5,
             circuitBreakDurationMs = 30 * 60_000L, // 30 min
         )
+
+        // ARCOD (Qobuz-DL proxy via arcod.xyz) runs one operator-paid Qobuz
+        // account behind a Supabase-gated job queue, with a per-account ~50
+        // downloads/hour cap. Stay deliberately conservative: 1 token / 2s,
+        // burst 2. CRITICAL: ARCOD's 429 = "you hit the hourly cap, slow down"
+        // — that's NORMAL operation against a quota, NOT a health failure. So
+        // `rateLimitTripsBreaker = false`: a 429 applies the backoff but must
+        // NOT trip the breaker. (Tripping it disabled ARCOD for 10 min on a
+        // real sync, so every track fell through to yt-dlp — verified on-device
+        // 2026-06-16.) Only genuine failures (5xx/network via reportFailure)
+        // trip the breaker.
+        configs["arcod"] = Config(
+            tokensPerSecond = 1.0 / 2.0,   // 1 token / 2 seconds
+            burstCapacity = 2.0,
+            backoff429Ms = 60_000L,        // 1 min pause on 429 (cap hit)
+            circuitBreakAfter = 5,
+            circuitBreakDurationMs = 10 * 60_000L, // 10 min
+            rateLimitTripsBreaker = false,
+        )
+
+        // amz.squid.wtf (Amazon Music proxy) — structurally one paid account
+        // serving everyone, same DDoS-risk economics as the Qobuz proxies, so
+        // deliberately conservative: ~1 request / 2s, tiny burst. A 429 means
+        // real over-rate (it counts toward the breaker, default
+        // rateLimitTripsBreaker=true), so 5 failures cool the source for 5 min.
+        configs["amz"] = Config(
+            tokensPerSecond = 1.0 / 2.0,   // ~1 request / 2s
+            burstCapacity = 2.0,
+            backoff429Ms = 10_000L,        // 10s pause on 429
+            circuitBreakAfter = 5,
+            circuitBreakDurationMs = 5 * 60_000L, // 5 min
+        )
+
+        // qbdlx (direct www.qobuz.com on shared real accounts + rotating token
+        // pool). Slowest of the lossless sources: it hits Qobuz directly with
+        // signed requests on accounts whose abuse heuristics we must not trip,
+        // so 1 token / 3s, burst 2. CRITICAL: a Qobuz 429 = "slow down", NOT a
+        // health failure, so `rateLimitTripsBreaker = false` (a 429 applies the
+        // 1-min backoff but must not trip the breaker). Genuine failures
+        // (5xx/network via reportFailure) still cool the source for 10 min.
+        configs["qbdlx_qobuz"] = Config(
+            tokensPerSecond = 1.0 / 3.0,   // slow — direct-to-Qobuz on shared real accounts
+            burstCapacity = 2.0,
+            backoff429Ms = 60_000L,
+            circuitBreakAfter = 5,
+            circuitBreakDurationMs = 10 * 60_000L,
+            rateLimitTripsBreaker = false, // a Qobuz 429 = "slow down", not "broken"
+        )
     }
 
     companion object {
