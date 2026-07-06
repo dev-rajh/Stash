@@ -4,115 +4,42 @@
 
 **Goal:** Tapping the track title/artist on the full Now Playing screen resolves the playing artist's name to a YouTube Music browseId and opens the existing Artist Profile, scrolled to and highlighting the currently-playing album.
 
-**Architecture:** The playing `Track` has only name strings (no artist/album browseId), so a tap runs an artist-filtered InnerTube search (`YTMusicApiClient.resolveArtist`) to get the browseId, then navigates to the existing `SearchArtistRoute`/`ArtistProfileScreen`. A new optional `focusAlbum` nav arg drives a two-axis scroll (outer `LazyColumn` to the Albums/Singles section, inner `LazyRow` to the card) plus a brief highlight. All pure logic (primary-artist token extraction, album-focus matching) is unit-tested; the Compose scroll/highlight glue and the tap wiring are verified on-device.
+**Architecture:** The playing `Track` has only name strings (no artist/album browseId), so a tap runs an artist-filtered InnerTube search (`YTMusicApiClient.resolveArtist`) to get the browseId, then navigates to the existing `SearchArtistRoute`/`ArtistProfileScreen`. The artist name passed in is `albumArtist` (the clean album-level credit) with a fallback to `artist`, sent **raw** — YT Music's own fuzzy search resolves multi-artist and band-name credits correctly (verified live: "Tyler, the Creator", "Simon & Garfunkel", "Calvin Harris feat. Rihanna" all resolve to the right artist), so no fragile client-side name-splitting is done. A new optional `focusAlbum` nav arg drives a two-axis scroll (outer `LazyColumn` to the Albums/Singles section, inner `LazyRow` to the card) plus a brief highlight. All pure logic (album-focus matching) is unit-tested; the Compose scroll/highlight glue and the tap wiring are verified on-device.
 
-**Tech Stack:** Kotlin, Jetpack Compose, Hilt, Coroutines/Flow, Mockito-Kotlin + Turbine + Robolectric (tests), Gradle multi-module.
+**Tech Stack:** Kotlin, Jetpack Compose, Hilt, Coroutines/Flow. Tests: `:data:ytmusic` uses **Mockito-Kotlin** (`mock`/`whenever`); `:feature:nowplaying` and `:feature:search` use **MockK** (`mockk`/`coEvery`/`coVerify`) + Turbine + Robolectric. Gradle multi-module.
 
 **Spec:** `docs/superpowers/specs/2026-07-06-nowplaying-tap-to-artist-profile-design.md`
 
 **Reference skills:** @superpowers:test-driven-development, @superpowers:verification-before-completion
+
+**Known v1 behavior:** For a track with a blank `albumArtist` and a comma-joined `artist` like "Drake, 21 Savage", YT's search may return the featured artist rather than the lead. That still opens a relevant artist the user is hearing (never a crash or wrong-domain result). `albumArtist`, when present, already carries the clean lead credit, so this only affects legacy rows without it. Accepted for v1.
 
 ---
 
 ## File Structure
 
 **Create:**
-- `data/ytmusic/src/test/kotlin/com/stash/data/ytmusic/PrimaryArtistNameTest.kt` — token-extraction unit tests.
 - `data/ytmusic/src/test/kotlin/com/stash/data/ytmusic/ResolveArtistTest.kt` — `resolveArtist` parser-contract tests.
 - `data/ytmusic/src/test/resources/fixtures/search_artists_filter.json` — synthetic artists-shelf fixture.
+- `feature/search/src/main/kotlin/com/stash/feature/search/AlbumFocus.kt` — album-focus matcher.
 - `feature/search/src/test/kotlin/com/stash/feature/search/AlbumFocusTest.kt` — focus-match unit tests.
 
 **Modify:**
-- `data/ytmusic/.../YTMusicApiClient.kt` — add `ARTISTS_FILTER`, `resolveArtist(name)`, top-level `primaryArtistName(credit)`.
+- `data/ytmusic/.../YTMusicApiClient.kt` — add `ARTISTS_FILTER`, `resolveArtist(name)`.
 - `app/.../navigation/TopLevelDestination.kt` — add `focusAlbum` to `SearchArtistRoute`.
-- `app/.../navigation/StashNavHost.kt` — thread `focusAlbum` through the `SearchArtistRoute` composable; give `NowPlayingRoute` an `onNavigateToArtist`.
+- `app/.../navigation/StashNavHost.kt` — thread `focusAlbum`; give `NowPlayingRoute` an `onNavigateToArtist`.
 - `feature/nowplaying/build.gradle.kts` — add `implementation(project(":data:ytmusic"))`.
 - `feature/nowplaying/.../NowPlayingViewModel.kt` — inject `YTMusicApiClient`; add `resolvingArtist` state, `artistNavEvents`, `onTrackInfoTapped()`.
 - `feature/nowplaying/.../NowPlayingScreen.kt` — clickable track block + chevron + spinner; collect `artistNavEvents`; new `onNavigateToArtist` param.
-- `feature/nowplaying/.../NowPlayingViewModelTest.kt` — tap-behavior tests.
+- `feature/nowplaying/.../NowPlayingViewModelTest.kt` — new tap tests + update existing VM factories for the new ctor arg.
 - `feature/search/.../ArtistProfileUiState.kt` — add `focusAlbum: String?`.
 - `feature/search/.../ArtistProfileViewModel.kt` — read `focusAlbum` from `SavedStateHandle` into state.
 - `feature/search/.../ArtistProfileScreen.kt` — hoist outer `LazyListState`; drive two-axis scroll.
-- `feature/search/.../AlbumsRow.kt` and `SinglesRow.kt` — accept `focusTitle` + hoisted `LazyListState`; highlight the matched card.
+- `feature/search/.../AlbumsRow.kt` and `SinglesRow.kt` — accept `focusIndex`; highlight the matched card.
 
 ---
 
-## Task 1: `primaryArtistName` helper
-
-Pure function that reduces a track's artist credit to the primary artist for resolving.
-
-**Files:**
-- Modify: `data/ytmusic/src/main/kotlin/com/stash/data/ytmusic/YTMusicApiClient.kt`
-- Test: `data/ytmusic/src/test/kotlin/com/stash/data/ytmusic/PrimaryArtistNameTest.kt`
-
-- [ ] **Step 1: Write the failing test**
-
-```kotlin
-package com.stash.data.ytmusic
-
-import org.junit.Assert.assertEquals
-import org.junit.Test
-
-class PrimaryArtistNameTest {
-    @Test fun `single artist unchanged`() =
-        assertEquals("My Bloody Valentine", primaryArtistName("My Bloody Valentine"))
-
-    @Test fun `comma-joined credit takes first`() =
-        assertEquals("Drake", primaryArtistName("Drake, 21 Savage"))
-
-    @Test fun `feat credit takes lead`() =
-        assertEquals("Calvin Harris", primaryArtistName("Calvin Harris feat. Rihanna"))
-
-    @Test fun `ampersand credit takes first`() =
-        assertEquals("Simon", primaryArtistName("Simon & Garfunkel"))
-
-    @Test fun `trims whitespace`() =
-        assertEquals("Air", primaryArtistName("  Air  "))
-
-    @Test fun `blank stays blank`() =
-        assertEquals("", primaryArtistName("   "))
-}
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `./gradlew :data:ytmusic:testDebugUnitTest --tests "com.stash.data.ytmusic.PrimaryArtistNameTest"`
-Expected: FAIL — `primaryArtistName` unresolved reference.
-
-- [ ] **Step 3: Write minimal implementation**
-
-Add near the top-level of `YTMusicApiClient.kt` (outside the class, file-scope `internal`):
-
-```kotlin
-/**
- * Reduces an artist credit string to its primary artist for name→browseId
- * resolution. Splits on the first credit separator (comma, "feat"/"ft",
- * ampersand) and trims. "Simon & Garfunkel" → "Simon"; "Drake, 21 Savage"
- * → "Drake"; a plain single name is returned unchanged.
- */
-internal fun primaryArtistName(credit: String): String =
-    credit
-        .split(",", " feat", " feat.", " ft", " ft.", " & ", " x ", ignoreCase = true, limit = 2)
-        .first()
-        .trim()
-```
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `./gradlew :data:ytmusic:testDebugUnitTest --tests "com.stash.data.ytmusic.PrimaryArtistNameTest"`
-Expected: PASS (6 tests).
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add data/ytmusic/src/main/kotlin/com/stash/data/ytmusic/YTMusicApiClient.kt \
-        data/ytmusic/src/test/kotlin/com/stash/data/ytmusic/PrimaryArtistNameTest.kt
-git commit -m "feat(ytmusic): primaryArtistName credit-reduction helper"
-```
-
----
-
-## Task 2: `resolveArtist(name)` on YTMusicApiClient
+## Task 1: `resolveArtist(name)` on YTMusicApiClient
 
 Artist-filtered search → top `ArtistSummary` (browseId + name + avatar), or null.
 
@@ -121,7 +48,7 @@ Artist-filtered search → top `ArtistSummary` (browseId + name + avatar), or nu
 - Create: `data/ytmusic/src/test/resources/fixtures/search_artists_filter.json`
 - Test: `data/ytmusic/src/test/kotlin/com/stash/data/ytmusic/ResolveArtistTest.kt`
 
-**Context:** `InnerTubeClient.search(query, params)` exists. The verified live artists-filter param (returns the clean `musicShelfRenderer` "Artists" shelf, top row = Official Artist Channel) is `EgWKAQIgAWoKEAkQChAFEAMQBA%3D%3D`. Parsing reuses the existing `parseArtistsShelf(shelfRenderer): List<ArtistSummary>` in `SearchResponseParser.kt`, which already extracts the `UC…` browseId. Tests mock `InnerTubeClient` (see `YTMusicApiClientTest.fakeClient`) — note `resolveArtist` calls the two-arg `search`, so stub `search(any(), any())`.
+**Context:** `InnerTubeClient.search(query, params)` exists. The verified live artists-filter param (returns the clean `musicShelfRenderer` "Artists" shelf, top row = Official Artist Channel) is `EgWKAQIgAWoKEAkQChAFEAMQBA%3D%3D`. Parsing reuses the existing `parseArtistsShelf(shelfRenderer): List<ArtistSummary>` in `SearchResponseParser.kt`, which already extracts the `UC…` browseId. The JSON navigation helpers (`navigatePath`, `asArray`, `firstArray`, `asObject`) are the same ones `searchAll` uses. Tests mock `InnerTubeClient` like `YTMusicApiClientTest.fakeClient` — note `resolveArtist` calls the two-arg `search`, so stub `search(any(), any())`.
 
 - [ ] **Step 1: Create the fixture** `data/ytmusic/src/test/resources/fixtures/search_artists_filter.json`
 
@@ -157,6 +84,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Test
 import org.mockito.kotlin.any
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.whenever
@@ -189,6 +117,11 @@ class ResolveArtistTest {
         val client = fakeClient(null)
         assertNull(client.resolveArtist("nobody"))
     }
+
+    @Test fun `resolveArtist returns null for blank name`() = runTest {
+        val client = fakeClient(null)
+        assertNull(client.resolveArtist("   "))
+    }
 }
 ```
 
@@ -217,11 +150,13 @@ Add the method to the class body (near `searchAll`):
 /**
  * Resolve an artist name to its YouTube Music browse identity. Runs an
  * artists-filtered search and returns the top [ArtistSummary] (browseId,
- * name, avatar), or null when there is no artist result / on failure.
+ * name, avatar), or null when the name is blank / there is no artist result
+ * / on failure.
  *
  * Used by the Now Playing "tap track → artist profile" flow, where the
  * playing [com.stash.core.model.Track] carries only an artist NAME, not a
- * browseId. Parsing reuses [parseArtistsShelf].
+ * browseId. The name is passed raw (YT search handles multi-artist and
+ * band-name credits); parsing reuses [parseArtistsShelf].
  */
 suspend fun resolveArtist(name: String): ArtistSummary? {
     if (name.isBlank()) return null
@@ -246,7 +181,7 @@ Add the import if missing: `import com.stash.data.ytmusic.model.ArtistSummary`.
 - [ ] **Step 5: Run test to verify it passes**
 
 Run: `./gradlew :data:ytmusic:testDebugUnitTest --tests "com.stash.data.ytmusic.ResolveArtistTest"`
-Expected: PASS (3 tests).
+Expected: PASS (4 tests).
 
 - [ ] **Step 6: Commit**
 
@@ -259,7 +194,7 @@ git commit -m "feat(ytmusic): resolveArtist name→browseId via artists-filter s
 
 ---
 
-## Task 3: `focusAlbum` nav arg + NowPlaying route callback
+## Task 2: `focusAlbum` nav arg + NowPlaying route callback
 
 Extend the nav route and wire the new navigation edge (no behavior yet — the ViewModel/screen changes come next).
 
@@ -283,9 +218,9 @@ data class SearchArtistRoute(
 
 (Optional with default → all existing call sites compile unchanged.)
 
-- [ ] **Step 2: Thread `focusAlbum` in the `SearchArtistRoute` composable**
+- [ ] **Step 2: Leave the `SearchArtistRoute` composable's self-nav as-is**
 
-In `StashNavHost.kt`, the `composable<SearchArtistRoute>` block already builds `SearchArtistRoute(id, name, avatar)` for self-navigation on `onNavigateToArtist` — leave that as-is (related-artist taps have no focus album; the default null applies).
+In `StashNavHost.kt`, the `composable<SearchArtistRoute>` block builds `SearchArtistRoute(id, name, avatar)` for related-artist self-navigation — leave it (related-artist taps carry no focus album; the default null applies).
 
 - [ ] **Step 3: Give `NowPlayingRoute` an `onNavigateToArtist`**
 
@@ -300,7 +235,7 @@ NowPlayingScreen(
 )
 ```
 
-(This will not compile until Task 5 adds the `onNavigateToArtist` param to `NowPlayingScreen`. That's expected — Tasks 4-5 complete the wiring. Do NOT build at the end of this task; commit the nav-layer change and proceed.)
+(This will not compile until Task 4 adds the `onNavigateToArtist` param to `NowPlayingScreen`. That's expected — Tasks 3-4 complete the wiring. Do NOT build at the end of this task; commit the nav-layer change and proceed.)
 
 - [ ] **Step 4: Commit**
 
@@ -312,7 +247,7 @@ git commit -m "feat(nav): focusAlbum arg on SearchArtistRoute + NowPlaying onNav
 
 ---
 
-## Task 4: `NowPlayingViewModel.onTrackInfoTapped`
+## Task 3: `NowPlayingViewModel.onTrackInfoTapped`
 
 Resolve on tap; emit a one-shot nav event; guard against double-tap; toast on failure.
 
@@ -321,7 +256,7 @@ Resolve on tap; emit a one-shot nav event; guard against double-tap; toast on fa
 - Modify: `feature/nowplaying/src/main/kotlin/com/stash/feature/nowplaying/NowPlayingViewModel.kt`
 - Test: `feature/nowplaying/src/test/kotlin/com/stash/feature/nowplaying/NowPlayingViewModelTest.kt`
 
-**Context:** The VM already has `viewModelScope`, `_userMessages` (SharedFlow), and `uiState.currentTrack`. `YTMusicApiClient` is `@Singleton`/Hilt-injectable. The existing test constructs the VM with fakes/mocks — mirror it and add a mocked `YTMusicApiClient`.
+**Context:** The VM already has `viewModelScope`, `_userMessages` (SharedFlow), `uiState.currentTrack`, and imports `CancellationException`. `YTMusicApiClient` is `@Singleton`/Hilt-injectable. The test file has THREE test classes; two build the VM through a private `newViewModel()` factory that passes all six current constructor args by name — a new required 7th arg breaks their compile unless updated (Step 2 below).
 
 - [ ] **Step 1: Add the module dependency**
 
@@ -331,9 +266,19 @@ In `feature/nowplaying/build.gradle.kts`, add to the `dependencies { }` block (n
 implementation(project(":data:ytmusic"))
 ```
 
-- [ ] **Step 2: Write the failing test**
+- [ ] **Step 2: Update existing test factories for the new ctor arg**
 
-Add to `NowPlayingViewModelTest.kt` (mirror the file's existing VM construction; add a `YTMusicApiClient` mock). Use Turbine for the event flow:
+In `NowPlayingViewModelTest.kt`, find every place the VM is constructed (the `newViewModel()` factories in the existing test classes) and add the new argument so the module keeps compiling:
+
+```kotlin
+ytMusicApiClient = mockk(relaxed = true),
+```
+
+(Ensure `import io.mockk.mockk` is present — it is used elsewhere in the file.)
+
+- [ ] **Step 3: Write the failing tests**
+
+Add a test class (or extend an existing one) mirroring the file's VM construction; add a `YTMusicApiClient` mock. Use Turbine for the event flow:
 
 ```kotlin
 @Test
@@ -373,14 +318,14 @@ fun `onTrackInfoTapped is a no-op when nothing is playing`() = runTest {
 }
 ```
 
-Notes for the implementer: add `buildViewModel(api = ..., track = ...)` and `trackOf(...)` helpers if the test file lacks them (follow the existing construction). Imports: `app.cash.turbine.test`, `io.mockk.*`, `com.stash.data.ytmusic.YTMusicApiClient`, `com.stash.data.ytmusic.model.ArtistSummary`.
+Notes for the implementer: add small `buildViewModel(api = ..., track = ...)` and `trackOf(...)` helpers if the file lacks them (follow the existing construction; seed `currentTrack` via the same fake `PlayerRepository`/state path the other tests use). Imports: `app.cash.turbine.test`, `io.mockk.*`, `com.stash.data.ytmusic.YTMusicApiClient`, `com.stash.data.ytmusic.model.ArtistSummary`.
 
-- [ ] **Step 3: Run test to verify it fails**
+- [ ] **Step 4: Run tests to verify they fail**
 
 Run: `./gradlew :feature:nowplaying:testDebugUnitTest --tests "com.stash.feature.nowplaying.NowPlayingViewModelTest"`
 Expected: FAIL — `resolveArtist`/`onTrackInfoTapped`/`artistNavEvents` unresolved.
 
-- [ ] **Step 4: Write minimal implementation**
+- [ ] **Step 5: Write minimal implementation**
 
 Add the injected dependency to the constructor:
 
@@ -388,7 +333,7 @@ Add the injected dependency to the constructor:
 private val ytMusicApiClient: com.stash.data.ytmusic.YTMusicApiClient,
 ```
 
-Add the nav-target type (top-level in the VM file) and the event flow + state:
+Add the nav-target type (top-level in the VM file):
 
 ```kotlin
 /** One-shot target for navigating from Now Playing to an artist profile. */
@@ -412,15 +357,14 @@ val resolvingArtist: StateFlow<Boolean> = _resolvingArtist.asStateFlow()
 /**
  * Tap on the Now Playing track block. Resolves the playing artist's NAME to
  * a YT browseId and emits an [ArtistNavTarget] carrying the current album as
- * `focusAlbum`. No-op when nothing is playing or a resolve is already in
- * flight (double-tap guard). Resolve miss/failure → snackbar, no nav.
+ * `focusAlbum`. Prefers the clean `albumArtist`, falling back to `artist`.
+ * No-op when nothing is playing or a resolve is already in flight (double-tap
+ * guard). Resolve miss/failure → snackbar, no nav.
  */
 fun onTrackInfoTapped() {
     val track = _uiState.value.currentTrack ?: return
     if (_resolvingArtist.value) return
-    val name = com.stash.data.ytmusic.primaryArtistName(
-        track.albumArtist.ifBlank { track.artist },
-    )
+    val name = track.albumArtist.ifBlank { track.artist }
     if (name.isBlank()) {
         viewModelScope.launch { _userMessages.emit("Couldn't find this artist") }
         return
@@ -454,12 +398,12 @@ fun onTrackInfoTapped() {
 
 Ensure imports exist: `MutableStateFlow`, `StateFlow`, `asStateFlow`, `MutableSharedFlow`, `SharedFlow`, `asSharedFlow`, `CancellationException` (most are already imported in the file).
 
-- [ ] **Step 5: Run test to verify it passes**
+- [ ] **Step 6: Run tests to verify they pass**
 
 Run: `./gradlew :feature:nowplaying:testDebugUnitTest --tests "com.stash.feature.nowplaying.NowPlayingViewModelTest"`
 Expected: PASS (existing tests + 3 new).
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add feature/nowplaying/build.gradle.kts \
@@ -470,14 +414,14 @@ git commit -m "feat(nowplaying): onTrackInfoTapped resolves artist + emits nav e
 
 ---
 
-## Task 5: NowPlayingScreen — clickable track block + nav wiring
+## Task 4: NowPlayingScreen — clickable track block + nav wiring
 
-Make the title/artist block tappable (with chevron + resolving spinner), collect the nav event, expose `onNavigateToArtist`. Completes the compile started in Task 3.
+Make the title/artist block tappable (with chevron + resolving spinner), collect the nav event, expose `onNavigateToArtist`. Completes the compile started in Task 2.
 
 **Files:**
 - Modify: `feature/nowplaying/src/main/kotlin/com/stash/feature/nowplaying/NowPlayingScreen.kt:87-338`
 
-**No unit test** (Compose UI + navigation glue) — verified on-device in Task 8.
+**No unit test** (Compose UI + navigation glue) — verified on-device in Task 7.
 
 - [ ] **Step 1: Add the `onNavigateToArtist` param**
 
@@ -490,7 +434,7 @@ fun NowPlayingScreen(
 ) {
 ```
 
-- [ ] **Step 2: Collect the nav event**
+- [ ] **Step 2: Collect the nav event + resolving state**
 
 Near the other `LaunchedEffect`/collectors at the top of the composable body:
 
@@ -505,7 +449,7 @@ val resolvingArtist by viewModel.resolvingArtist.collectAsStateWithLifecycle()
 
 - [ ] **Step 3: Make the track-info block clickable + chevron**
 
-Wrap the "-- Track info --" `Row` and the artist/album `Text` (lines ~292-338) so the tap target covers title + subtitle. Add a `Column` wrapper with a click, gated on a non-null track:
+Wrap the "-- Track info --" `Row` and the artist/album `Text` (lines ~292-338) in a `Column` with a click gated on a non-null track. Keep the existing children verbatim inside the new `Column`:
 
 ```kotlin
 Column(
@@ -518,20 +462,20 @@ Column(
             } else Modifier,
         ),
 ) {
-    // existing title Row + FlacBadge, Spacer, artist/album Text go here unchanged
-    // Append a trailing chevron next to the title Row when track != null:
-    //   Icon(Icons.Default.ChevronRight, contentDescription = "Open artist",
-    //        tint = Color.White.copy(alpha = 0.6f), modifier = Modifier.size(18.dp))
-    // and, when resolvingArtist, swap it for a 16dp CircularProgressIndicator.
+    // existing title Row + FlacBadge, Spacer, artist/album Text go here unchanged.
+    // Append a trailing affordance next to the title Row when track != null:
+    //   if (resolvingArtist) CircularProgressIndicator(Modifier.size(16.dp), color = Color.White)
+    //   else Icon(Icons.Default.ChevronRight, contentDescription = "Open artist",
+    //             tint = Color.White.copy(alpha = 0.6f), modifier = Modifier.size(18.dp))
 }
 ```
 
-Keep the existing children verbatim inside the new `Column`. Add imports: `androidx.compose.foundation.clickable`, `androidx.compose.material.icons.Icons`, `androidx.compose.material.icons.filled.ChevronRight`, `androidx.compose.material3.Icon`, `androidx.compose.material3.CircularProgressIndicator`, `androidx.compose.foundation.layout.Column`.
+Add imports: `androidx.compose.foundation.clickable`, `androidx.compose.material.icons.Icons`, `androidx.compose.material.icons.filled.ChevronRight`, `androidx.compose.material3.Icon`, `androidx.compose.material3.CircularProgressIndicator`, `androidx.compose.foundation.layout.Column`.
 
-- [ ] **Step 4: Build the module to verify it compiles**
+- [ ] **Step 4: Build the modules to verify they compile**
 
 Run: `./gradlew :feature:nowplaying:compileDebugKotlin :app:compileDebugKotlin`
-Expected: BUILD SUCCESSFUL (Task 3's nav call now resolves).
+Expected: BUILD SUCCESSFUL (Task 2's nav call now resolves).
 
 - [ ] **Step 5: Commit**
 
@@ -542,7 +486,7 @@ git commit -m "feat(nowplaying): tappable track block navigates to artist profil
 
 ---
 
-## Task 6: Album-focus matching + `ArtistProfileViewModel` reads `focusAlbum`
+## Task 5: Album-focus matching + `ArtistProfileViewModel` reads `focusAlbum`
 
 Pure matcher (which shelf + index a `focusAlbum` resolves to) and plumb `focusAlbum` into the profile UI state.
 
@@ -635,13 +579,13 @@ In `ArtistProfileUiState.kt`, add a field (default null) to the data class:
 val focusAlbum: String? = null,
 ```
 
-In `ArtistProfileViewModel.kt`, read the nav arg alongside the existing ones:
+In `ArtistProfileViewModel.kt`, read the nav arg alongside the existing ones (mirroring `initialName`/`initialAvatar`):
 
 ```kotlin
 private val initialFocusAlbum: String? = savedStateHandle["focusAlbum"]
 ```
 
-Seed it into the initial `_uiState` (`ArtistProfileUiState(hero = ..., status = ..., focusAlbum = initialFocusAlbum)`), and preserve it in `apply(...)` by adding `focusAlbum = initialFocusAlbum` to the `_uiState.value.copy(...)` (or rely on `copy` keeping the existing value — set it explicitly in the seed and do NOT overwrite it in `apply`).
+Seed it into the initial `_uiState` value (`ArtistProfileUiState(hero = ..., status = ..., focusAlbum = initialFocusAlbum)`). Since `apply(...)` rebuilds state via `_uiState.value.copy(...)`, `focusAlbum` is preserved automatically — do NOT overwrite it in `apply`.
 
 - [ ] **Step 6: Run the search module tests + compile**
 
@@ -660,7 +604,7 @@ git commit -m "feat(search): album-focus matcher + focusAlbum in ArtistProfile s
 
 ---
 
-## Task 7: Two-axis scroll + highlight on the Artist Profile
+## Task 6: Two-axis scroll + highlight on the Artist Profile
 
 Hoist the outer `LazyColumn` state, scroll to the matched section, scroll the row to the card, and flash a highlight ring.
 
@@ -669,11 +613,11 @@ Hoist the outer `LazyColumn` state, scroll to the matched section, scroll the ro
 - Modify: `feature/search/src/main/kotlin/com/stash/feature/search/AlbumsRow.kt`
 - Modify: `feature/search/src/main/kotlin/com/stash/feature/search/SinglesRow.kt`
 
-**No unit test** (Compose scroll/animation) — verified on-device in Task 8. The matching logic it depends on is already tested (Task 6).
+**No unit test** (Compose scroll/animation) — verified on-device in Task 7. The matching logic it depends on is already tested (Task 5).
 
 - [ ] **Step 1: Hoist the outer `LazyColumn` state + compute the section item index**
 
-In `ArtistProfileScreen`, create `val listState = rememberLazyListState()` and pass `state = listState` to the `LazyColumn`. Because sections are emitted conditionally, compute the target outer index from presence flags (the fixed section order is: hero=0; then Popular header+row if `popular` non-empty; then Albums header+row; then Singles header+row):
+In `ArtistProfileScreen`, create `val listState = rememberLazyListState()` and pass `state = listState` to the `LazyColumn`. Because sections are emitted conditionally, compute the target outer index from presence flags (fixed section order: hero=0; then Popular header+row if `popular` non-empty; then Albums header+row; then Singles header+row):
 
 ```kotlin
 val focus = remember(state.focusAlbum, state.albums, state.singles) {
@@ -700,13 +644,15 @@ LaunchedEffect(sectionOuterIndex, state.status) {
 }
 ```
 
+Imports for `ArtistProfileScreen`: `androidx.compose.foundation.lazy.rememberLazyListState`, `androidx.compose.runtime.getValue`, `androidx.compose.runtime.setValue`, `androidx.compose.runtime.mutableStateOf`, `androidx.compose.runtime.remember`, `androidx.compose.runtime.saveable.rememberSaveable` (some already present). `findAlbumFocus`, `AlbumShelf`, `AlbumFocusTarget` are same-package (no import).
+
 - [ ] **Step 2: Pass the focus into the matching row**
 
-In `contentSections(...)`, add a `focus: AlbumFocusTarget?` parameter and forward it. For `AlbumsRow`, pass `focusIndex = focus?.takeIf { it.shelf == AlbumShelf.ALBUMS }?.index`; for `SinglesRow`, pass `focusIndex = focus?.takeIf { it.shelf == AlbumShelf.SINGLES }?.index`. Thread `focus` from `ArtistProfileScreen` into both `contentSections(...)` call sites.
+In `contentSections(...)`, add a `focus: AlbumFocusTarget?` parameter. For the `AlbumsRow` call, pass `focusIndex = focus?.takeIf { it.shelf == AlbumShelf.ALBUMS }?.index`; for the `SinglesRow` call, pass `focusIndex = focus?.takeIf { it.shelf == AlbumShelf.SINGLES }?.index`. Thread `focus` from `ArtistProfileScreen` into both `contentSections(...)` call sites (the Loading-with-popular branch and the Fresh/Stale branch).
 
 - [ ] **Step 3: Row-level scroll + highlight in `AlbumsRow`; forward from `SinglesRow`**
 
-`SinglesRow` delegates to `AlbumsRow` (it has no `LazyRow` of its own), so the scroll/highlight logic lives ONCE in `AlbumsRow`. Add a `focusIndex: Int? = null` param to `SinglesRow` and pass it straight through:
+`SinglesRow` delegates to `AlbumsRow` (it has no `LazyRow` of its own), so the scroll/highlight logic lives ONCE in `AlbumsRow`. Add a `focusIndex: Int? = null` param to `SinglesRow` and pass it through:
 
 ```kotlin
 @Composable
@@ -764,7 +710,7 @@ fun AlbumsRow(
 }
 ```
 
-Imports to add: `androidx.compose.foundation.lazy.rememberLazyListState`, `androidx.compose.foundation.lazy.itemsIndexed`, `androidx.compose.foundation.border`, `androidx.compose.foundation.shape.RoundedCornerShape`, `androidx.compose.material3.MaterialTheme`, `androidx.compose.runtime.*`.
+Imports to add to `AlbumsRow.kt`: `androidx.compose.foundation.lazy.rememberLazyListState`, `androidx.compose.foundation.lazy.itemsIndexed`, `androidx.compose.foundation.border`, `androidx.compose.foundation.shape.RoundedCornerShape`, `androidx.compose.material3.MaterialTheme`, `androidx.compose.runtime.getValue`, `androidx.compose.runtime.setValue`, `androidx.compose.runtime.mutableStateOf`, `androidx.compose.runtime.remember`, `androidx.compose.runtime.LaunchedEffect`. (Remove the now-unused `androidx.compose.foundation.lazy.items` import.)
 
 - [ ] **Step 4: Compile the module**
 
@@ -782,7 +728,7 @@ git commit -m "feat(search): scroll to + highlight the focused album on artist p
 
 ---
 
-## Task 8: Full build, install, device verification
+## Task 7: Full build, install, device verification
 
 Assemble the app, install on the connected device, and drive the real flow.
 
@@ -815,6 +761,6 @@ Paste the test summary + `installDebug` result + a one-line note of each device 
 
 ## Done criteria
 
-- All new unit tests green (`primaryArtistName`, `resolveArtist`, `onTrackInfoTapped` ×3, `findAlbumFocus` ×4).
+- All new unit tests green (`resolveArtist` ×4, `onTrackInfoTapped` ×3, `findAlbumFocus` ×4) and existing module tests still green.
 - App installs; tapping the Now Playing track opens the correct artist profile; the playing album is scrolled-to + highlighted when present; failures toast without crashing.
 - Work is on `feat/nowplaying-tap-to-artist`; merge handled by the finishing-a-development-branch skill after user sign-off.
