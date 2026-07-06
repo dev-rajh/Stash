@@ -99,6 +99,13 @@ fun LibraryHealthScreen(
 
         QualityInfoRefreshSection(onClick = viewModel::runQualityInfoBackfill)
 
+        Spacer(Modifier.height(20.dp))
+
+        RelinkSection(
+            status = state.relink,
+            onRunScan = viewModel::runRelinkScan,
+        )
+
         Spacer(Modifier.height(40.dp))
     }
 }
@@ -334,6 +341,88 @@ private fun QualityInfoRefreshSection(onClick: () -> Unit) {
                 },
             ) {
                 Text("Refresh")
+            }
+        }
+    }
+}
+
+@Composable
+private fun RelinkSection(
+    status: RelinkStatus,
+    onRunScan: () -> Unit,
+) {
+    SectionHeader(title = "Replaced files")
+    GlassCard {
+        Column(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
+            Text(
+                text = "Relink upgraded files",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = "Swapped a downloaded track for a better version yourself — e.g. " +
+                    "replaced an M4A with a FLAC of the same name in the same folder? " +
+                    "This finds those files and updates the library with the new path, " +
+                    "format, and quality.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(12.dp))
+            when (status) {
+                RelinkStatus.Idle -> {
+                    Button(onClick = onRunScan) {
+                        Text("Scan for replacements")
+                    }
+                }
+                is RelinkStatus.Running -> {
+                    Text(
+                        text = if (status.total == 0) "Scanning…"
+                        else "Scanning… ${status.processed} / ${status.total}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    if (status.total == 0) {
+                        // Indeterminate until the candidate count is known.
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    } else {
+                        LinearProgressIndicator(
+                            progress = { status.processed.toFloat() / status.total.coerceAtLeast(1).toFloat() },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                }
+                is RelinkStatus.Done -> {
+                    Text(
+                        text = if (status.scanned == 0) {
+                            "No missing files found — everything in your library is where " +
+                                "Stash expects it."
+                        } else {
+                            "Relinked ${status.relinked} of ${status.scanned} missing " +
+                                "track(s) to a replacement file."
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    // Temporary "what changed" list so the user can see which
+                    // files got updated. It's part of the transient Done state,
+                    // so it clears on the next scan or when the screen is left.
+                    if (status.relinkedNames.isNotEmpty()) {
+                        Spacer(Modifier.height(8.dp))
+                        status.relinkedNames.forEach { name ->
+                            Text(
+                                text = "• $name",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Button(onClick = onRunScan) {
+                        Text("Scan again")
+                    }
+                }
             }
         }
     }
