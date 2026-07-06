@@ -1,5 +1,8 @@
 package com.stash.app.navigation
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.consumeWindowInsets
@@ -105,13 +108,23 @@ fun StashScaffold(
             // content extends full-height behind that action bar.
             if (!selectionActive) {
                 Column(modifier = Modifier.windowInsetsPadding(WindowInsets.navigationBars)) {
-                    MiniPlayer(
-                        onExpand = {
-                            navController.navigate(NowPlayingRoute) {
-                                launchSingleTop = true
-                            }
-                        },
-                    )
+                    // On Now Playing the LiveLyricsBar (rendered inside the
+                    // screen itself) takes the MiniPlayer's spot — the full
+                    // player already shows all transport controls, so the
+                    // duplicate mini transport hides on this route only.
+                    AnimatedVisibility(
+                        visible = currentRoute != NowPlayingRoute::class.qualifiedName,
+                        enter = fadeIn(),
+                        exit = fadeOut(),
+                    ) {
+                        MiniPlayer(
+                            onExpand = {
+                                navController.navigate(NowPlayingRoute) {
+                                    launchSingleTop = true
+                                }
+                            },
+                        )
+                    }
 
                     StashBottomBar(
                         currentRoute = currentRoute,
