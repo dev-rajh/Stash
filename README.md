@@ -32,12 +32,6 @@ The Sync tab has a toggle right above the sync button so you can flip modes with
 
 ## The FLAC backbone
 
-Honest truth: Stash doesn't run a single lossless server of its own. The FLAC comes from a handful of independent proxies that do the genuinely hard part — pulling real lossless files straight from Qobuz and Amazon Music — and Stash just matches your tracks against them and grabs the file. No these guys, no FLAC. Simple as that.
-
-When you sync or stream in lossless, Stash works down the list and takes the first one with a clean match:
-
-- **[squid.wtf](https://qobuz.squid.wtf)** — Qobuz lossless, built on the open-source [Qobuz-DL](https://github.com/QobuzDL/Qobuz-DL). The one that started it all.
-- **[kennyy](https://qobuz.kennyy.com.br)** — a second Qobuz proxy from a different operator, so when one's having a rough day the other usually picks up the slack.
 - **[arcod](https://arcod.xyz)** — a third Qobuz source from yet another operator. Connect a free account once and it slots right into the chain.
 - **[amz.squid.wtf](https://amz.squid.wtf)** — Amazon Music lossless. Structurally independent of the Qobuz proxies, so it keeps your music in FLAC even when both of those are down instead of dropping you to a lossy YouTube rip.
 
