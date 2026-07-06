@@ -69,11 +69,28 @@ NowPlayingScreen (track text block, now clickable)
 ### 4.1 `YTMusicApiClient.resolveArtist(name): ArtistSummary?`
 
 New method, mirrors the existing `searchCanonical` pattern. Issues a
-`search(name, params = <artists filter>)` and returns the **top** artist row as
+`search(name, params = ARTISTS_FILTER)` and returns the **top** artist row as
 an `ArtistSummary(id, name, avatarUrl)` (existing model), or `null` if there is
-no artist result. The artists filter param (like the existing `songsFilterParams`)
-forces the clean `musicShelfRenderer` shape, sidestepping the flat
-`itemSectionRenderer` variant that ambiguous queries return.
+no artist result. Parsing reuses the existing `parseArtistsShelf(): List<ArtistSummary>`
+(it already extracts the `UC…` browseId from `navigationEndpoint.browseEndpoint
+.browseId`) — take `.firstOrNull()`.
+
+The artists filter param (a new sibling constant to the existing
+`songsFilterParams` in `InnerTubeClient`) forces the clean `musicShelfRenderer`
+"Artists" shelf shape, sidestepping the flat `itemSectionRenderer` variant that
+ambiguous queries otherwise return (where no artist shelf parses at all). The
+exact value is **verified against the live InnerTube API** for the ambiguous
+query "my bloody valentine":
+
+```
+ARTISTS_FILTER = "EgWKAQIgAWoKEAkQChAFEAMQBA%3D%3D"
+```
+
+It returned an `Artists` shelf whose top row was the correct Official Artist
+Channel (`UCuoGeza7Dl9Ni_hmeLTPdkg`, pageType `MUSIC_PAGE_TYPE_ARTIST`). This is
+the route to take — do **not** fall back to the unfiltered `searchAll` "Artists"
+path, which returns the flat shape and yields nothing for exactly the ambiguous
+names this feature most needs to handle.
 
 - **Primary-artist selection:** resolve on `track.albumArtist.ifBlank { primary }`
   where `primary = track.artist.substringBefore(",").substringBefore(" feat").trim()`.
@@ -112,13 +129,27 @@ already has. `YTMusicApiClient` is `@Singleton`/Hilt-injectable.
   unchanged).
 - `ArtistProfileViewModel` reads it from `SavedStateHandle` and exposes it in
   UI state (or straight to the screen).
-- `ArtistProfileScreen` gives its Albums `LazyRow` a `rememberLazyListState()`.
-  On the first profile emission that has albums, if a card's normalized title
-  equals the normalized `focusAlbum`, it `animateScrollToItem(index)` and applies
-  a brief highlight (e.g. accent ring for ~1.5s). Normalization = lowercase +
-  trim + collapse whitespace (handles "m b v" vs "M B V").
-- **Best-effort:** no match, blank `focusAlbum`, or empty albums → land on the
-  profile top, no scroll, no highlight. Never an error.
+- **Match against both shelves.** A playing track's `album` may be a full
+  album *or* a single/EP, which render in two different rows (`AlbumsRow` and
+  `SinglesRow`). The match therefore searches **Albums first, then Singles/EPs**
+  for a card whose normalized title equals the normalized `focusAlbum`.
+  Normalization = lowercase + trim + collapse internal whitespace (handles
+  "m b v" vs "M B V").
+- **Two-axis scroll so the card is actually visible.** The matched card lives in
+  a horizontal `LazyRow` that itself sits inside the screen's outer vertical
+  `LazyColumn`, below the hero + Popular. Scrolling only the `LazyRow` would
+  animate a card the user can't see (it's below the fold). So on a match:
+  1. the screen's **outer `LazyColumn` state is hoisted** and
+     `animateScrollToItem` brings the matched *section* (Albums or Singles) onto
+     screen, then
+  2. the matched **row's `LazyRow` state** `animateScrollToItem`s the card into
+     the rail, and
+  3. the card gets a brief highlight (accent ring, ~1.5s).
+- Runs once, on the first profile emission that has a non-empty catalog
+  (guard with a `focusHandled` flag so a Stale→Fresh refresh doesn't re-scroll).
+- **Best-effort:** no match, blank `focusAlbum`, empty catalog, or the album
+  missing from YT's catalog (e.g. Loveless) → land on the profile top, no
+  scroll, no highlight. Never an error.
 
 ## 5. Error handling & edge cases
 
@@ -130,6 +161,7 @@ already has. `YTMusicApiClient` is `@Singleton`/Hilt-injectable.
 | `resolveArtist` throws (network) | Toast; stay on screen. Reuses existing snackbar/toast host. |
 | Resolve slow | Inline spinner on the block; block disabled until it resolves. |
 | Double-tap during resolve | Second tap ignored. |
+| Album is actually a single/EP | Matched in the Singles/EPs shelf instead of Albums; same scroll + highlight. |
 | Album not on the profile (e.g. Loveless, missing on YT) | Profile opens; no scroll/highlight. (The discography-gap spec addresses the missing album separately.) |
 | Wrong artist for a shared name | Accepted risk for v1; upgrade path is the videoId reverse-lookup. |
 
@@ -145,7 +177,10 @@ already has. `YTMusicApiClient` is `@Singleton`/Hilt-injectable.
   `userMessages` toast and no nav event; null track is a no-op; second tap while
   resolving is ignored.
 - **Album normalization/match (unit):** normalized-equality matcher used by the
-  scroll ("m b v" == "M B V"; trims; case-insensitive).
+  scroll ("m b v" == "M B V"; trims; collapses internal whitespace;
+  case-insensitive). Given a `focusAlbum` plus an albums list and a singles list,
+  the resolver returns the right `(shelf, index)` — album hit, single/EP hit,
+  and no-match-anywhere.
 
 ## 7. Out of scope (v1)
 
