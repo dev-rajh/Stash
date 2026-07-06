@@ -3,6 +3,8 @@ package com.stash.feature.nowplaying.ui
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -74,6 +76,8 @@ fun GlowingProgressBar(
 ) {
     var isDragging by remember { mutableStateOf(false) }
     var dragProgress by remember { mutableFloatStateOf(progress) }
+    // Left time label: false = elapsed (default), true = remaining (-m:ss).
+    var showRemaining by remember { mutableStateOf(false) }
 
     // Smoothly animate progress when not dragging to avoid jitter.
     val displayProgress by animateFloatAsState(
@@ -178,13 +182,24 @@ fun GlowingProgressBar(
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             val displayMs = if (isDragging) (dragProgress * totalMs).roundToLong() else elapsedMs
+            // Left label toggles between elapsed and remaining (-m:ss) on tap.
+            // Right label is always the song's full length.
+            val interactionSource = remember { MutableInteractionSource() }
             Text(
-                text = formatTime(displayMs),
+                text = if (showRemaining) {
+                    "-${formatTime((totalMs - displayMs).coerceAtLeast(0L))}"
+                } else {
+                    formatTime(displayMs)
+                },
                 style = MaterialTheme.typography.labelSmall,
                 color = Color.White.copy(alpha = 0.7f),
+                modifier = Modifier.clickable(
+                    interactionSource = interactionSource,
+                    indication = null,
+                ) { showRemaining = !showRemaining },
             )
             Text(
-                text = "-${formatTime((totalMs - displayMs).coerceAtLeast(0L))}",
+                text = formatTime(totalMs),
                 style = MaterialTheme.typography.labelSmall,
                 color = Color.White.copy(alpha = 0.7f),
             )
