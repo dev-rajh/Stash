@@ -33,6 +33,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.launchIn
@@ -146,10 +147,22 @@ class NowPlayingViewModel @Inject constructor(
         // Streaming-mode tracks all share id==0L; distinguish them by youtubeId so
         // a track change between two streamed Yeat songs still flips the upstream.
         .distinctUntilChanged { old, new -> trackKey(old) == trackKey(new) }
-        .onEach {
+        .onEach { track ->
             // reset transient state on track change
             _streamingLyricsState.value = null
             _lyricsFetchFailedTrackId.value = null
+            // Live-lyrics-bar fetch trigger. Deliberately HERE and not in
+            // init{}: this onEach only runs while lyricsViewState has
+            // collectors (WhileSubscribed) — i.e. while NowPlayingScreen is
+            // showing the bar/sheet. The MiniPlayer's activity-scoped VM
+            // instance never collects lyricsViewState, so it can never fire
+            // fetches app-wide. Covers screen-open (initial emission) and
+            // every track change while open.
+            when {
+                track == null -> Unit
+                track.id > 0L && track.lyricsFetchedAt == null -> fetchLibraryLyrics(track)
+                track.id == 0L -> fetchStreamingLyrics(track)
+            }
         }
         .flatMapLatest { track ->
             when {
@@ -602,30 +615,15 @@ class NowPlayingViewModel @Inject constructor(
     // ------------------------------------------------------------------
 
     /**
-     * Open the lyrics sheet for the currently-playing track. If the
-     * track has never had a fetch attempt (`lyricsFetchedAt == null`),
-     * also enqueue a priority [LyricsFetchWorker] so the sheet
-     * transitions from Loading → Synced/Plain/None without waiting on
-     * the post-download or backfill paths.
-     *
-     * Safe to call when nothing is playing — the sheet just opens
-     * empty and observes whatever the next track produces.
+     * Open the lyrics sheet for the currently-playing track. Open-only since
+     * the live-lyrics bar: fetching is the lyricsViewState chain's
+     * subscription-gated trigger's job (plus the sheet's Retry). The old
+     * unconditional streaming re-fetch here reset shared state to Loading —
+     * with the bar consuming that same state, a bar tap would have hidden
+     * the bar mid-tap.
      */
     fun onShowLyrics() {
         _lyricsSheetOpen.value = true
-        val track = _uiState.value.currentTrack ?: return
-        when {
-            // Library track with no fetch attempt yet — resolve inline (see
-            // fetchLibraryLyrics); the lyricsViewState combine picks up the
-            // Room row + stamp the moment it lands.
-            track.id > 0L && track.lyricsFetchedAt == null -> fetchLibraryLyrics(track)
-            // Library track with prior attempt — Room observer already wired,
-            // nothing to do.
-            track.id > 0L -> Unit
-            // Streaming track (id == 0L) — no Room row to observe. Fetch via
-            // the source chain directly, render through the transient flow.
-            else -> fetchStreamingLyrics(track)
-        }
     }
 
     /** Close the lyrics sheet without affecting playback. */
@@ -702,6 +700,13 @@ class NowPlayingViewModel @Inject constructor(
         if (force) lyricsFetchInFlight.add(track.id)
         viewModelScope.launch(Dispatchers.IO) {
             try {
+                // Snapshot stamps go stale (queue Tracks don't refresh after a
+                // fetch stamps Room) — re-check the LIVE stamp so a revisited
+                // track doesn't re-hit the network. Retry (force) skips the
+                // guard deliberately.
+                if (!force && lyricsRepository.observeFetchedAt(track.id).first() != null) {
+                    return@launch
+                }
                 _lyricsFetchFailedTrackId.value = null
                 if (force) lyricsRepository.clearFetchStamp(track.id)
                 val query = LyricsQuery(
