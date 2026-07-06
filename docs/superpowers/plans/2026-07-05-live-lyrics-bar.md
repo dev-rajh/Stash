@@ -651,6 +651,8 @@ Guide the user through (or drive via adb where possible):
 - [ ] Fresh track (never fetched): bar absent, then fades in when the fetch lands — without opening the sheet.
 - [ ] Track change while open: line + accent + ambient crossfade smoothly (~800ms).
 - [ ] Every other screen: MiniPlayer behaves exactly as before; open/close Now Playing swaps MiniPlayer ↔ bar without layout jumps.
+- [ ] The bar sits cleanly above the still-visible bottom nav bar — no overlap, no gap (only MiniPlayer is hidden on this route; StashBottomBar remains).
+- [ ] Quick close+reopen of Now Playing on a streaming track: brief Loading reset is expected (transient re-resolve, no cache) — verify it settles back to the live line within ~a second.
 - [ ] Queue and Save sheets still overlay correctly.
 - [ ] Background fetch check via logcat: with Now Playing CLOSED, change tracks from the MiniPlayer and confirm NO lyrics fetch fires (no `LyricsRepository` source-failure logs, no lrclib traffic) — validates the subscription gating.
 
