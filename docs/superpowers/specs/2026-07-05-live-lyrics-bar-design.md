@@ -80,9 +80,25 @@ changing while it is open, triggers the lyrics fetch** — for library tracks
 only when they have never had an attempt (`lyricsFetchedAt == null`), for
 streaming tracks whenever the transient state is unpopulated — through the
 same `fetchLibraryLyrics` / `fetchStreamingLyrics` paths the sheet-open uses
-today. With `onShowLyrics` no longer fetching, the track-change trigger and
+today.
+
+**The trigger MUST be subscription-gated, not VM-lifetime-gated.** Two
+instances of `NowPlayingViewModel` exist (see Architecture): the MiniPlayer's
+activity-scoped instance is alive for the whole session, so a trigger in
+`init{}` / an unconditionally-launched collector would fire fetches on every
+track change app-wide even with Now Playing closed. Instead, the trigger
+lives inside the `lyricsViewState` flow chain (fires on the subscribed flow's
+initial emission — covering screen-open — and on each track flip). That flow
+is `SharingStarted.WhileSubscribed`, and its only collectors are the bar
+(route-scoped, inside NowPlayingScreen) and the sheet; the MiniPlayer never
+collects it, so its always-alive instance stays quiet.
+
+With `onShowLyrics` no longer fetching, the subscription-gated trigger and
 Retry are the only fetch entry points, so `fetchStreamingLyrics`'s lack of
-in-flight dedupe (unlike `fetchLibraryLyrics`) cannot double-fire.
+in-flight dedupe (unlike `fetchLibraryLyrics`) cannot double-fire from the
+trigger/tap pair. (A Retry tap racing an auto-advance can still launch two
+transient resolves for the same track — benign and idempotent, last write
+wins, pre-existing; do not treat "single-flight" as a hard invariant.)
 
 Deliberate simplification: a failed fetch leaves the bar hidden — no error
 chip. The reliability work already guarantees failures never stamp a false
@@ -103,7 +119,7 @@ instance that already owns the sheet:
 | `LiveLyricsBar.kt` (new, `:feature:nowplaying/ui`) | Stateless composable: `(LyricsViewState, currentPositionMs, dominant/vibrant/muted colors, onTap)` → live line / static / nothing. Contains the `AmbientStrip` backdrop. |
 | Current-line helper (new, small) | `indexOfLast { timestampMs <= positionMs }` extraction, shared by `LyricsSyncedRenderer` and the bar. |
 | `NowPlayingScreen` | Pin bar at the screen's bottom edge, outside the scroll area (content `weight(1f)` + bar). Remove the top-right lyrics `IconButton`. Sheet wiring untouched. |
-| `NowPlayingViewModel` | On track change (existing `trackKey`-keyed flow): trigger the existing fetch paths (library: only when `lyricsFetchedAt == null`; streaming: when transient state unpopulated). Remove the fetch calls from `onShowLyrics` — it only opens the sheet. The route-scoped VM only exists while Now Playing is on the stack, so this *is* the "while open" scoping. |
+| `NowPlayingViewModel` | Fetch trigger on screen-open + track change, **inside the `lyricsViewState` chain** (subscription-gated — see fetch section; NOT `init{}`, or the MiniPlayer's activity-scoped instance fetches app-wide). Library: only when `lyricsFetchedAt == null`; streaming: when transient state unpopulated. Remove the fetch calls from `onShowLyrics` — it only opens the sheet. |
 | `StashScaffold` (`:app`) | One conditional: skip rendering `MiniPlayer` when `currentRoute == NowPlayingRoute::class.qualifiedName` (same comparison pattern `StashBottomBar` already uses). Nav bar unaffected. |
 
 **Why not a full-screen `AmbientBackground` reuse:** it draws hard-edged
