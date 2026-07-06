@@ -7,7 +7,7 @@
 [![Release](https://img.shields.io/github/v/release/rawnaldclark/Stash?color=purple&include_prereleases)](https://github.com/rawnaldclark/Stash/releases)
 [![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/vcbjEby5PC)
 
-Stash mirrors your Spotify and YouTube Music libraries to your Android phone. You connect each service once, pick the playlists and mixes you actually want, and Stash either downloads them as real FLAC files for offline playback or surfaces them as a streaming index so you can play any track without filling up your storage. Same library, two modes, one tap to switch.
+Stash mirrors your Spotify and YouTube Music libraries to your Android phone. You connect each service, pick the playlists and mixes you want, and Stash either downloads them as real FLAC files for offline playback or surfaces them as a streaming index so you can stream tracks without filling up your storage. Same library, two modes, one tap to switch.
 
 There's no Stash account. No subscription. No ads. No analytics. Your credentials live on your phone, encrypted, and the only network traffic Stash makes is to Spotify and YouTube themselves.
 
