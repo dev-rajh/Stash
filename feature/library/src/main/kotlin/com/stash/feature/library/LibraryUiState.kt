@@ -37,17 +37,33 @@ data class LibraryUiState(
 /** Tabs available in the library browser. */
 enum class LibraryTab { PLAYLISTS, TRACKS, ARTISTS, ALBUMS }
 
-/** Sort options applicable to every content tab. */
-enum class SortOrder { RECENT, ALPHABETICAL, MOST_PLAYED }
+/**
+ * Sort options applicable to every content tab. Track-centric fields
+ * (artist, duration, play recency) fall back to the nearest sensible
+ * ordering on the Playlists / Artists / Albums tabs, which don't carry
+ * those columns — see the `when` blocks in [LibraryViewModel].
+ */
+enum class SortOrder {
+    RECENT,            // Recently added (newest first)
+    OLDEST,            // Oldest added first
+    ALPHABETICAL,      // Title / name A–Z
+    ALPHABETICAL_DESC, // Title / name Z–A
+    ARTIST,            // Artist A–Z
+    MOST_PLAYED,
+    LEAST_PLAYED,
+    LONGEST,           // Longest duration first
+    SHORTEST,          // Shortest duration first
+    RECENTLY_PLAYED,   // Most recently played first
+}
 
 /**
  * Top-level filter applied to the Tracks tab. Originally just service
- * source (Spotify / YouTube); [FLAC] piggybacks on the same chip row
- * because the user-facing question is the same — "show me some subset
- * of my tracks". When selected, only lossless-codec files (flac, alac,
- * wav, etc.) survive.
+ * source (Spotify / YouTube); [FLAC] / [NON_FLAC] piggyback on the same
+ * control because the user-facing question is the same — "show me some
+ * subset of my tracks". [FLAC] keeps only lossless-codec files (flac,
+ * alac, wav, etc.); [NON_FLAC] keeps only the lossy ones.
  */
-enum class SourceFilter { ALL, YOUTUBE, SPOTIFY, FLAC }
+enum class SourceFilter { ALL, YOUTUBE, SPOTIFY, FLAC, NON_FLAC }
 
 /**
  * @property name           Display name of the artist.

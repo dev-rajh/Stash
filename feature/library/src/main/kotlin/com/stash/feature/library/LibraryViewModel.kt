@@ -135,6 +135,7 @@ class LibraryViewModel @Inject constructor(
             // (and com.stash.data.download.lossless.AudioFormat.LOSSLESS_CODECS).
             // Worth duplicating — short list, short reach across modules.
             SourceFilter.FLAC -> allTracks.filter { it.fileFormat.lowercase() in LOSSLESS_CODECS }
+            SourceFilter.NON_FLAC -> allTracks.filter { it.fileFormat.lowercase() !in LOSSLESS_CODECS }
         }
 
         // -- Apply client-side search filter --
@@ -157,31 +158,49 @@ class LibraryViewModel @Inject constructor(
         // -- Apply sort order --
         val sortedTracks = when (controls.sortOrder) {
             SortOrder.RECENT -> filteredTracks.sortedByDescending { it.dateAdded }
+            SortOrder.OLDEST -> filteredTracks.sortedBy { it.dateAdded }
             SortOrder.ALPHABETICAL -> filteredTracks.sortedBy { it.title.lowercase() }
+            SortOrder.ALPHABETICAL_DESC -> filteredTracks.sortedByDescending { it.title.lowercase() }
+            SortOrder.ARTIST -> filteredTracks.sortedBy { it.artist.lowercase() }
             SortOrder.MOST_PLAYED -> filteredTracks.sortedByDescending { it.playCount }
+            SortOrder.LEAST_PLAYED -> filteredTracks.sortedBy { it.playCount }
+            SortOrder.LONGEST -> filteredTracks.sortedByDescending { it.durationMs }
+            SortOrder.SHORTEST -> filteredTracks.sortedBy { it.durationMs }
+            SortOrder.RECENTLY_PLAYED -> filteredTracks.sortedByDescending { it.lastPlayed ?: 0L }
         }
+        // Playlists don't carry play counts, durations, or per-track artists.
+        // RECENT uses date_added (stable across syncs) not last_synced — the
+        // latter reshuffles the list every sync (PlaylistEntity.dateAdded,
+        // migration v12→v13, issue #13). Track-centric sorts fall back to
+        // name (A–Z family) or trackCount (size family) so every option
+        // still produces a visible, sensible ordering.
         val sortedPlaylists = when (controls.sortOrder) {
-            // RECENT uses date_added (stable across syncs) not last_synced
-            // — the latter reshuffles the list every sync run. See
-            // PlaylistEntity.dateAdded + migration v12→v13 (issue #13).
             SortOrder.RECENT -> filteredPlaylists.sortedByDescending { it.dateAdded }
-            SortOrder.ALPHABETICAL -> filteredPlaylists.sortedBy { it.name.lowercase() }
-            // Playlists don't track a per-playlist play_count; use
-            // trackCount as the most-relevant "size" signal so this
-            // chip produces a visible ordering change instead of a
-            // silent no-op.
-            SortOrder.MOST_PLAYED -> filteredPlaylists.sortedByDescending { it.trackCount }
+            SortOrder.OLDEST -> filteredPlaylists.sortedBy { it.dateAdded }
+            SortOrder.ALPHABETICAL, SortOrder.ARTIST -> filteredPlaylists.sortedBy { it.name.lowercase() }
+            SortOrder.ALPHABETICAL_DESC -> filteredPlaylists.sortedByDescending { it.name.lowercase() }
+            SortOrder.MOST_PLAYED, SortOrder.LONGEST -> filteredPlaylists.sortedByDescending { it.trackCount }
+            SortOrder.LEAST_PLAYED, SortOrder.SHORTEST -> filteredPlaylists.sortedBy { it.trackCount }
+            SortOrder.RECENTLY_PLAYED -> filteredPlaylists.sortedByDescending { it.dateAdded }
         }
-        // Sort artists/albums — default by track count descending (most tracks first)
+        // Artists: name for the A–Z family, total duration for the
+        // duration family, track count for everything else.
         val sortedArtists = when (controls.sortOrder) {
-            SortOrder.RECENT -> filteredArtists.sortedByDescending { it.trackCount }
-            SortOrder.ALPHABETICAL -> filteredArtists.sortedBy { it.name.lowercase() }
-            SortOrder.MOST_PLAYED -> filteredArtists.sortedByDescending { it.trackCount }
+            SortOrder.ALPHABETICAL, SortOrder.ARTIST -> filteredArtists.sortedBy { it.name.lowercase() }
+            SortOrder.ALPHABETICAL_DESC -> filteredArtists.sortedByDescending { it.name.lowercase() }
+            SortOrder.LONGEST -> filteredArtists.sortedByDescending { it.totalDurationMs }
+            SortOrder.SHORTEST -> filteredArtists.sortedBy { it.totalDurationMs }
+            SortOrder.LEAST_PLAYED, SortOrder.OLDEST -> filteredArtists.sortedBy { it.trackCount }
+            else -> filteredArtists.sortedByDescending { it.trackCount }
         }
+        // Albums: title for the A–Z family, album artist for ARTIST,
+        // track count otherwise.
         val sortedAlbums = when (controls.sortOrder) {
-            SortOrder.RECENT -> filteredAlbums.sortedByDescending { it.trackCount }
             SortOrder.ALPHABETICAL -> filteredAlbums.sortedBy { it.name.lowercase() }
-            SortOrder.MOST_PLAYED -> filteredAlbums.sortedByDescending { it.trackCount }
+            SortOrder.ALPHABETICAL_DESC -> filteredAlbums.sortedByDescending { it.name.lowercase() }
+            SortOrder.ARTIST -> filteredAlbums.sortedBy { it.artist.lowercase() }
+            SortOrder.LEAST_PLAYED, SortOrder.SHORTEST, SortOrder.OLDEST -> filteredAlbums.sortedBy { it.trackCount }
+            else -> filteredAlbums.sortedByDescending { it.trackCount }
         }
 
         // Split into multi-track (primary) and single-track (collapsed)
@@ -429,6 +448,18 @@ class LibraryViewModel @Inject constructor(
         viewModelScope.launch {
             playerRepository.shuffleLibrary()
         }
+    }
+
+    /**
+     * Play the currently-visible track list in order, starting at the top —
+     * the Spotify-style "play" button next to shuffle. Honours the active
+     * sort + source filter + search since it plays exactly what's on screen.
+     * No-op when nothing is downloaded in the current view.
+     */
+    fun playLibrary() {
+        val tracks = uiState.value.tracks
+        val first = tracks.firstOrNull { it.filePath != null } ?: return
+        playTrack(first, tracks)
     }
 
     /**
