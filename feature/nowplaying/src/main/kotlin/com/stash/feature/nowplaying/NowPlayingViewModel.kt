@@ -649,8 +649,14 @@ class NowPlayingViewModel @Inject constructor(
      * A source failure (throw) renders [LyricsViewState.Error] with Retry —
      * distinct from a definitive miss (None). Re-entrant: calling on Retry
      * resets to Loading then runs the chain fresh.
+     *
+     * Result write is keyed by [trackKey]: since the bar's track-change
+     * trigger fires this on every streaming skip, a rapid A→B skip runs two
+     * resolves against the same untagged state — without the key check, A's
+     * slow resolve landing after B's would overwrite B's lyrics and stick.
      */
     private fun fetchStreamingLyrics(track: Track) {
+        val key = trackKey(track)
         _streamingLyricsState.value = LyricsViewState.Loading
         viewModelScope.launch {
             val query = LyricsQuery(
@@ -662,12 +668,15 @@ class NowPlayingViewModel @Inject constructor(
                 durationMs = track.durationMs.takeIf { it > 0 },
                 youtubeVideoId = track.youtubeId,
             )
-            _streamingLyricsState.value = try {
+            val result = try {
                 lyricsViewStateForResult(lyricsRepository.resolveTransient(query))
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 LyricsViewState.Error(retryable = true)
+            }
+            if (trackKey(_uiState.value.currentTrack) == key) {
+                _streamingLyricsState.value = result
             }
         }
     }
