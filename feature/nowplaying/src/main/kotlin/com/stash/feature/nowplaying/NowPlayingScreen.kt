@@ -130,10 +130,9 @@ fun NowPlayingScreen(
         )
     }
 
-    // v0.9.36 Task 12 — lyrics bottom sheet. The IconButton that
-    // toggles this lives in Task 13; until then, no UI affordance
-    // triggers `onShowLyrics()`. The block below is the real wiring
-    // that Task 13 will hook into.
+    // Lyrics bottom sheet — opened by tapping the LiveLyricsBar pinned at
+    // the screen's bottom edge (`onShowLyrics`); the bar and the sheet share
+    // the one subscription collected just below.
     val showLyrics by viewModel.lyricsSheetOpen.collectAsStateWithLifecycle()
     // Collected unconditionally (not just while the sheet is open): the bar
     // needs the state, and this subscription is what arms the ViewModel's
