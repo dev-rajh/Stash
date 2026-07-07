@@ -131,7 +131,21 @@ class PlayerRepositoryImpl @Inject constructor(
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
+    /**
+     * Last-known queue/timeline sizes, mirrored out of [updateState] for
+     * [CrashDiagnostics]. Plain volatiles (not controller reads) because the
+     * crash handler samples them from an arbitrary thread with the heap
+     * possibly exhausted — MediaController is main-thread-only.
+     */
+    @Volatile private var lastKnownQueueSize = 0
+    @Volatile private var lastKnownTimelineSize = 0
+
     init {
+        // OOM triage (#238/#239): stamp player scale into every crash report.
+        com.stash.core.data.diagnostics.CrashDiagnostics.register("player") {
+            "queue=$lastKnownQueueSize timeline=$lastKnownTimelineSize"
+        }
+
         // v0.9.27: Connect the controller immediately on init so we can
         // provide live state even if the app was cold-started while
         // music was already playing (e.g. via Android Auto).
@@ -1477,6 +1491,8 @@ class PlayerRepositoryImpl @Inject constructor(
             ),
         )
         _playerState.value = newState
+        lastKnownQueueSize = newState.queue.size
+        lastKnownTimelineSize = timelineQueue.size
 
         // Persist position for resume-on-restart (fire and forget)
         if (track != null) {
