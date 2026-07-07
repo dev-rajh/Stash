@@ -131,28 +131,21 @@ fun TrackListItem(
         Spacer(modifier = Modifier.width(12.dp))
 
         // -- Title + artist column (takes available space) --
+        // Title wraps to two lines so long names show in full instead of
+        // being cut with an ellipsis. The format badge no longer sits inline
+        // here — it moved to the trailing meta column so it can never steal
+        // width from the title.
         Column(
             modifier = Modifier.weight(1f),
             verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
-            ) {
-                Text(
-                    text = track.title,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = if (isPlaying) primaryColor else MaterialTheme.colorScheme.onBackground,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false),
-                )
-                FlacBadge(
-                    fileFormat = track.fileFormat,
-                    bitsPerSample = track.bitsPerSample,
-                    sampleRateHz = track.sampleRateHz,
-                )
-            }
+            Text(
+                text = track.title,
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (isPlaying) primaryColor else MaterialTheme.colorScheme.onBackground,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
             Text(
                 text = track.artist,
                 style = MaterialTheme.typography.bodySmall,
@@ -164,30 +157,45 @@ fun TrackListItem(
 
         Spacer(modifier = Modifier.width(8.dp))
 
-        // -- Resolving spinner / now-playing indicator / duration --
-        when {
-            isResolving -> CircularProgressIndicator(
-                modifier = Modifier.size(20.dp),
-                color = primaryColor,
-                strokeWidth = 2.dp,
-            )
-            isPlaying -> Icon(
-                imageVector = Icons.Default.GraphicEq,
-                contentDescription = "Now playing",
-                tint = primaryColor,
-                modifier = Modifier.size(18.dp),
-            )
-            else -> Text(
-                text = formatDuration(track.durationMs),
-                style = MaterialTheme.typography.bodySmall,
-                color = extendedColors.textTertiary,
-            )
+        // -- Trailing meta: duration on top; source dot + song-type label
+        // below. The "Spotify"/"YouTube" word is gone — just a colored dot
+        // (green = Spotify, red = YouTube) plus the format the file actually
+        // is, e.g. "FLAC 24/48" or "M4A". --
+        Column(
+            horizontalAlignment = Alignment.End,
+            verticalArrangement = Arrangement.spacedBy(3.dp),
+        ) {
+            when {
+                isResolving -> CircularProgressIndicator(
+                    modifier = Modifier.size(20.dp),
+                    color = primaryColor,
+                    strokeWidth = 2.dp,
+                )
+                isPlaying -> Icon(
+                    imageVector = Icons.Default.GraphicEq,
+                    contentDescription = "Now playing",
+                    tint = primaryColor,
+                    modifier = Modifier.size(18.dp),
+                )
+                else -> Text(
+                    text = formatDuration(track.durationMs),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = extendedColors.textTertiary,
+                )
+            }
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                SourceIndicator(source = track.source, showLabel = false)
+                Text(
+                    text = songTypeLabel(track),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = extendedColors.textTertiary,
+                    maxLines = 1,
+                )
+            }
         }
-
-        Spacer(modifier = Modifier.width(8.dp))
-
-        // -- Source indicator dot + label --
-        SourceIndicator(source = track.source, showLabel = true)
 
         // -- Overflow menu (only when not selecting) --
         if (!selectionActive && onMoreClick != null) {
@@ -202,6 +210,31 @@ fun TrackListItem(
         }
     }
 }
+
+/**
+ * Short "what kind of file is this" label shown in the row's trailing
+ * column, in place of the old "Spotify"/"YouTube" source word. Lossless
+ * tracks read `FLAC` / `FLAC 24/96` (reusing [flacBadgeText]); lossy tracks
+ * read their codec, e.g. `M4A` / `OPUS` / `MP3`.
+ *
+ * The on-disk file extension wins over `fileFormat` when available — legacy
+ * rows often carry a stale `opus` default even when the file is really FLAC
+ * (same correction the Now Playing quality line makes).
+ */
+private fun songTypeLabel(track: Track): String {
+    val ext = track.filePath
+        ?.substringAfterLast('.', "")
+        ?.lowercase()
+        ?.takeIf { it.isNotBlank() }
+    val codec = ext ?: track.fileFormat.lowercase().takeIf { it.isNotBlank() } ?: return ""
+    return if (codec in TRACK_LOSSLESS_CODECS) {
+        flacBadgeText(track.bitsPerSample, track.sampleRateHz)
+    } else {
+        codec.uppercase()
+    }
+}
+
+private val TRACK_LOSSLESS_CODECS = setOf("flac", "alac", "wav", "ape", "tta", "wv", "aiff")
 
 // ── Previews ───────────────────────────────────────────────────────────────
 

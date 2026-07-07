@@ -356,6 +356,9 @@ fun StashNavHost(
         ) {
             NowPlayingScreen(
                 onDismiss = { navController.popBackStack() },
+                onNavigateToPlaylist = { playlistId ->
+                    navController.navigate(PlaylistDetailRoute(playlistId))
+                },
             )
         }
     }

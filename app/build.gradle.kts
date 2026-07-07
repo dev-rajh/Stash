@@ -60,21 +60,22 @@ val localProperties = Properties().apply {
         localPropertiesFile.inputStream().use { load(it) }
     }
 }
-val lastFmApiKey: String =
-    localProperties.getProperty("lastfm.apiKey") ?: System.getenv("LASTFM_API_KEY").orEmpty()
-val lastFmApiSecret: String =
-    localProperties.getProperty("lastfm.apiSecret") ?: System.getenv("LASTFM_API_SECRET").orEmpty()
+fun localOrEnvProp(key: String, envKey: String): String =
+    sequenceOf(localProperties.getProperty(key), localProperties.getProperty(envKey), System.getenv(envKey))
+        .firstOrNull { !it.isNullOrBlank() }
+        .orEmpty()
+
+val lastFmApiKey: String = localOrEnvProp("lastfm.apiKey", "LASTFM_API_KEY")
+val lastFmApiSecret: String = localOrEnvProp("lastfm.apiSecret", "LASTFM_API_SECRET")
 // Optional comma-separated pool of EXTRA api keys used only for unsigned read
 // endpoints (tag/similar/etc.) to spread load and raise the shared-key rate
 // ceiling. No secret needed — reads are unsigned. Auth/scrobble always use the
 // primary key above. Empty by default.
-val lastFmExtraApiKeys: String =
-    localProperties.getProperty("lastfm.extraApiKeys") ?: System.getenv("LASTFM_EXTRA_API_KEYS").orEmpty()
+val lastFmExtraApiKeys: String = localOrEnvProp("lastfm.extraApiKeys", "LASTFM_EXTRA_API_KEYS")
 // Optional Stash Last.fm proxy Worker base URL. When set, generic read lookups
 // route through it (the Worker holds the server key + shared cache), decoupling
 // Last.fm load from user count. Empty = app talks to Last.fm directly.
-val lastFmProxyUrl: String =
-    localProperties.getProperty("lastfm.proxyUrl") ?: System.getenv("LASTFM_PROXY_URL").orEmpty()
+val lastFmProxyUrl: String = localOrEnvProp("lastfm.proxyUrl", "LASTFM_PROXY_URL")
 
 android {
     namespace = "com.stash.app"

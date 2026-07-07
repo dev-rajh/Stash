@@ -74,6 +74,9 @@ node_modules/
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
 
+# add .claude
+.claude/
+CLAUDE.md
 # Local spike/experiment artifacts — never commit (huge binaries, screenshots)
 app/src/androidTest/assets/clapspike/
 spike/*.png
