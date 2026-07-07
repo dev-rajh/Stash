@@ -74,6 +74,7 @@ import com.stash.core.model.isFlac
 import com.stash.core.ui.components.SaveToPlaylistSheet
 import com.stash.feature.nowplaying.ui.AmbientBackground
 import com.stash.feature.nowplaying.ui.GlowingProgressBar
+import com.stash.feature.nowplaying.ui.LiveLyricsBar
 import com.stash.feature.nowplaying.ui.LyricsBottomSheet
 import com.stash.feature.nowplaying.ui.NowPlayingOptionsSheet
 import com.stash.feature.nowplaying.ui.QueueBottomSheet
@@ -164,14 +165,11 @@ fun NowPlayingScreen(
         )
     }
 
-    // v0.9.36 Task 12 — lyrics bottom sheet. The IconButton that
-    // toggles this lives in Task 13; until then, no UI affordance
-    // triggers `onShowLyrics()`. The block below is the real wiring
-    // that Task 13 will hook into.
+    // Lyrics bottom sheet — opened by tapping the Lyrics quick-action chip.
     val showLyrics by viewModel.lyricsSheetOpen.collectAsStateWithLifecycle()
+    val lyricsState by viewModel.lyricsViewState.collectAsStateWithLifecycle()
+    val lyricsPositionMs by viewModel.currentPositionMs.collectAsStateWithLifecycle()
     if (showLyrics) {
-        val lyricsState by viewModel.lyricsViewState.collectAsStateWithLifecycle()
-        val lyricsPositionMs by viewModel.currentPositionMs.collectAsStateWithLifecycle()
         LyricsBottomSheet(
             state = lyricsState,
             currentPositionMs = lyricsPositionMs,
@@ -283,14 +281,16 @@ fun NowPlayingScreen(
             modifier = Modifier.fillMaxSize(),
         )
 
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .statusBarsPadding()
-                .verticalScroll(scrollState)
-                .padding(horizontal = 24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .statusBarsPadding()
+                    .verticalScroll(scrollState)
+                    .padding(horizontal = 24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
             // -- Top bar: dismiss, "NOW PLAYING" + album context, overflow "…" --
             TopBar(
                 onDismiss = onDismiss,
@@ -433,7 +433,15 @@ fun NowPlayingScreen(
                 )
             }
 
-            Spacer(modifier = Modifier.height(48.dp))
+                Spacer(modifier = Modifier.height(48.dp))
+            }
+
+            LiveLyricsBar(
+                state = lyricsState,
+                currentPositionMs = lyricsPositionMs,
+                accentColor = uiState.vibrantColor,
+                onTap = viewModel::onShowLyrics,
+            )
         }
     }
 }
