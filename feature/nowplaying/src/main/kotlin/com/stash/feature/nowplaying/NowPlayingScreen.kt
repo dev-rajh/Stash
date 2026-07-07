@@ -34,7 +34,6 @@ import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Wifi
-import androidx.compose.material.icons.outlined.Lyrics
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.CircularProgressIndicator
@@ -299,7 +298,7 @@ fun NowPlayingScreen(
                 contextTitle = track?.album?.takeIf { it.isNotBlank() },
             )
 
-            Spacer(modifier = Modifier.height(24.dp))
+                Spacer(modifier = Modifier.height(24.dp))
 
             // -- Album art --
             AlbumArtSection(
@@ -312,7 +311,37 @@ fun NowPlayingScreen(
                 onSwipeDownDismiss = onDismiss,
             )
 
-            Spacer(modifier = Modifier.height(32.dp))
+                Spacer(modifier = Modifier.height(32.dp))
+
+                // -- Track info --
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = track?.title ?: "Not Playing",
+                        fontSize = 22.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                    if (track != null) {
+                        Spacer(modifier = Modifier.width(8.dp))
+                        com.stash.core.ui.components.FlacBadge(
+                            fileFormat = track.fileFormat,
+                            bitsPerSample = track.bitsPerSample,
+                            sampleRateHz = track.sampleRateHz,
+                            size = 18.dp,
+                            tint = Color.White,
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(4.dp))
 
             // -- Track info --
             // The FLAC badge that used to sit beside the title is gone \u2014 the
@@ -330,16 +359,20 @@ fun NowPlayingScreen(
                     .basicMarquee(),
             )
 
-            Spacer(modifier = Modifier.height(4.dp))
-
-            Text(
-                text = buildString {
-                    if (track != null) {
-                        append(track.artist)
-                        if (track.album.isNotBlank()) {
-                            append(" \u2022 ")
-                            append(track.album)
-                        }
+                // Quality line — codec + bit-depth/sample-rate + bitrate, when known.
+                // Sized smaller than the artist/album line; degrades gracefully when
+                // some fields are missing (returns a partial line, not nothing).
+                // When the active MediaItem is sourced from an http(s) URI (Kennyy
+                // stream rather than a local file), a small wifi glyph prefixes
+                // the line so the user knows playback is using their connection.
+                if (track != null) {
+                    val qualityText = trackQualityText(track)
+                    if (qualityText != null) {
+                        Spacer(modifier = Modifier.height(2.dp))
+                        QualityLine(
+                            qualityText = qualityText,
+                            isStreaming = uiState.isStreaming,
+                        )
                     }
                 },
                 fontSize = 14.sp,
@@ -371,34 +404,47 @@ fun NowPlayingScreen(
                         isStreaming = uiState.isStreaming,
                     )
                 }
+
+                Spacer(modifier = Modifier.height(28.dp))
+
+                // -- Progress bar --
+                GlowingProgressBar(
+                    progress = uiState.progressFraction,
+                    accentColor = uiState.vibrantColor,
+                    elapsedMs = uiState.currentPositionMs,
+                    totalMs = uiState.durationMs,
+                    onSeek = viewModel::onSeekTo,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+
+                Spacer(modifier = Modifier.height(20.dp))
+
+                // -- Playback controls --
+                PlaybackControls(
+                    isPlaying = uiState.isPlaying,
+                    isBuffering = uiState.isBuffering,
+                    shuffleEnabled = uiState.shuffleEnabled,
+                    repeatMode = uiState.repeatMode,
+                    accentColor = uiState.vibrantColor,
+                    onPlayPauseClick = viewModel::onPlayPauseClick,
+                    onSkipNext = viewModel::onSkipNext,
+                    onSkipPrevious = viewModel::onSkipPrevious,
+                    onToggleShuffle = viewModel::onToggleShuffle,
+                    onCycleRepeatMode = viewModel::onCycleRepeatMode,
+                )
+
+                Spacer(modifier = Modifier.height(48.dp))
             }
 
-            Spacer(modifier = Modifier.height(28.dp))
-
-            // -- Progress bar --
-            GlowingProgressBar(
-                progress = uiState.progressFraction,
+            // Live-lyrics bar — sits exactly where the MiniPlayer is on other
+            // screens (the scaffold hides MiniPlayer on this route), directly
+            // above the nav bar. Zero-height when Hidden, so the content
+            // column keeps the full screen for lyric-less tracks.
+            LiveLyricsBar(
+                state = lyricsState,
+                currentPositionMs = lyricsPositionMs,
                 accentColor = uiState.vibrantColor,
-                elapsedMs = uiState.currentPositionMs,
-                totalMs = uiState.durationMs,
-                onSeek = viewModel::onSeekTo,
-                modifier = Modifier.fillMaxWidth(),
-            )
-
-            Spacer(modifier = Modifier.height(20.dp))
-
-            // -- Playback controls --
-            PlaybackControls(
-                isPlaying = uiState.isPlaying,
-                isBuffering = uiState.isBuffering,
-                shuffleEnabled = uiState.shuffleEnabled,
-                repeatMode = uiState.repeatMode,
-                accentColor = uiState.vibrantColor,
-                onPlayPauseClick = viewModel::onPlayPauseClick,
-                onSkipNext = viewModel::onSkipNext,
-                onSkipPrevious = viewModel::onSkipPrevious,
-                onToggleShuffle = viewModel::onToggleShuffle,
-                onCycleRepeatMode = viewModel::onCycleRepeatMode,
+                onTap = viewModel::onShowLyrics,
             )
 
             // -- Quick actions: Queue / Lyrics --

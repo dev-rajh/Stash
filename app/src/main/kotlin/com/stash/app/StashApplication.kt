@@ -258,6 +258,22 @@ class StashApplication : Application(), Configuration.Provider {
         applicationScope.launch {
             musicRepository.ensureDownloadsMixSeeded()
         }
+        // One-shot repair (2026-07-05): pre-v0.9.73 lyrics fetches stamped
+        // transient failures (timeouts/429s/DNS during bulk bursts) as
+        // permanent 0L misses — forensics showed ~72% of "No lyrics found"
+        // tracks have lyrics available. Reset those stamps to NULL once so
+        // each track re-fetches on its next sheet open. Post-fix 0L stamps
+        // are trustworthy, hence the never-again preference gate.
+        applicationScope.launch {
+            runCatching {
+                val prefs = getSharedPreferences("stash_migrations", MODE_PRIVATE)
+                if (!prefs.getBoolean(LYRICS_MISS_RESET_KEY, false)) {
+                    val reset = trackDao.resetMissedLyricsStamps()
+                    prefs.edit().putBoolean(LYRICS_MISS_RESET_KEY, true).apply()
+                    Log.i("StashStartup", "reset $reset poisoned lyrics miss-stamps -> NULL")
+                }
+            }.onFailure { Log.w("StashStartup", "lyrics miss-stamp reset failed", it) }
+        }
         // Prune stale lossless prefetch entries every 60s. Bounded
         // memory growth across long browse sessions.
         applicationScope.launch {
@@ -816,6 +832,14 @@ class StashApplication : Application(), Configuration.Provider {
     }
 
     companion object {
+        /**
+         * Never-again gate for the one-shot lyrics miss-stamp repair. NOT
+         * version-keyed on purpose: post-fix 0L stamps are genuine misses
+         * and re-wiping them on every release would refetch known-absent
+         * tracks forever.
+         */
+        private const val LYRICS_MISS_RESET_KEY = "lyrics_miss_reset_done"
+
         /**
          * Bump whenever a parser change makes existing cached rows produce
          * a worse UX than a fresh fetch. Current bump (v1) invalidates rows

@@ -1,6 +1,7 @@
 package com.stash.data.lyrics.source
 
 import com.stash.core.common.AppVersionProvider
+import java.io.IOException
 import kotlinx.coroutines.test.runTest
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.Dispatcher
@@ -12,6 +13,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -114,9 +116,34 @@ class LrclibLyricsSourceTest {
         assertEquals(2, server.requestCount)
     }
 
-    @Test fun `network exception returns null`() = runTest {
+    @Test fun `network exception THROWS — must not read as a definitive miss`() = runTest {
+        // Pre-fix this returned null, which the repository stamped as a
+        // permanent 0L miss. Forensics (2026-07-05) showed ~72% of the
+        // library's "No lyrics found" tracks were poisoned exactly this way.
         server.shutdown()
-        assertNull(source.resolve(query(durationMs = 234_000)))
+        assertThrows(IOException::class.java) {
+            kotlinx.coroutines.runBlocking { source.resolve(query(durationMs = 234_000)) }
+        }
+    }
+
+    @Test fun `get 5xx THROWS — server trouble is not a miss`() = runTest {
+        server.enqueue(MockResponse().setResponseCode(500))
+        assertThrows(IOException::class.java) {
+            kotlinx.coroutines.runBlocking { source.resolve(query(durationMs = 234_000)) }
+        }
+        assertEquals("no search fallback after a failing get", 1, server.requestCount)
+    }
+
+    @Test fun `search 5xx after get 404 THROWS`() = runTest {
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when {
+                request.path!!.startsWith("/api/get") -> MockResponse().setResponseCode(404)
+                else -> MockResponse().setResponseCode(503)
+            }
+        }
+        assertThrows(IOException::class.java) {
+            kotlinx.coroutines.runBlocking { source.resolve(query(durationMs = 234_000)) }
+        }
     }
 
     @Test fun `null duration skips get, goes straight to search`() = runTest {
