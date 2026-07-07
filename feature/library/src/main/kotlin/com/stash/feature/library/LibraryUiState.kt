@@ -15,6 +15,8 @@ data class LibraryUiState(
     val searchQuery: String = "",
     val sortOrder: SortOrder = SortOrder.RECENT,
     val sourceFilter: SourceFilter = SourceFilter.ALL,
+    val downloadedNonFlacCount: Int = 0,
+    val flacUpgrade: FlacUpgradeUiState = FlacUpgradeUiState(),
     val tracks: List<Track> = emptyList(),
     val playlists: List<Playlist> = emptyList(),
 
@@ -64,6 +66,19 @@ enum class SortOrder {
  * alac, wav, etc.); [NON_FLAC] keeps only the lossy ones.
  */
 enum class SourceFilter { ALL, YOUTUBE, SPOTIFY, FLAC, NON_FLAC }
+
+/**
+ * Progress for the bulk "Find FLAC" action that upgrades existing lossy
+ * downloads through the same lossless path as Now Playing.
+ */
+data class FlacUpgradeUiState(
+    val isRunning: Boolean = false,
+    val completed: Int = 0,
+    val total: Int = 0,
+) {
+    val progressText: String
+        get() = if (total > 0) "$completed of $total" else ""
+}
 
 /**
  * @property name           Display name of the artist.
