@@ -15,6 +15,12 @@ class AlbumFocusTest {
         assertEquals(AlbumShelf.ALBUMS, r?.shelf); assertEquals(0, r?.index)
     }
 
+    @Test fun `collapses internal and edge whitespace before matching`() {
+        // Pins norm's \s+ collapse: fails if norm only did trim().lowercase().
+        val r = findAlbumFocus("  M   B   V  ", albums, singles)
+        assertEquals(AlbumShelf.ALBUMS, r?.shelf); assertEquals(0, r?.index)
+    }
+
     @Test fun `matches single when not in albums`() {
         val r = findAlbumFocus("you made me realise", albums, singles)
         assertEquals(AlbumShelf.SINGLES, r?.shelf); assertEquals(0, r?.index)
