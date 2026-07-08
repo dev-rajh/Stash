@@ -30,7 +30,7 @@
 **`core:data`** (interfaces + caches)
 - Create `core/data/src/main/kotlin/com/stash/core/data/discography/DiscographySupplement.kt` — interface + `MergedDiscography`.
 - Create `.../discography/QobuzAlbumFetcher.kt` — interface.
-- Create `.../discography/NoopDiscographySupplement.kt` — used ONLY by tests/previews; NOT Hilt-bound (see Task 4).
+- Create `.../discography/NoopDiscographySupplement.kt` — returns the YT lists unchanged; the **default for `ArtistCache`'s primary constructor** so existing tests keep compiling; NOT Hilt-bound (the real impl is the sole binding). Created in Task 4.
 - Modify `.../cache/ArtistCache.kt` — inject supplement, `fetchAndMerge`, both call sites, `withTimeout`.
 - Modify `.../cache/AlbumCache.kt` — inject fetcher, `get(id, source)` routing.
 
@@ -41,18 +41,24 @@
 
 ---
 
-## Task 1: Capture live Qobuz fixtures (enables TDD for Tasks 3, 5, 6, 7)
+## Task 1: Capture Qobuz fixtures (consumed by Tasks 3 and 7)
 
-The new endpoints are not yet exercised, so there are no fixtures. Capture real JSON once with a live pool token so every downstream test parses real shapes (mirrors how the existing qbdlx tests were built).
+The new endpoints are not yet exercised, so there are no fixtures. Capture real JSON once so the parse/mapping tests in Tasks 3 and 7 run against real shapes. (Tasks 5 and 6 build their `AlbumSummary`/`QbdlxArtistItem` inputs inline and do **not** need fixtures.)
 
 **Files:**
 - Create: `data/download/src/test/resources/qbdlx/artist_search_mbv.json`
 - Create: `data/download/src/test/resources/qbdlx/artist_albums_mbv.json`
 - Create: `data/download/src/test/resources/qbdlx/album_loveless.json`
 
-- [ ] **Step 1: Extract a live token + app_id**
+- [ ] **Step 1: Read app_id + a live token from `local.properties`**
 
-Run (Git Bash), decrypting the embedded pool the same way the app does at runtime is non-trivial offline; instead pull one token from the running debug app's logs or use the Settings token picker. Simplest: read `QBDLX_APP_ID` from `data/download/build.gradle.kts` BuildConfig and grab a `token` from a device logcat line `QbdlxCredentialStore` during a stream. Record `APP_ID` and `TOKEN` as shell vars.
+The repo's `local.properties` already carries `qbdlx.appId` and a **plaintext** `qbdlx.tokenPool` (comma-separated `token:ISO2COUNTRY` — see `data/download/build.gradle.kts` ~L42-44). No device needed:
+```bash
+APP_ID=$(grep '^qbdlx.appId=' local.properties | cut -d= -f2)
+TOKEN=$(grep '^qbdlx.tokenPool=' local.properties | cut -d= -f2 | tr ',' '\n' | head -1 | cut -d: -f1)
+echo "app_id=${APP_ID:0:4}… token=${TOKEN:0:6}…"
+```
+**Fallback if no live token/network:** hand-author the three fixtures directly from the DTO shapes in Task 3 Step 1 (include a Loveless album row with a couple of tracks that have positive `id`/`duration`, plus an `isn't anything` row). Tasks 3/7 then still run; only Task 13's on-device check exercises the true live shape.
 
 - [ ] **Step 2: Hit the three endpoints and save bodies**
 
@@ -111,10 +117,11 @@ class AlbumSummarySerializationTest {
 
     @Test fun `qobuz source round-trips`() {
         val a = AlbumSummary("123", "Loveless", "MBV", null, "1991", AlbumSource.QOBUZ)
-        assertEquals(a, json.decodeFromString(json.encodeToString(a)))
+        assertEquals(a, json.decodeFromString<AlbumSummary>(json.encodeToString(a)))
     }
 }
 ```
+Imports: `kotlinx.serialization.encodeToString`, `kotlinx.serialization.decodeFromString`.
 
 - [ ] **Step 2: Run — expect FAIL** (`AlbumSource` unresolved).
 Run: `./gradlew :data:ytmusic:testDebugUnitTest --tests "*AlbumSummarySerializationTest"`
@@ -201,7 +208,7 @@ import kotlinx.serialization.Serializable
 ```
 Note: `QbdlxPerformer`/`QbdlxImage` already exist in `QbdlxQobuzModels.kt` — reuse them if their fields line up; otherwise add minimal variants here.
 
-- [ ] **Step 2: Write the failing parse test** (offline, no network — mirrors existing qbdlx tests reading `test/resources`)
+- [ ] **Step 2: Write the failing parse test** (offline, no network. The qbdlx *client* tests use MockWebServer; the offline `test/resources` fixture idiom lives in `data/download/.../matching/` tests, e.g. `InnerTubeSearchExecutorTest`. This offline-parse style is fine — just don't look for it in the qbdlx client tests.)
 
 ```kotlin
 class QbdlxCatalogParseTest {
@@ -289,6 +296,7 @@ Pure interface task — no logic, no test yet.
 **Files:**
 - Create: `core/data/src/main/kotlin/com/stash/core/data/discography/DiscographySupplement.kt`
 - Create: `core/data/src/main/kotlin/com/stash/core/data/discography/QobuzAlbumFetcher.kt`
+- Create: `core/data/src/main/kotlin/com/stash/core/data/discography/NoopDiscographySupplement.kt`
 
 - [ ] **Step 1: Write the interfaces**
 
@@ -326,12 +334,30 @@ interface QobuzAlbumFetcher {
 }
 ```
 
-- [ ] **Step 2: Compile.** Run: `./gradlew :core:data:compileDebugKotlin` — expect success.
+- [ ] **Step 2: Write the no-op supplement** (the primary-constructor default that keeps `ArtistCache`'s existing tests compiling; NOT Hilt-bound, so it never competes with the real binding)
 
-- [ ] **Step 3: Commit**
+```kotlin
+package com.stash.core.data.discography
+import com.stash.data.ytmusic.model.AlbumSummary
+
+/** Returns the YT discography unchanged. Used as ArtistCache's primary-ctor
+ *  default (and in tests/previews). The real DiscographySupplement is the only
+ *  Hilt binding, so production always injects it via the @Inject secondary ctor. */
+class NoopDiscographySupplement : DiscographySupplement {
+    override suspend fun mergeInto(
+        artistName: String,
+        ytAlbums: List<AlbumSummary>,
+        ytSingles: List<AlbumSummary>,
+    ) = MergedDiscography(ytAlbums, ytSingles)
+}
+```
+
+- [ ] **Step 3: Compile.** Run: `./gradlew :core:data:compileDebugKotlin` — expect success.
+
+- [ ] **Step 4: Commit**
 ```bash
 git add core/data/src/main/kotlin/com/stash/core/data/discography/
-git commit -m "feat(discography): DiscographySupplement + QobuzAlbumFetcher interfaces"
+git commit -m "feat(discography): DiscographySupplement + QobuzAlbumFetcher interfaces + no-op default"
 ```
 
 ---
@@ -459,7 +485,7 @@ Carries spec **must-address #1** (artist-match threshold, candidate dedup, Vario
 
 - [ ] **Step 1: Write failing tests** (fake the API client + credential store + prefs; assert gate/match behavior)
 
-Cover: (a) disabled/no-token → returns YT lists unchanged; (b) confident single-candidate match with ≥1 YT title overlap → Qobuz albums merged in; (c) **zero YT albums + two name-similar candidates → aborts** (YT unchanged); (d) "Various Artists" candidate → skipped; (e) a superstring pseudo-artist candidate ("MBV Tribute") is excluded from the candidate set so it doesn't trip the ambiguity abort for the real MBV.
+Cover: (a) disabled/no-token → returns YT lists unchanged; (b) confident single-candidate match with ≥1 YT title overlap → Qobuz albums merged in; (c) **zero YT albums + two DIFFERENTLY-named similar candidates → aborts** (YT unchanged, the "Nirvana"/"Nirvana" homonym case); (d) "Various Artists" candidate → skipped; (e) a superstring pseudo-artist candidate ("MBV Tribute") is excluded from the candidate set so it doesn't trip the ambiguity abort for the real MBV; (f) **zero YT albums + two SAME-normalized-name Qobuz variant rows (different ids) → PROCEEDS** (they collapse to one distinct artist — this is the flagship case must-address #1 exists to protect).
 
 ```kotlin
 class QobuzDiscographyProviderTest {
@@ -477,9 +503,22 @@ class QobuzDiscographyProviderTest {
             "My Bloody Valentine", listOf(ytEp), emptyList())
         assertTrue(out.albums.any { it.title.equals("Loveless", true) && it.source == AlbumSource.QOBUZ })
     }
-    @Test fun `zero yt albums plus ambiguous candidates aborts`() = runTest {
-        val out = provider(candidates = listOf(nirvanaGrunge, nirvanaUk)).mergeInto("Nirvana", emptyList(), emptyList())
-        assertTrue(out.albums.isEmpty()) // supplement skipped, nothing grafted
+    @Test fun `zero yt albums plus two differently-named similar candidates aborts`() = runTest {
+        // e.g. two distinct bands both called "Nirvana" indexed under the same
+        // bare name still collapse (see next test); the abort fires on DIFFERENT
+        // normalized names that both clear threshold. Model that here.
+        val out = provider(candidates = listOf(lowBandA, lowBandDifferentName)).mergeInto("Low", emptyList(), emptyList())
+        assertTrue(out.albums.isEmpty()) // ambiguous → nothing grafted
+    }
+    @Test fun `zero yt albums plus same-name variant rows PROCEEDS`() = runTest {
+        // Qobuz returns two "My Bloody Valentine" rows with different ids (its own
+        // duplicate artist entities). They must collapse to ONE distinct artist,
+        // NOT trip the ambiguity abort — else the flagship case silently no-ops.
+        val out = provider(
+            candidates = listOf(mbvVariant(id = 1), mbvVariant(id = 2)),
+            albums = qbAlbums,
+        ).mergeInto("My Bloody Valentine", emptyList(), emptyList())
+        assertTrue(out.albums.any { it.source == AlbumSource.QOBUZ })
     }
     @Test fun `various artists candidate is ignored`() = runTest {
         val out = provider(candidates = listOf(variousArtists)).mergeInto("Various Artists", emptyList(), emptyList())
@@ -523,18 +562,27 @@ class QobuzDiscographyProvider @Inject constructor(
             .map { it to QobuzCandidateMatcher.artistSimilarity(nName, QobuzCandidateMatcher.normalize(it.name)) }
             .filter { it.second >= ARTIST_MATCH_THRESHOLD }
             .sortedByDescending { it.second }
-        val best = scored.firstOrNull()?.first ?: return unchanged(ytAlbums, ytSingles)
+        // Collapse the artist's OWN duplicate entities: Qobuz commonly returns
+        // several rows for one artist with the SAME name but different ids.
+        // artistSimilarity == 1.0 for each, so counting raw rows would trip the
+        // ambiguity abort below and kill the flagship (MBV) zero-YT-album case.
+        // Dedup by normalized NAME (keeps the highest-scored row per name, since
+        // the list is already score-sorted) so "distinct candidate" means
+        // "distinct artist", not "distinct catalog row".
+        val distinctArtists = scored.distinctBy { QobuzCandidateMatcher.normalize(it.first.name) }
+        val best = distinctArtists.firstOrNull()?.first ?: return unchanged(ytAlbums, ytSingles)
 
         // Corroboration:
         //  - YT has albums  → require ≥1 normalized-title overlap.
-        //  - YT has none    → require UNAMBIGUOUS name (no 2nd candidate at threshold).
+        //  - YT has none    → require an UNAMBIGUOUS name (no 2nd DISTINCT artist
+        //    at threshold — homonyms like two different bands named "Nirvana").
         val qAlbumsRaw = apiClient.getArtistAlbums(best.id, token)
         if (ytAlbums.isNotEmpty()) {
             val ytKeys = ytAlbums.map { QobuzCandidateMatcher.normalize(it.title) }.toSet()
             val overlap = qAlbumsRaw.any { QobuzCandidateMatcher.normalize(it.title) in ytKeys }
             if (!overlap) return unchanged(ytAlbums, ytSingles)
         } else {
-            if (scored.size >= 2) return unchanged(ytAlbums, ytSingles) // ambiguous name → skip
+            if (distinctArtists.size >= 2) return unchanged(ytAlbums, ytSingles) // ambiguous name → skip
         }
 
         val (qAlbums, qSingles) = qAlbumsRaw
@@ -575,7 +623,9 @@ private fun QbdlxAlbumItem.toAlbumSummary(artistName: String) = AlbumSummary(
     title = title,
     artist = artist?.name?.ifBlank { artistName } ?: artistName,
     thumbnailUrl = image?.large ?: image?.small ?: image?.thumbnail,
-    year = release_date_original ?: released_at?.let { epochToYear(it) },
+    // release_date_original is "YYYY-MM-DD"; DiscographyMerger.yearInt extracts
+    // the 4-digit year. (If a fixture lacks it, year stays null → sorts last.)
+    year = release_date_original,
     source = AlbumSource.QOBUZ,
 )
 ```
@@ -721,21 +771,28 @@ Run: `./gradlew :core:data:testDebugUnitTest --tests "*ArtistCacheMergeTest"`
 
 - [ ] **Step 3: Implement**
 
-Add `private val supplement: DiscographySupplement` to BOTH constructors (primary + `@Inject`). Extract:
+Add `supplement: DiscographySupplement`:
+- **Primary constructor:** default it — `private val supplement: DiscographySupplement = NoopDiscographySupplement()`. This keeps the six existing `ArtistCache(dao, api, now = {…})` constructions in `ArtistCacheTest` compiling untouched.
+- **`@Inject` secondary constructor:** add the param (no default) and pass it through, so Hilt injects the real bound impl in production.
+
+Extract, with the explicit ordered catch (order matters — `TimeoutCancellationException` **is a** `CancellationException` **is an** `Exception`, so the timeout arm must come first, and the real-cancellation rethrow before the generic fallback):
 ```kotlin
 private suspend fun fetchAndMerge(artistId: String): ArtistProfile {
     val yt = api.getArtist(artistId)
     val merged = try {
         withTimeout(SUPPLEMENT_TIMEOUT_MS) { supplement.mergeInto(yt.name, yt.albums, yt.singles) }
-    } catch (t: Throwable) {
-        if (t is CancellationException && currentCoroutineContext().isActive.not()) throw t
-        MergedDiscography(yt.albums, yt.singles) // timeout/failure → YT-only
+    } catch (e: TimeoutCancellationException) {
+        MergedDiscography(yt.albums, yt.singles)          // supplement too slow → YT-only
+    } catch (e: CancellationException) {
+        throw e                                            // real structured cancellation — never swallow
+    } catch (e: Exception) {
+        MergedDiscography(yt.albums, yt.singles)           // any supplement failure → YT-only
     }
     return yt.copy(albums = merged.albums, singles = merged.singles)
 }
 private companion object { const val SUPPLEMENT_TIMEOUT_MS = 4_000L }
 ```
-Note: `withTimeout` throws `TimeoutCancellationException` (a `CancellationException` subclass) — the `catch` above must swallow the timeout but still honor real structured-cancellation. Simplest robust form: catch `TimeoutCancellationException` explicitly for the fallback, and rethrow other `CancellationException`. Replace the two `api.getArtist(artistId)` + `persist(...)` sequences (miss L150-152 and refresh L134-136) with `fetchAndMerge(artistId)`.
+Replace the two `api.getArtist(artistId)` + `persist(...)` sequences (cold miss ~L150 and stale refresh ~L134) so both call `fetchAndMerge(artistId)` before `persist(...)`. Imports: `kotlinx.coroutines.withTimeout`, `kotlinx.coroutines.TimeoutCancellationException`, `kotlin.coroutines.cancellation.CancellationException`.
 
 - [ ] **Step 4: Run — expect PASS.** Same command as Step 2. Also run the existing ArtistCache test to confirm no regression: `./gradlew :core:data:testDebugUnitTest --tests "*ArtistCache*"`
 
@@ -751,6 +808,7 @@ git commit -m "feat(discography): ArtistCache merges the Qobuz supplement at bot
 
 **Files:**
 - Modify: `core/data/src/main/kotlin/com/stash/core/data/cache/AlbumCache.kt`
+- Modify (keep green): `core/data/src/test/kotlin/com/stash/core/data/cache/AlbumCacheTest.kt` — the three `AlbumCache(api)` / `object : AlbumCache(api)` construction sites (~L64/L81/L96) need a fake `QobuzAlbumFetcher`, and the `invalidate` test (~L75-88) must call `invalidate(id, source)` (see Step 3).
 - Test: `core/data/src/test/kotlin/com/stash/core/data/cache/AlbumCacheRoutingTest.kt`
 
 - [ ] **Step 1: Failing tests** (fake `YTMusicApiClient` + fake `QobuzAlbumFetcher`)
@@ -769,11 +827,13 @@ git commit -m "feat(discography): ArtistCache merges the Qobuz supplement at bot
 - [ ] **Step 2: Run — expect FAIL.**
 Run: `./gradlew :core:data:testDebugUnitTest --tests "*AlbumCacheRoutingTest"`
 
-- [ ] **Step 3: Implement**
+- [ ] **Step 3: Implement + repair the existing test's constructor and invalidate calls**
 
-Inject `private val qobuzFetcher: QobuzAlbumFetcher`. Change the signature to `suspend fun get(id: String, source: AlbumSource = AlbumSource.YOUTUBE)`. Key the cache map by `"$source:$id"` (so a numeric Qobuz id can never collide with a YT browseId). In the fetch body, branch: `if (source == AlbumSource.QOBUZ) qobuzFetcher.getAlbum(id) else api.getAlbum(id)`.
+In `AlbumCache.kt`: inject `private val qobuzFetcher: QobuzAlbumFetcher` (single `@Inject` constructor — this is a required new param). Change the signature to `suspend fun get(id: String, source: AlbumSource = AlbumSource.YOUTUBE)`. Key the cache map by `"$source:$id"` (so a numeric Qobuz id can never collide with a YT browseId). Because the key changed, `invalidate` must match: `fun invalidate(id: String, source: AlbumSource = AlbumSource.YOUTUBE) = entries.remove("$source:$id")`. Fetch body branch: `if (source == AlbumSource.QOBUZ) qobuzFetcher.getAlbum(id) else api.getAlbum(id)`.
 
-- [ ] **Step 4: Run — expect PASS.** Same command as Step 2. Existing AlbumCache tests: `./gradlew :core:data:testDebugUnitTest --tests "*AlbumCache*"` (the default `source` arg keeps old call sites compiling until Task 11 updates them).
+In `AlbumCacheTest.kt` (same commit — the new ctor param and the re-key otherwise fail *compilation* and the `invalidate` test): pass a trivial fake fetcher to all three constructions (`object : QobuzAlbumFetcher { override suspend fun getAlbum(id: String) = error("unused") }`), and change the `invalidate("X")` call to `invalidate("X")` (default source matches the default-source `get("X")` key — no change needed IF that test uses the default source; if it stubs a source, align them). Verify the `invalidate evicts` test still passes under `"$source:$id"` keying.
+
+- [ ] **Step 4: Run — expect PASS.** Same command as Step 2. Existing AlbumCache tests: `./gradlew :core:data:testDebugUnitTest --tests "*AlbumCache*"` — must be green (compilation + `invalidate` behavior).
 
 - [ ] **Step 5: Commit**
 ```bash
@@ -822,30 +882,36 @@ Carries spec **must-address #2** (guard blank-videoId side-effects), **#3** (eag
 
 **Files:**
 - Modify: `feature/search/src/main/kotlin/com/stash/feature/search/AlbumDiscoveryViewModel.kt`
+- Modify (keep green): `feature/search/src/test/kotlin/com/stash/feature/search/AlbumDiscoveryViewModelTest.kt` — its existing `whenever(cache.get(any()))` / `whenever(...get(eq("MPREb_xxx")))` / `verify(...).get(eq("MPREb_xxx"))` stubs must become **two-arg** (`get(any(), any())` / `get(eq("MPREb_xxx"), any())`) once `AlbumCache.get` takes `source`; mixing a matcher with the raw default value throws `InvalidUseOfMatchersException` at runtime.
 - Test: `feature/search/src/test/kotlin/com/stash/feature/search/AlbumDiscoveryViewModelQobuzTest.kt`
 
-- [ ] **Step 1: Failing tests** (fake `AlbumCache` returning a QOBUZ detail; fake `MusicRepository`; MockK `PlayerRepository`)
+**Test framework: `feature:search` uses Mockito (`mockito-core` + `mockito-kotlin`), NOT MockK** — match the sibling `AlbumDiscoveryViewModelTest` (`mock()`, `whenever`, `verify`, `argumentCaptor`, `doReturn`/`doSuspendableAnswer`, `runTest`, `advanceUntilIdle`). Do not add a MockK dependency.
+
+- [ ] **Step 1: Failing tests** (mockito-kotlin; fake collaborators via `mock()`)
 
 ```kotlin
 @Test fun `qobuz album passes source to AlbumCache`() = runTest {
-    vm(source = QOBUZ, browseId = "123"); advanceUntilIdle()
-    coVerify { albumCache.get("123", AlbumSource.QOBUZ) }
+    val vm = vm(source = AlbumSource.QOBUZ, browseId = "123"); advanceUntilIdle()
+    verify(albumCache).get(eq("123"), eq(AlbumSource.QOBUZ))
 }
 @Test fun `qobuz play persists tracks and queues real ids`() = runTest {
-    coEvery { musicRepo.ensureTrackPersisted(any()) } returnsMany listOf(1001L, 1002L)
-    val vm = vm(source = QOBUZ); advanceUntilIdle()
+    whenever(musicRepo.ensureTrackPersisted(any())).thenReturn(1001L, 1002L)
+    val vm = vm(source = AlbumSource.QOBUZ); advanceUntilIdle()
     vm.playAlbum(0); advanceUntilIdle()
-    coVerify { player.setQueue(match { it.map(Track::id) == listOf(1001L,1002L) && it.all { t -> t.youtubeId == null } }, 0) }
+    val cap = argumentCaptor<List<Track>>()
+    verify(player).setQueue(cap.capture(), eq(0))
+    assertThat(cap.firstValue.map { it.id }).containsExactly(1001L, 1002L).inOrder()
+    assertThat(cap.firstValue.all { it.youtubeId == null }).isTrue()
 }
 @Test fun `qobuz album does NOT run videoId-keyed side effects`() = runTest {
-    val vm = vm(source = QOBUZ); advanceUntilIdle()
-    coVerify(exactly = 0) { prefetcher.prefetch(any()) }
-    coVerify(exactly = 0) { delegate.refreshDownloadedIds(any()) }
-    coVerify(exactly = 0) { musicRepo.backfillAlbumForTracks(any(), any(), any()) }
+    val vm = vm(source = AlbumSource.QOBUZ); advanceUntilIdle()
+    verify(prefetcher, never()).prefetch(any())
+    verify(delegate, never()).refreshDownloadedIds(any())
+    verify(musicRepo, never()).backfillAlbumForTracks(any(), any(), any())
 }
-@Test fun `youtube album is unchanged (regression)`() = runTest {
-    val vm = vm(source = YOUTUBE); advanceUntilIdle()
-    coVerify { prefetcher.prefetch(any()) }
+@Test fun `youtube album still runs prefetch (regression)`() = runTest {
+    val vm = vm(source = AlbumSource.YOUTUBE); advanceUntilIdle()
+    verify(prefetcher).prefetch(any())
 }
 ```
 
@@ -886,10 +952,13 @@ fun playAlbum(startIndex: Int = 0) {
 private suspend fun buildQueueTracks(): List<Track> {
     val base = synthesizeDomainTracks()  // now source-branched (below)
     if (albumSource != AlbumSource.QOBUZ) return base
-    // Persist each Qobuz track by canonical identity → real PK, so a persisted
-    // queue resumes and the heart observes it. (Phase 1: rows carry
-    // source=YOUTUBE, youtubeId=null — harmless to qbdlx resolution; MusicSource.QOBUZ
-    // is a Phase-2 concern.)
+    // Persist each Qobuz track by canonical identity → real PK, so the queue
+    // (a persisted list of track ids) resumes after process death. Verified
+    // safe against the startup orphan reaper: getOrphanedDownloadedTracks()
+    // filters `is_downloaded = 1`, and these are streaming stubs
+    // (is_downloaded = 0), so the reaper never touches them. (Phase 1: rows
+    // carry source=YOUTUBE, youtubeId=null — harmless to qbdlx resolution;
+    // MusicSource.QOBUZ is a Phase-2 concern.)
     return base.map { it.copy(id = musicRepository.ensureTrackPersisted(it)) }
 }
 ```
@@ -909,17 +978,75 @@ return tracks.map { t ->
 
 - [ ] **Step 4: Run — expect PASS.** Same command as Step 2. Regression: `./gradlew :feature:search:testDebugUnitTest --tests "*AlbumDiscovery*"`
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Disable "Download" affordances on a QOBUZ album** — `onDownloadAllClicked`/`onDownloadAllConfirmed` and per-row download key on `videoId` (blank for Qobuz), so they'd enqueue blank-videoId `TrackItem`s (no-ops, confusing). Download-by-id is spec-out-of-scope, so gate the download-all button + per-row download menu on `albumSource == AlbumSource.YOUTUBE` in `AlbumDiscoveryScreen`, and early-return from `onDownloadAllClicked` when `albumSource == QOBUZ`. (Shuffle-downloaded FAB is already hidden when the downloaded set is empty, which it always is for Qobuz — no change needed.)
+
+- [ ] **Step 6: Run — expect PASS.** `./gradlew :feature:search:testDebugUnitTest --tests "*AlbumDiscovery*"` (new + existing green).
+
+- [ ] **Step 7: Commit**
 ```bash
-git add feature/search/src/main/kotlin/.../AlbumDiscoveryViewModel.kt feature/search/src/test/kotlin/.../AlbumDiscoveryViewModelQobuzTest.kt
-git commit -m "feat(discography): AlbumDiscoveryVM Qobuz branch — persist-for-resume + guard videoId side-effects"
+git add feature/search/src/main/kotlin/.../AlbumDiscoveryViewModel.kt feature/search/src/main/kotlin/.../AlbumDiscoveryScreen.kt feature/search/src/test/kotlin/.../AlbumDiscoveryViewModelQobuzTest.kt feature/search/src/test/kotlin/.../AlbumDiscoveryViewModelTest.kt
+git commit -m "feat(discography): AlbumDiscoveryVM Qobuz branch — persist-for-resume, guard videoId side-effects, disable download"
 ```
 
-**Must-address #4 (noted, no code):** two tracks in one Qobuz album that canonicalize identically collapse to one PK via `ensureTrackPersisted`, so a tapped `startIndex` could resolve to the wrong row. Rare (duplicate-title within one album); acceptable for Phase 1. If it surfaces, Phase 2's by-id path removes the ambiguity.
+**Scope notes carried here:**
+- **must-address #3 (heart):** album-row hearting via the delegate's canonical-identity path works for Qobuz rows. The **Now-Playing screen's** heart/lyrics key is `youtubeId.hashCode()` (== 0 for every null-youtubeId track) and its live-row fallback is youtubeId-only — so hearting the *currently-playing* Qobuz track mis-keys. That is a **Phase-2** concern (it needs the `qobuzTrackId` row + a non-null-safe key); do **not** claim Now-Playing heart parity in Phase 1, and don't gate Task 13 on it.
+- **must-address #4 (noted, no code):** two tracks in one Qobuz album that canonicalize identically collapse to one PK via `ensureTrackPersisted`, so a tapped `startIndex` could resolve to the wrong row. Rare (duplicate-title within one album); acceptable for Phase 1; Phase 2's by-id path removes it.
+- **stub leak (noted):** each Qobuz-album play persists ~N un-downloaded, un-linked `tracks` stubs that nothing currently reaps (YT albums persist none). Bounded and low-severity; a future sweep for un-downloaded/un-linked streaming stubs can reclaim them. Not a Phase-1 blocker.
 
 ---
 
-## Task 13: On-device verification (the real acceptance test)
+## Task 13: `ArtistProfileViewModel.playArtist` — Qobuz albums in the artist-header "Play"
+
+The artist-header **Play** button fills its queue by iterating `state.albums + state.singles` and calling `albumCache.get(album.id)` (single-arg → YOUTUBE) at `ArtistProfileViewModel.kt:242`, then mapping via `toDomainTrack` (hardcoded `youtubeId = videoId`, `source = YOUTUBE`, `id = videoId.hashCode()`). A merged Qobuz album (numeric id, `source = QOBUZ`) routes to the YT `getAlbum`, throws, is caught by `runCatching{…}.getOrNull() ?: continue`, and is **silently dropped** — so "Play" omits exactly the Qobuz albums this feature adds. Thread source + persist, mirroring Task 12.
+
+**Files:**
+- Modify: `feature/search/src/main/kotlin/com/stash/feature/search/ArtistProfileViewModel.kt` (`playArtist` ~L218-264, `toDomainTrack` ~L266)
+- Test: `feature/search/src/test/kotlin/com/stash/feature/search/ArtistProfileViewModelQobuzTest.kt`
+
+- [ ] **Step 1: Failing test** (mockito-kotlin; a profile whose `albums` includes a `source = QOBUZ` entry; fake `AlbumCache` + `MusicRepository`)
+
+```kotlin
+@Test fun `playArtist fetches qobuz album with its source and queues persisted ids`() = runTest {
+    // profile.albums = [ AlbumSummary(id="123", ..., source = QOBUZ) ]
+    whenever(albumCache.get(eq("123"), eq(AlbumSource.QOBUZ))).thenReturn(qobuzAlbumDetail /* 2 tracks, videoId="" */)
+    whenever(musicRepo.ensureTrackPersisted(any())).thenReturn(2001L, 2002L)
+    val vm = vmWith(profile); advanceUntilIdle()
+    vm.playArtist(); advanceUntilIdle()
+    val cap = argumentCaptor<List<Track>>()
+    verify(player).setQueue(cap.capture(), eq(0))
+    assertThat(cap.firstValue.map { it.id }).containsAtLeast(2001L, 2002L)
+    assertThat(cap.firstValue.filter { it.id in listOf(2001L,2002L) }.all { it.youtubeId == null }).isTrue()
+}
+```
+
+- [ ] **Step 2: Run — expect FAIL.**
+Run: `./gradlew :feature:search:testDebugUnitTest --tests "*ArtistProfileViewModelQobuzTest"`
+
+- [ ] **Step 3: Implement**
+
+In `playArtist`'s catalog loop, pass the album's source and branch the domain-track build + persist:
+```kotlin
+val detail = runCatching { albumCache.get(album.id, album.source) }.getOrNull() ?: continue
+...
+val albumTracks = detail.tracks.filter { seen.add(trackKey(it)) }.take(remaining).map { t ->
+    domainTrackFor(t, album, artistName)   // source-branched (below)
+}
+val persisted = if (album.source == AlbumSource.QOBUZ)
+    albumTracks.map { it.copy(id = musicRepository.ensureTrackPersisted(it)) } else albumTracks
+```
+where `domainTrackFor` returns, for QOBUZ, a `Track(id = 0L, youtubeId = null, source = MusicSource.YOUTUBE, isStreamable = true, …)` and for YOUTUBE the existing `toDomainTrack` mapping. Note the popular-tracks seed (top of `playArtist`) stays YT — only the album-catalog fill gains the branch. The `seen` set must key on something stable for Qobuz (blank videoId collides) — key album-catalog tracks by `title|artist` for the QOBUZ branch.
+
+- [ ] **Step 4: Run — expect PASS.** Same command as Step 2; regression: `./gradlew :feature:search:testDebugUnitTest --tests "*ArtistProfileViewModel*"`
+
+- [ ] **Step 5: Commit**
+```bash
+git add feature/search/src/main/kotlin/.../ArtistProfileViewModel.kt feature/search/src/test/kotlin/.../ArtistProfileViewModelQobuzTest.kt
+git commit -m "feat(discography): artist-header Play includes Qobuz albums (source-threaded fill + persist)"
+```
+
+---
+
+## Task 14: On-device verification (the real acceptance test)
 
 **Files:** none (manual, on the Pixel 6 Pro debug variant — `192.168.137.88:45397`, `com.stash.app.debug`).
 
@@ -927,14 +1054,16 @@ git commit -m "feat(discography): AlbumDiscoveryVM Qobuz branch — persist-for-
 - [ ] **Step 2: Navigate to My Bloody Valentine** (Search → "my bloody valentine" → artist, or Now Playing tap-to-artist on an MBV track). Confirm the discography now shows **Loveless** and **Isn't Anything** (Qobuz-supplemented) alongside the YT entries, with **no duplicates**.
 - [ ] **Step 3: Tap Loveless → Play.** Confirm playback starts and Now Playing shows the **FLAC** badge with `streamOrigin = qbdlx` (pull logcat: `adb -s 192.168.137.88:45397 logcat -d -s StreamSourceRegistry QbdlxStreamResolver`). Expect a `qbdlx served ...` line.
 - [ ] **Step 4: Resume check.** With a Qobuz album playing, force-stop and relaunch; confirm the queue resumes (not empty) — validates the persist-for-resume path.
-- [ ] **Step 5: Negative check.** Open a mainstream artist fully present on YT (e.g. Drake); confirm the grid is unchanged / not duplicated and still plays (supplement merged without disruption). Open an ambiguous-name artist with a sparse YT page if available; confirm no obviously-wrong records were grafted.
-- [ ] **Step 6:** If all pass, the feature is device-verified. Note any anomaly against the relevant task rather than force-completing.
+- [ ] **Step 5: Artist-header Play (Task 13).** On the MBV profile tap **Play**; open the queue and confirm Qobuz albums (Loveless etc.) are actually present in the queue, not silently dropped.
+- [ ] **Step 6: focusAlbum deep-link.** From a currently-playing Qobuz MBV track, use Now Playing → tap-to-artist; confirm the profile scrolls to + highlights the playing Qobuz album (source-agnostic title match — should Just Work; this is the shipped feature's interop check).
+- [ ] **Step 7: Negative check.** Open a mainstream artist fully present on YT (e.g. Drake); confirm the grid is unchanged / not duplicated and still plays (supplement merged without disruption).
+- [ ] **Step 8:** If all pass, the feature is device-verified. Note any anomaly against the relevant task rather than force-completing.
 
 ---
 
 ## Notes for the executor
 
-- **Test styles:** match each module's existing tests — `data:download` uses plain JUnit + offline `test/resources` fixtures; `core:data` cache tests inject a fixed clock; `feature:search` VM tests use MockK + `runTest`/`advanceUntilIdle`. Don't introduce new frameworks.
+- **Test styles (verified per module — do NOT introduce new frameworks):** `data:download` offline-parse tests use plain JUnit + `assertThat`/`assertTrue` reading `test/resources`; `core:data` cache tests inject a fixed clock via the primary constructor; **`feature:search` VM tests use Mockito (`mockito-core` + `mockito-kotlin`) — NOT MockK** (`mock()`, `whenever`, `verify`, `argumentCaptor`, `doReturn`/`doSuspendableAnswer`) with `runTest`/`advanceUntilIdle`. Adding a MockK dependency is out of scope.
 - **Pre-existing red tests** are catalogued in memory (`:data:ytmusic YTMusicApiClientTest`, `:feature:search PreviewPrefetcherTest`) — always use `--tests` filters so they don't mask your signal.
 - **Gradle:** use the daemon (not `--no-daemon`); `--tests` filter every run.
 - **Zero core:media change is an invariant of Phase 1** — if a task tempts you to touch `core:media`, the resolver, `TrackEntity`, or `stashResolveUri`, stop: that's Phase 2, and the design is wrong if Phase 1 needs it.
