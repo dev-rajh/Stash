@@ -665,6 +665,10 @@ class MusicRepositoryImpl @Inject constructor(
     override fun getPickablePlaylists(): Flow<List<com.stash.core.model.Playlist>> =
         playlistDao.getPickablePlaylists().map { entities -> entities.map { it.toDomain() } }
 
+    override fun getPlaylistsContainingTrack(trackId: Long): Flow<List<com.stash.core.model.Playlist>> =
+        playlistDao.observePlaylistsContainingTrack(trackId)
+            .map { entities -> entities.map { it.toDomain() } }
+
     // ── Unmatched tracks ────────────────────────────────────────────────
 
     override fun getUnmatchedTracks(): Flow<List<com.stash.core.data.db.dao.UnmatchedTrackView>> =

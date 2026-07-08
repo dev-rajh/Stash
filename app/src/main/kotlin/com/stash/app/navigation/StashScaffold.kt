@@ -48,6 +48,10 @@ fun StashScaffold(
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = navBackStackEntry?.destination?.route
 
+    // The full-screen Now Playing screen already shows the current track in full,
+    // so the mini-player is redundant there — hide it while that route is on top.
+    val onNowPlaying = currentRoute == NowPlayingRoute::class.qualifiedName
+
     // Whether a detail screen is currently in multi-select mode. Detail screens
     // signal this via `onSelectionModeChanged`; while it is true we hide the
     // whole bottom chrome (mini-player AND nav bar) so the screen's own bottom

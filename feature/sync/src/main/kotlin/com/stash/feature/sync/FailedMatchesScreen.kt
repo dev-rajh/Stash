@@ -595,8 +595,12 @@ private fun UnmatchedTrackRow(
         // Preview button -- only shown when a candidate exists
         if (candidate != null) {
             IconButton(
-                onClick = if (isPreviewPlaying) onStopPreview else {
-                    { onPreview(candidate.videoId) }
+                onClick = {
+                    if (isPreviewPlaying) {
+                        onStopPreview()
+                    } else {
+                        onPreview(candidate.videoId)
+                    }
                 },
                 modifier = Modifier.size(40.dp),
             ) {
@@ -744,8 +748,12 @@ private fun FlaggedTrackListItem(
 
         if (candidate != null) {
             IconButton(
-                onClick = if (isPreviewPlaying) onStopPreview else {
-                    { onPreview(candidate.videoId) }
+                onClick = {
+                    if (isPreviewPlaying) {
+                        onStopPreview()
+                    } else {
+                        onPreview(candidate.videoId)
+                    }
                 },
                 modifier = Modifier.size(40.dp),
             ) {

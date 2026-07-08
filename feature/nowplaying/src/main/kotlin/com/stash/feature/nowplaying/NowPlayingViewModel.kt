@@ -9,6 +9,9 @@ import androidx.palette.graphics.Palette
 import com.stash.core.data.lossless.LosslessUpgrader
 import com.stash.core.data.repository.MusicRepository
 import com.stash.core.media.PlayerRepository
+import com.stash.core.media.sleep.SleepTimerManager
+import com.stash.core.media.sleep.SleepTimerOption
+import com.stash.core.media.sleep.SleepTimerState
 import com.stash.core.model.UpgradeResult
 import com.stash.core.model.isFlac
 import com.stash.core.ui.components.PlaylistInfo
@@ -71,11 +74,21 @@ class NowPlayingViewModel @Inject constructor(
     // `WorkManager.getInstance(appContext)` to match the rest of the
     // codebase (it's not Hilt-injectable in this project).
     private val lyricsRepository: LyricsRepository,
+    private val sleepTimerManager: SleepTimerManager,
     @ApplicationContext private val appContext: Context,
     // Tap-to-artist: resolves the playing track's artist NAME to a YT
     // browseId so Now Playing can open the artist profile.
     private val ytMusicApiClient: com.stash.data.ytmusic.YTMusicApiClient,
 ) : ViewModel() {
+
+    /** Sleep-timer status (shared app-wide). Drives the Now Playing timer menu. */
+    val sleepTimerState: StateFlow<SleepTimerState> = sleepTimerManager.state
+
+    /** Arm the sleep timer for [option]. */
+    fun setSleepTimer(option: SleepTimerOption) = sleepTimerManager.schedule(option)
+
+    /** Cancel any running sleep timer. */
+    fun cancelSleepTimer() = sleepTimerManager.cancel()
 
     private val _uiState = MutableStateFlow(NowPlayingUiState())
     val uiState: StateFlow<NowPlayingUiState> = _uiState.asStateFlow()
@@ -305,6 +318,8 @@ class NowPlayingViewModel @Inject constructor(
     init {
         observePlayerStateLive()
         observeUserPlaylists()
+        observeContainingPlaylists()
+        observeCurrentFileSize()
         observeStreamingHaltedEvents()
         observePlayerUserMessages()
         collectMirrorFailures()
@@ -451,6 +466,67 @@ class NowPlayingViewModel @Inject constructor(
                 }
             }
             .launchIn(viewModelScope)
+    }
+
+    /**
+     * Observes the set of active playlists the currently-playing track
+     * belongs to, for the Now Playing "Appears in" list. Keyed on the
+     * track id (re-queries only when the song changes, not on every 250ms
+     * position tick); streaming-only tracks (id <= 0) have no library row,
+     * so they resolve to an empty list and the section hides itself.
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private fun observeContainingPlaylists() {
+        uiState
+            .map { it.currentTrack?.id }
+            .distinctUntilChanged()
+            .flatMapLatest { id ->
+                if (id == null || id <= 0L) flowOf(emptyList())
+                else musicRepository.getPlaylistsContainingTrack(id)
+            }
+            .onEach { playlists ->
+                _uiState.update { it.copy(containingPlaylists = playlists) }
+            }
+            .launchIn(viewModelScope)
+    }
+
+    /**
+     * Resolves the current track's on-disk file size for the Now Playing
+     * quality line. The Room `file_size_bytes` column is often 0 — legacy
+     * rows, and especially SAF `content://` libraries the size backfill
+     * can't stat via java.io.File. Reading it here (off the main thread,
+     * keyed on the file path so it only runs when the song changes) makes
+     * the size show regardless of whether the column was ever populated.
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private fun observeCurrentFileSize() {
+        uiState
+            .map { it.currentTrack?.filePath }
+            .distinctUntilChanged()
+            .onEach { path ->
+                val size = withContext(Dispatchers.IO) { resolveFileSize(path) }
+                _uiState.update { it.copy(currentFileSizeBytes = size) }
+            }
+            .launchIn(viewModelScope)
+    }
+
+    /**
+     * Reads a file's size in bytes, handling both absolute paths and SAF
+     * `content://` document URIs. Returns 0 on any failure (missing file,
+     * revoked permission, stream-only track with no path).
+     */
+    private fun resolveFileSize(path: String?): Long {
+        if (path.isNullOrBlank()) return 0L
+        return runCatching {
+            if (path.startsWith("content://")) {
+                appContext.contentResolver
+                    .openFileDescriptor(android.net.Uri.parse(path), "r")
+                    ?.use { it.statSize }
+                    ?.takeIf { it > 0 } ?: 0L
+            } else {
+                java.io.File(path).length()
+            }
+        }.getOrDefault(0L)
     }
 
     /**
