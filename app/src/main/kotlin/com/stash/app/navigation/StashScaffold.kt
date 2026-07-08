@@ -54,8 +54,8 @@ fun StashScaffold(
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = navBackStackEntry?.destination?.route
 
-    // The full-screen Now Playing screen already shows the current track in full,
-    // so the mini-player is redundant there — hide it while that route is on top.
+    // The full-screen Now Playing screen owns the bottom edge, so hide app-level
+    // bottom chrome while that route is on top.
     val onNowPlaying = currentRoute == NowPlayingRoute::class.qualifiedName
 
     // Whether a detail screen is currently in multi-select mode. Detail screens
@@ -120,23 +120,15 @@ fun StashScaffold(
         // 15+ where edge-to-edge is enforced. Reported via Twitter
         // (https://x.com/tekno_deha1/status/...).
         bottomBar = {
-            // While a screen is selecting, render no bottom chrome at all — the
-            // screen's own selection action bar (which handles its own nav insets)
-            // takes the bottom edge. This drops innerPadding.bottom to 0 so the
-            // content extends full-height behind that action bar.
-            if (!selectionActive) {
+            // While a screen owns the bottom edge, render no bottom chrome at all.
+            // This drops innerPadding.bottom to 0 so content can extend full-height
+            // behind that screen's own bottom UI.
+            if (!selectionActive && !onNowPlaying) {
                 val qobuzStatusViewModel: QobuzStatusViewModel = androidx.hilt.navigation.compose.hiltViewModel()
                 val qobuzStatus by qobuzStatusViewModel.bannerStatus.collectAsStateWithLifecycle()
-                val onNowPlaying = currentRoute == NowPlayingRoute::class.qualifiedName
 
                 Column(modifier = Modifier.windowInsetsPadding(WindowInsets.navigationBars)) {
-                    AnimatedVisibility(
-                        visible = !onNowPlaying,
-                        enter = fadeIn(),
-                        exit = fadeOut(),
-                    ) {
-                        com.stash.core.ui.components.QobuzDiscoveryBanner(status = qobuzStatus)
-                    }
+                    com.stash.core.ui.components.QobuzDiscoveryBanner(status = qobuzStatus)
                     // On Now Playing the LiveLyricsBar (rendered inside the
                     // screen itself) takes the MiniPlayer's spot — the full
                     // player already shows all transport controls, so the

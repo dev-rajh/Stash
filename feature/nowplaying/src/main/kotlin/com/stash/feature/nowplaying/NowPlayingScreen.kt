@@ -42,10 +42,6 @@ import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Wifi
-import androidx.compose.material.icons.filled.Bedtime
-import androidx.compose.material.icons.filled.Timer
-import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.CircularProgressIndicator
@@ -443,7 +439,7 @@ fun NowPlayingScreen(
                     accentColor = npAccent(uiState.vibrantColor),
                 )
 
-                Spacer(modifier = Modifier.height(24.dp))
+                Spacer(modifier = Modifier.height(8.dp))
 
                 // -- Album art -- (swipe left/right to skip, swipe down to dismiss)
                 AlbumArtSection(
@@ -456,7 +452,7 @@ fun NowPlayingScreen(
                     onSwipeDownDismiss = onDismiss,
                 )
 
-                Spacer(modifier = Modifier.height(32.dp))
+                Spacer(modifier = Modifier.height(8.dp))
 
                 // -- Track info -- (tap the title/artist to open the artist
                 // profile; the trailing chevron signals it's actionable, and
@@ -554,7 +550,7 @@ fun NowPlayingScreen(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(20.dp))
+                Spacer(modifier = Modifier.height(8.dp))
 
                 // -- Progress bar --
                 GlowingProgressBar(
@@ -566,7 +562,7 @@ fun NowPlayingScreen(
                     modifier = Modifier.fillMaxWidth(),
                 )
 
-                Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(10.dp))
 
                 // -- Playback controls --
                 PlaybackControls(
