@@ -358,6 +358,8 @@ fun StashNavHost(
                 onDismiss = { navController.popBackStack() },
                 onNavigateToPlaylist = { playlistId ->
                     navController.navigate(PlaylistDetailRoute(playlistId))
+                onNavigateToArtist = { id, name, avatar, focusAlbum ->
+                    navController.navigate(SearchArtistRoute(id, name, avatar, focusAlbum))
                 },
             )
         }
