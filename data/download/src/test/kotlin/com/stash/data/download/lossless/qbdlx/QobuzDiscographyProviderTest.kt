@@ -31,8 +31,15 @@ class QobuzDiscographyProviderTest {
     private fun ytAlbum(title: String, year: String? = "1991") =
         AlbumSummary("yt_$title", title, "My Bloody Valentine", null, year, AlbumSource.YOUTUBE)
 
-    private fun qAlbum(title: String, year: String? = "1991") =
-        QbdlxAlbumItem(id = "qb_$title", title = title, release_date_original = year)
+    // Defaults the album's credited artist to the matched artist so it survives
+    // the by-artist ownership filter; pass a different `artist` to model a cover.
+    private fun qAlbum(title: String, year: String? = "1991", artist: String = "My Bloody Valentine") =
+        QbdlxAlbumItem(
+            id = "qb_$title",
+            title = title,
+            artist = QbdlxPerformer(artist),
+            release_date_original = year,
+        )
 
     /** Usable qbdlx: toggle on, live token. */
     private fun usable(token: String = "tok1") {
@@ -85,6 +92,31 @@ class QobuzDiscographyProviderTest {
 
         assertThat(out.albums.map { it.title }).containsExactly("m b v", "Loveless").inOrder()
         assertThat(out.albums.map { it.source }).containsExactly(AlbumSource.QOBUZ, AlbumSource.QOBUZ)
+    }
+
+    // (c2) cover-album filter ──────────────────────────────────────────────
+    @Test
+    fun `cover albums credited to other artists are filtered out`() = runTest {
+        // Qobuz's artist-discography endpoint returns tribute/cover albums credited
+        // to OTHER artists (real MBV case: "When You Sleep" by Arcade Golf Scene,
+        // "sometimes" by Matt Cantu, all newer than the classics). Only the
+        // matched artist's own releases must survive.
+        usable()
+        coEvery { apiClient.searchArtists(any(), any()) } returns
+            listOf(QbdlxArtistItem(1, "My Bloody Valentine"))
+        coEvery { apiClient.getArtistAlbums(any(), any()) } returns listOf(
+            qAlbum("Loveless", "1991"),
+            qAlbum("When You Sleep", "2022", artist = "Arcade Golf Scene"),
+            qAlbum("sometimes", "2026", artist = "Matt Cantu"),
+        )
+
+        val out = provider().mergeInto(
+            "My Bloody Valentine",
+            listOf(ytAlbum("Loveless", "1991")),
+            emptyList(),
+        )
+
+        assertThat(out.albums.map { it.title }).containsExactly("Loveless")
     }
 
     // (d) ────────────────────────────────────────────────────────────────

@@ -185,6 +185,14 @@ class AlbumDiscoveryViewModel @Inject constructor(
     /** Whether download affordances should show — false for Qobuz albums (no videoId). */
     val downloadSupported: Boolean get() = albumSource == AlbumSource.YOUTUBE
 
+    /**
+     * True for a native Qobuz album. Its tracks carry no videoId, so the screen
+     * must NOT render the videoId-keyed preview/download row (all rows would
+     * share the blank-videoId identity — one preview would light up every row
+     * and play the same track). A simpler play-on-tap row is used instead.
+     */
+    val isNativeAlbum: Boolean get() = albumSource == AlbumSource.QOBUZ
+
     /** User cancelled the download-all confirm dialog — reset both flags. */
     fun onDownloadAllDismissed() {
         _uiState.update { it.copy(showDownloadConfirm = false, downloadConfirmQueue = emptyList()) }

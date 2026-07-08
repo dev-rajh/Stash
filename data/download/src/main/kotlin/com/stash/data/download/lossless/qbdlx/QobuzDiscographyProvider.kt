@@ -51,19 +51,32 @@ class QobuzDiscographyProvider @Inject constructor(
         val distinctArtists = scored.distinctBy { QobuzCandidateMatcher.normalize(it.first.name) }
         val best = distinctArtists.firstOrNull()?.first ?: return unchanged(ytAlbums, ytSingles)
 
-        val qAlbumsRaw = apiClient.getArtistAlbums(best.id, token)
+        val nBest = QobuzCandidateMatcher.normalize(best.name)
+        // Qobuz's artist-discography endpoint includes tribute/cover albums that
+        // are CREDITED TO OTHER ARTISTS (e.g. "When You Sleep" by Arcade Golf
+        // Scene appears under My Bloody Valentine). Keep only releases actually
+        // BY the matched artist, else the covers flood the discography and —
+        // being newer than the classics — sort ahead of them. Uses
+        // artistSimilarity (not strict equality) so multi-artist credits like
+        // "JAY-Z, Kanye West" still match "JAY-Z" via subset coverage.
+        val ownAlbums = apiClient.getArtistAlbums(best.id, token).filter {
+            QobuzCandidateMatcher.artistSimilarity(
+                nBest,
+                QobuzCandidateMatcher.normalize(it.artist?.name.orEmpty()),
+            ) >= ARTIST_MATCH_THRESHOLD
+        }
         if (ytAlbums.isNotEmpty()) {
             // A confident single match still needs corroboration: at least one Qobuz
             // release title must overlap a YT one, else we may have matched a homonym.
             val ytKeys = ytAlbums.map { QobuzCandidateMatcher.normalize(it.title) }.toSet()
-            val overlap = qAlbumsRaw.any { QobuzCandidateMatcher.normalize(it.title) in ytKeys }
+            val overlap = ownAlbums.any { QobuzCandidateMatcher.normalize(it.title) in ytKeys }
             if (!overlap) return unchanged(ytAlbums, ytSingles)
         } else {
             // No YT titles to corroborate against → an ambiguous name is unresolvable.
             if (distinctArtists.size >= 2) return unchanged(ytAlbums, ytSingles)
         }
 
-        val (rawAlbums, rawSingles) = qAlbumsRaw.partition { it.isAlbumLane }
+        val (rawAlbums, rawSingles) = ownAlbums.partition { it.isAlbumLane }
         MergedDiscography(
             albums = DiscographyMerger.mergeLane(ytAlbums, rawAlbums.map { it.toAlbumSummary(best.name) }),
             singles = DiscographyMerger.mergeLane(ytSingles, rawSingles.map { it.toAlbumSummary(best.name) }),
