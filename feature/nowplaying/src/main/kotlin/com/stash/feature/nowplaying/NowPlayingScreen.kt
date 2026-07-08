@@ -34,6 +34,7 @@ import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Wifi
+import androidx.compose.material.icons.outlined.Lyrics
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.CircularProgressIndicator
@@ -290,28 +291,32 @@ fun NowPlayingScreen(
                     .padding(horizontal = 24.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-            // -- Top bar: dismiss, "NOW PLAYING" + album context, overflow "…" --
-            TopBar(
-                onDismiss = onDismiss,
-                onOptionsClick = { showOptions = true },
-                hasTrack = uiState.hasTrack,
-                contextTitle = track?.album?.takeIf { it.isNotBlank() },
-            )
+                // -- Top bar: dismiss, "NOW PLAYING" + album context, overflow "…" --
+                TopBar(
+                    onDismiss = onDismiss,
+                    onOptionsClick = { showOptions = true },
+                    hasTrack = uiState.hasTrack,
+                    contextTitle = track?.album?.takeIf { it.isNotBlank() },
+                    // make it scrollable
+                    
 
-                Spacer(modifier = Modifier.height(24.dp))
+                )
 
-            // -- Album art --
-            AlbumArtSection(
-                albumArtUrl = track?.albumArtUrl,
-                albumArtPath = track?.albumArtPath,
-                accentColor = uiState.vibrantColor,
-                onBitmapLoaded = viewModel::onAlbumArtLoaded,
-                onSwipeNext = viewModel::onSkipNext,
-                onSwipePrevious = viewModel::onSkipPrevious,
-                onSwipeDownDismiss = onDismiss,
-            )
 
-                Spacer(modifier = Modifier.height(32.dp))
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // -- Album art --
+                AlbumArtSection(
+                    albumArtUrl = track?.albumArtUrl,
+                    albumArtPath = track?.albumArtPath,
+                    accentColor = uiState.vibrantColor,
+                    onBitmapLoaded = viewModel::onAlbumArtLoaded,
+                    onSwipeNext = viewModel::onSkipNext,
+                    onSwipePrevious = viewModel::onSkipPrevious,
+                    onSwipeDownDismiss = onDismiss,
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
 
                 // -- Track info --
                 Row(
@@ -327,37 +332,40 @@ fun NowPlayingScreen(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         textAlign = TextAlign.Center,
-                        modifier = Modifier.weight(1f, fill = false),
+                        modifier = Modifier.weight(1f, fill = false).basicMarquee(),
                     )
-                    if (track != null) {
-                        Spacer(modifier = Modifier.width(8.dp))
-                        com.stash.core.ui.components.FlacBadge(
-                            fileFormat = track.fileFormat,
-                            bitsPerSample = track.bitsPerSample,
-                            sampleRateHz = track.sampleRateHz,
-                            size = 18.dp,
-                            tint = Color.White,
-                        )
-                    }
+//                    if (track != null) {
+//                        Spacer(modifier = Modifier.width(8.dp))
+//                        com.stash.core.ui.components.FlacBadge(
+//                            fileFormat = track.fileFormat,
+//                            bitsPerSample = track.bitsPerSample,
+//                            sampleRateHz = track.sampleRateHz,
+//                            size = 18.dp,
+//                            tint = Color.White,
+//                        )
+//                    }
                 }
 
                 Spacer(modifier = Modifier.height(4.dp))
 
-            // -- Track info --
-            // The FLAC badge that used to sit beside the title is gone \u2014 the
-            // same quality info already shows on the line below. Long titles
-            // marquee-scroll instead of truncating; same for the artist line.
-            Text(
-                text = track?.title ?: "Not Playing",
-                fontSize = 22.sp,
-                fontWeight = FontWeight.Bold,
-                color = Color.White,
-                maxLines = 1,
-                textAlign = TextAlign.Center,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .basicMarquee(),
-            )
+                Text(
+                    text = buildString {
+                        if (track != null) {
+                            append(track.artist)
+//                            if (track.album.isNotBlank()) {
+//                                append(" \u2022 ")
+//                                append(track.album)
+//                            }
+                        }
+                    },
+                    fontSize = 14.sp,
+                    color = Color.White.copy(alpha = 0.7f),
+                    maxLines = 1,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .basicMarquee(),
+                )
 
                 // Quality line — codec + bit-depth/sample-rate + bitrate, when known.
                 // Sized smaller than the artist/album line; degrades gracefully when
@@ -366,7 +374,12 @@ fun NowPlayingScreen(
                 // stream rather than a local file), a small wifi glyph prefixes
                 // the line so the user knows playback is using their connection.
                 if (track != null) {
-                    val qualityText = trackQualityText(track)
+                    // Prefer the DB's file size; fall back to the size the
+                    // ViewModel resolved from disk/SAF for the current track
+                    // (SAF content:// rows never get file_size_bytes backfilled).
+                    val effectiveSize = track.fileSizeBytes.takeIf { it > 0 }
+                        ?: uiState.currentFileSizeBytes
+                    val qualityText = trackQualityText(track, effectiveSize)
                     if (qualityText != null) {
                         Spacer(modifier = Modifier.height(2.dp))
                         QualityLine(
@@ -374,38 +387,11 @@ fun NowPlayingScreen(
                             isStreaming = uiState.isStreaming,
                         )
                     }
-                },
-                fontSize = 14.sp,
-                color = Color.White.copy(alpha = 0.7f),
-                maxLines = 1,
-                textAlign = TextAlign.Center,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .basicMarquee(),
-            )
-
-            // Quality line — codec + bit-depth/sample-rate + bitrate, when known.
-            // Sized smaller than the artist/album line; degrades gracefully when
-            // some fields are missing (returns a partial line, not nothing).
-            // When the active MediaItem is sourced from an http(s) URI (Kennyy
-            // stream rather than a local file), a small wifi glyph prefixes
-            // the line so the user knows playback is using their connection.
-            if (track != null) {
-                // Prefer the DB's file size; fall back to the size the
-                // ViewModel resolved from disk/SAF for the current track
-                // (SAF content:// rows never get file_size_bytes backfilled).
-                val effectiveSize = track.fileSizeBytes.takeIf { it > 0 }
-                    ?: uiState.currentFileSizeBytes
-                val qualityText = trackQualityText(track, effectiveSize)
-                if (qualityText != null) {
-                    Spacer(modifier = Modifier.height(2.dp))
-                    QualityLine(
-                        qualityText = qualityText,
-                        isStreaming = uiState.isStreaming,
-                    )
                 }
 
-                Spacer(modifier = Modifier.height(28.dp))
+
+
+                Spacer(modifier = Modifier.height(8.dp))
 
                 // -- Progress bar --
                 GlowingProgressBar(
@@ -417,7 +403,7 @@ fun NowPlayingScreen(
                     modifier = Modifier.fillMaxWidth(),
                 )
 
-                Spacer(modifier = Modifier.height(20.dp))
+                Spacer(modifier = Modifier.height(10.dp))
 
                 // -- Playback controls --
                 PlaybackControls(
@@ -433,61 +419,55 @@ fun NowPlayingScreen(
                     onCycleRepeatMode = viewModel::onCycleRepeatMode,
                 )
 
-                Spacer(modifier = Modifier.height(48.dp))
-            }
+                Spacer(modifier = Modifier.height(12.dp))
+            
 
-            // Live-lyrics bar — sits exactly where the MiniPlayer is on other
-            // screens (the scaffold hides MiniPlayer on this route), directly
-            // above the nav bar. Zero-height when Hidden, so the content
-            // column keeps the full screen for lyric-less tracks.
-            LiveLyricsBar(
-                state = lyricsState,
-                currentPositionMs = lyricsPositionMs,
-                accentColor = uiState.vibrantColor,
-                onTap = viewModel::onShowLyrics,
-            )
-
-            // -- Quick actions: Queue / Lyrics --
-            // The two "playback context" surfaces, surfaced as a pair of
-            // filled chips below the transport controls (per the redesign).
-            // Hidden when no track is loaded so they don't open empty sheets.
-            if (uiState.hasTrack) {
-                Spacer(modifier = Modifier.height(24.dp))
-                QuickActionsRow(
-                    queueSize = uiState.queueSize,
-                    onQueueClick = { showQueue = true },
-                    onLyricsClick = viewModel::onShowLyrics,
-                )
-            }
-
-            // -- Song file path on disk (cleaned for display) --
-            val displayedPath = track?.filePath
-                ?.takeIf { it.isNotBlank() }
-                ?.let(::displayPath)
-            if (displayedPath != null) {
-                Spacer(modifier = Modifier.height(32.dp))
-                FilePathSection(path = displayedPath)
-            }
-
-            // -- "Appears in" playlists for the current track --
-            if (uiState.containingPlaylists.isNotEmpty()) {
-                Spacer(modifier = Modifier.height(if (displayedPath != null) 24.dp else 36.dp))
-                PlaylistsSection(
-                    playlists = uiState.containingPlaylists,
+                // Live-lyrics bar — sits exactly where the MiniPlayer is on other
+                // screens (the scaffold hides MiniPlayer on this route), directly
+                // above the nav bar. Zero-height when Hidden, so the content
+                // column keeps the full screen for lyric-less tracks.
+                LiveLyricsBar(
+                    state = lyricsState,
+                    currentPositionMs = lyricsPositionMs,
                     accentColor = uiState.vibrantColor,
-                    onPlaylistClick = onNavigateToPlaylist,
+                    onTap = viewModel::onShowLyrics,
                 )
-            }
+
+                // -- Quick actions: Queue / Lyrics --
+                // The two "playback context" surfaces, surfaced as a pair of
+                // filled chips below the transport controls (per the redesign).
+                // Hidden when no track is loaded so they don't open empty sheets.
+                if (uiState.hasTrack) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    QuickActionsRow(
+                        queueSize = uiState.queueSize,
+                        onQueueClick = { showQueue = true },
+                        onLyricsClick = viewModel::onShowLyrics,
+                    )
+                }
+
+                // -- Song file path on disk (cleaned for display) --
+                val displayedPath = track?.filePath
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let(::displayPath)
+                if (displayedPath != null) {
+                    Spacer(modifier = Modifier.height(32.dp))
+                    FilePathSection(path = displayedPath)
+                }
+
+                // -- "Appears in" playlists for the current track --
+                if (uiState.containingPlaylists.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(if (displayedPath != null) 24.dp else 36.dp))
+                    PlaylistsSection(
+                        playlists = uiState.containingPlaylists,
+                        accentColor = uiState.vibrantColor,
+                        onPlaylistClick = onNavigateToPlaylist,
+                    )
+                }
 
                 Spacer(modifier = Modifier.height(48.dp))
-            }
 
-            LiveLyricsBar(
-                state = lyricsState,
-                currentPositionMs = lyricsPositionMs,
-                accentColor = uiState.vibrantColor,
-                onTap = viewModel::onShowLyrics,
-            )
+            }
         }
     }
 }
