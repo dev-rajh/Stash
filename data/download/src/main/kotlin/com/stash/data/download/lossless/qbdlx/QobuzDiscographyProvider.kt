@@ -52,18 +52,21 @@ class QobuzDiscographyProvider @Inject constructor(
         val best = distinctArtists.firstOrNull()?.first ?: return unchanged(ytAlbums, ytSingles)
 
         val nBest = QobuzCandidateMatcher.normalize(best.name)
-        // Qobuz's artist-discography endpoint includes tribute/cover albums that
-        // are CREDITED TO OTHER ARTISTS (e.g. "When You Sleep" by Arcade Golf
-        // Scene appears under My Bloody Valentine). Keep only releases actually
-        // BY the matched artist, else the covers flood the discography and —
-        // being newer than the classics — sort ahead of them. Uses
-        // artistSimilarity (not strict equality) so multi-artist credits like
-        // "JAY-Z, Kanye West" still match "JAY-Z" via subset coverage.
+        // Qobuz's artist-discography endpoint is a firehose: real studio albums
+        // PLUS singles, compilations, and every release the artist is merely
+        // FEATURED on (tribute/cover singles credited to other artists, guest
+        // spots credited to "X, Lil Wayne", etc.). YouTube's album grid is
+        // clean/curated, so Qobuz is here ONLY to fill genuine ALBUM gaps.
+        // Keep a release only if it is:
+        //   1. the matched artist's OWN release — the PRIMARY artist's name is
+        //      EXACTLY the match (strict, not subset). Drops features/collabs
+        //      ("Jay Sean, Lil Wayne" ≠ "Lil Wayne") and covers by others.
+        //   2. album-length — enough tracks to be an album, not a single/EP.
+        //      release_type is null from this endpoint, so track count is the
+        //      only reliable signal (real albums ~8-24 tracks; singles 1-3).
         val ownAlbums = apiClient.getArtistAlbums(best.id, token).filter {
-            QobuzCandidateMatcher.artistSimilarity(
-                nBest,
-                QobuzCandidateMatcher.normalize(it.artist?.name.orEmpty()),
-            ) >= ARTIST_MATCH_THRESHOLD
+            QobuzCandidateMatcher.normalize(it.artist?.name.orEmpty()) == nBest &&
+                it.tracks_count >= ALBUM_MIN_TRACKS
         }
         if (ytAlbums.isNotEmpty()) {
             // A confident single match still needs corroboration: at least one Qobuz
@@ -76,10 +79,11 @@ class QobuzDiscographyProvider @Inject constructor(
             if (distinctArtists.size >= 2) return unchanged(ytAlbums, ytSingles)
         }
 
-        val (rawAlbums, rawSingles) = ownAlbums.partition { it.isAlbumLane }
+        // Gap-fill the ALBUMS lane only; singles/EPs stay 100% YouTube (we don't
+        // supplement them — that's where most of the Qobuz noise lives).
         MergedDiscography(
-            albums = DiscographyMerger.mergeLane(ytAlbums, rawAlbums.map { it.toAlbumSummary(best.name) }),
-            singles = DiscographyMerger.mergeLane(ytSingles, rawSingles.map { it.toAlbumSummary(best.name) }),
+            albums = DiscographyMerger.gapFill(ytAlbums, ownAlbums.map { it.toAlbumSummary(best.name) }),
+            singles = ytSingles,
         )
     }.getOrElse { unchanged(ytAlbums, ytSingles) }
 
@@ -99,19 +103,16 @@ class QobuzDiscographyProvider @Inject constructor(
         // superset/canonical name match, so 0.6 comfortably admits real matches while
         // rejecting partial-token noise. Bump only if a real false-graft slips through.
         const val ARTIST_MATCH_THRESHOLD = 0.6f
+        // Minimum track count for a Qobuz release to count as an album (not a
+        // single/EP). Singles are 1-3 tracks; real albums ~8-24. 5 clears the
+        // junk singles while keeping short albums. Tune here if a real album is
+        // ever excluded.
+        const val ALBUM_MIN_TRACKS = 5
         val VARIOUS_ARTISTS = setOf(
             "various artists", "various", "verschiedene interpreten", "multi artistes", "va",
         )
     }
 }
-
-/** release_type is NULL for every item from getArtistAlbums (it only appears in
- *  album-detail), so null → albums lane; only an explicit "single"/"ep" is a single. */
-private val QbdlxAlbumItem.isAlbumLane: Boolean
-    get() = when (release_type?.lowercase()) {
-        "single", "ep" -> false
-        else -> true
-    }
 
 private fun QbdlxAlbumItem.toAlbumSummary(artistName: String) = AlbumSummary(
     id = id,

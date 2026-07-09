@@ -31,15 +31,21 @@ class QobuzDiscographyProviderTest {
     private fun ytAlbum(title: String, year: String? = "1991") =
         AlbumSummary("yt_$title", title, "My Bloody Valentine", null, year, AlbumSource.YOUTUBE)
 
-    // Defaults the album's credited artist to the matched artist so it survives
-    // the by-artist ownership filter; pass a different `artist` to model a cover.
-    private fun qAlbum(title: String, year: String? = "1991", artist: String = "My Bloody Valentine") =
-        QbdlxAlbumItem(
-            id = "qb_$title",
-            title = title,
-            artist = QbdlxPerformer(artist),
-            release_date_original = year,
-        )
+    // Defaults to the matched artist + album-length track count so it survives
+    // both gap-fill filters; pass a different `artist` to model a feature/cover,
+    // or a low `tracksCount` to model a single/EP.
+    private fun qAlbum(
+        title: String,
+        year: String? = "1991",
+        artist: String = "My Bloody Valentine",
+        tracksCount: Int = 10,
+    ) = QbdlxAlbumItem(
+        id = "qb_$title",
+        title = title,
+        artist = QbdlxPerformer(artist),
+        release_date_original = year,
+        tracks_count = tracksCount,
+    )
 
     /** Usable qbdlx: toggle on, live token. */
     private fun usable(token: String = "tok1") {
@@ -77,7 +83,7 @@ class QobuzDiscographyProviderTest {
 
     // (c) ────────────────────────────────────────────────────────────────
     @Test
-    fun `confident single match with title overlap merges qobuz albums in`() = runTest {
+    fun `gap-fill adds the Qobuz-only album and keeps YouTube on collision`() = runTest {
         usable()
         coEvery { apiClient.searchArtists(any(), any()) } returns
             listOf(QbdlxArtistItem(1, "My Bloody Valentine"))
@@ -86,12 +92,14 @@ class QobuzDiscographyProviderTest {
 
         val out = provider().mergeInto(
             "My Bloody Valentine",
-            listOf(ytAlbum("Loveless", "1991")),
+            listOf(ytAlbum("Loveless", "1991")), // YT already has Loveless
             emptyList(),
         )
 
+        // "m b v" is the gap Qobuz fills; "Loveless" stays YouTube's (authoritative).
         assertThat(out.albums.map { it.title }).containsExactly("m b v", "Loveless").inOrder()
-        assertThat(out.albums.map { it.source }).containsExactly(AlbumSource.QOBUZ, AlbumSource.QOBUZ)
+        assertThat(out.albums.map { it.source })
+            .containsExactly(AlbumSource.QOBUZ, AlbumSource.YOUTUBE).inOrder()
     }
 
     // (c2) cover-album filter ──────────────────────────────────────────────
@@ -117,6 +125,55 @@ class QobuzDiscographyProviderTest {
         )
 
         assertThat(out.albums.map { it.title }).containsExactly("Loveless")
+    }
+
+    // (c3) singles/EPs filtered out of the album gap-fill ───────────────────
+    @Test
+    fun `singles and EPs are excluded from the album gap-fill`() = runTest {
+        usable()
+        coEvery { apiClient.searchArtists(any(), any()) } returns
+            listOf(QbdlxArtistItem(1, "My Bloody Valentine"))
+        coEvery { apiClient.getArtistAlbums(any(), any()) } returns listOf(
+            qAlbum("Loveless", "1991", tracksCount = 11),          // real album → kept
+            qAlbum("Sunny Sundae Smile", "1987", tracksCount = 1), // single → dropped
+        )
+
+        val out = provider().mergeInto("My Bloody Valentine", listOf(ytAlbum("Loveless")), emptyList())
+
+        assertThat(out.albums.map { it.title }).containsExactly("Loveless")
+    }
+
+    // (c4) features (co-credited) filtered out ──────────────────────────────
+    @Test
+    fun `features where the artist is only co-credited are excluded`() = runTest {
+        usable()
+        coEvery { apiClient.searchArtists(any(), any()) } returns
+            listOf(QbdlxArtistItem(1, "Lil Wayne"))
+        coEvery { apiClient.getArtistAlbums(any(), any()) } returns listOf(
+            qAlbum("Tha Carter V", "2018", artist = "Lil Wayne", tracksCount = 23),  // corroborates + own
+            qAlbum("Tha Carter VI", "2025", artist = "Lil Wayne", tracksCount = 16), // own gap
+            qAlbum("Down", "2009", artist = "Jay Sean, Lil Wayne", tracksCount = 12), // feature → dropped
+        )
+
+        val out = provider().mergeInto("Lil Wayne", listOf(ytAlbum("Tha Carter V", "2018")), emptyList())
+
+        assertThat(out.albums.map { it.title }).contains("Tha Carter VI") // genuine gap added
+        assertThat(out.albums.map { it.title }).doesNotContain("Down")    // feature excluded
+    }
+
+    // (c5) singles lane is never supplemented ───────────────────────────────
+    @Test
+    fun `singles lane stays 100 percent youtube`() = runTest {
+        usable()
+        coEvery { apiClient.searchArtists(any(), any()) } returns
+            listOf(QbdlxArtistItem(1, "My Bloody Valentine"))
+        coEvery { apiClient.getArtistAlbums(any(), any()) } returns
+            listOf(qAlbum("Loveless", "1991", tracksCount = 11))
+        val ytSingles = listOf(ytAlbum("Sunny Sundae Smile", "1987"))
+
+        val out = provider().mergeInto("My Bloody Valentine", listOf(ytAlbum("Loveless")), ytSingles)
+
+        assertThat(out.singles).isEqualTo(ytSingles) // unchanged; Qobuz never touches singles
     }
 
     // (d) ────────────────────────────────────────────────────────────────
