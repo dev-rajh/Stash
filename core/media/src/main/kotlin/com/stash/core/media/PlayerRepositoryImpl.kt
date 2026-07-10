@@ -663,7 +663,12 @@ class PlayerRepositoryImpl @Inject constructor(
         libraryShuffleActive = false
         librarySnapshot = emptyList()
         currentQueueTracks = firstBatch
-        controller.setMediaItems(firstBatch.map { it.toMediaItem() }, 0, 0L)
+        // Radio tracks are STREAMING tracks (no filePath) — they must become
+        // stash-resolve:// placeholders (toQueueMediaItem), NOT bare toMediaItem()
+        // which sets a null URI and makes Media3's DefaultMediaSourceFactory NPE
+        // on the missing localConfiguration. (shuffleLibrary can use toMediaItem
+        // because it only ever queues downloaded, file://-backed tracks.)
+        controller.setMediaItems(firstBatch.map { it.toQueueMediaItem() }, 0, 0L)
         controller.prepare()
         controller.play()
         _radioSeedLabel.value = when (seed) {
@@ -690,7 +695,8 @@ class PlayerRepositoryImpl @Inject constructor(
             val session = radioSession ?: return
             val batch = radioGenerator.nextBatch(session)
             if (batch.isEmpty()) return
-            controller.addMediaItems(batch.map { it.toMediaItem() })
+            // Streaming tracks → stash-resolve:// placeholders (see startRadio).
+            controller.addMediaItems(batch.map { it.toQueueMediaItem() })
             currentQueueTracks = currentQueueTracks + batch
         }
     }

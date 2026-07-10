@@ -18,6 +18,7 @@ import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.slot
 import io.mockk.verify
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.test.runTest
@@ -76,6 +77,8 @@ class PlayerRepositoryRadioTest {
         coEvery { streamingPreference.current() } returns true
         val session = mockk<RadioSession>(relaxed = true)
         coEvery { radioGenerator.start(any()) } returns (session to listOf(track(1), track(2)))
+        val items = slot<List<MediaItem>>()
+        every { controller.setMediaItems(capture(items), any<Int>(), any<Long>()) } returns Unit
 
         val started = repo.startRadio(RadioSeed.Artist("My Bloody Valentine", "id"))
 
@@ -83,6 +86,13 @@ class PlayerRepositoryRadioTest {
         verify { controller.setMediaItems(any<List<MediaItem>>(), 0, 0L) }
         verify { controller.play() }
         assertThat(repo.radioSeedLabel.value).isEqualTo("My Bloody Valentine")
+        // Streaming radio tracks have no filePath — every MediaItem MUST carry a
+        // stash-resolve:// placeholder URI, else Media3's DefaultMediaSourceFactory
+        // NPEs on the missing localConfiguration and nothing plays (regression guard).
+        assertThat(items.captured).hasSize(2)
+        items.captured.forEach { item ->
+            assertThat(item.localConfiguration?.uri?.scheme).isEqualTo("stash-resolve")
+        }
     }
 
     @Test fun `startRadio returns false when the seed yields an empty batch`() = runTest {
