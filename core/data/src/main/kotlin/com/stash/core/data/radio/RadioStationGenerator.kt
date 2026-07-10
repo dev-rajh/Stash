@@ -167,11 +167,22 @@ class RadioStationGenerator @Inject constructor(
         title = title,
         artist = artist,
         durationMs = 0L,
-        albumArtUrl = thumbnailUrl,
+        // Album art, across the board: prefer the richer InnerTube thumbnail
+        // (artist-radio popular tracks carry one) and otherwise derive it from the
+        // videoId. Song-radio candidates come from Last.fm (no artwork) and resolve
+        // via searchCanonicalVideoId (videoId only), so without this fallback they
+        // would have no art. Every YouTube video has an hqdefault thumbnail, so
+        // this covers ALL radio tracks with no extra API call. This is the single
+        // chokepoint every emitted radio Track flows through (both seed types).
+        albumArtUrl = thumbnailUrl ?: ytThumbnail(videoId),
         youtubeId = videoId,
         source = MusicSource.YOUTUBE,
         isStreamable = true,
     )
+
+    /** Canonical YouTube thumbnail for a videoId. `hqdefault` (480x360) exists
+     *  for effectively every video (unlike `maxresdefault`, which 404s often). */
+    private fun ytThumbnail(videoId: String) = "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
 
     private suspend fun startSong(seed: RadioSeed.Song): Pair<RadioSession, List<Track>> {
         val similar = lastFm.getSimilarTracks(seed.artist, seed.title, limit = NEIGHBOR_LIMIT)

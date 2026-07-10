@@ -34,5 +34,10 @@ class RadioStationGeneratorSongTest {
         assertTrue("has seed share", batch.any { it.artist == "Lil Wayne" })
         assertTrue("has similar tracks", batch.any { it.artist != "Lil Wayne" })
         assertTrue(session.played.isNotEmpty())
+        // Song-radio candidates carry no Last.fm artwork and resolve to a bare
+        // videoId — every emitted track must still get album art (derived from the
+        // videoId), else Now Playing/queue/notif show blank covers across the board.
+        assertTrue("all tracks have album art", batch.all { !it.albumArtUrl.isNullOrBlank() })
+        assertTrue("art derived from videoId", batch.all { it.albumArtUrl!!.contains("/vi/") })
     }
 }

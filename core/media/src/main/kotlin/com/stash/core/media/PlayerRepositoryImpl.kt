@@ -663,14 +663,35 @@ class PlayerRepositoryImpl @Inject constructor(
         libraryShuffleActive = false
         librarySnapshot = emptyList()
         currentQueueTracks = firstBatch
+
         // Radio tracks are STREAMING tracks (no filePath) — they must become
         // stash-resolve:// placeholders (toQueueMediaItem), NOT bare toMediaItem()
         // which sets a null URI and makes Media3's DefaultMediaSourceFactory NPE
         // on the missing localConfiguration. (shuffleLibrary can use toMediaItem
         // because it only ever queues downloaded, file://-backed tracks.)
-        controller.setMediaItems(firstBatch.map { it.toQueueMediaItem() }, 0, 0L)
-        controller.prepare()
-        controller.play()
+        val currentYtId = controller.currentMediaItem
+            ?.mediaMetadata?.extras?.getString(EXTRA_TRACK_YOUTUBE_ID)
+        val seedYtId = firstBatch.first().youtubeId
+        if (currentYtId != null && currentYtId == seedYtId && controller.mediaItemCount > 0) {
+            // Seamless: a song radio seeded from the currently-playing track (the
+            // Now Playing "Start radio" case). The seed IS firstBatch[0], so DON'T
+            // tear the player down and restart it — keep the current item playing
+            // untouched and just splice the queue around it: drop everything before
+            // and after it, then append the rest of the station after it.
+            val curIdx = controller.currentMediaItemIndex
+            if (curIdx + 1 < controller.mediaItemCount) {
+                controller.removeMediaItems(curIdx + 1, controller.mediaItemCount)
+            }
+            if (curIdx > 0) controller.removeMediaItems(0, curIdx)
+            controller.addMediaItems(firstBatch.drop(1).map { it.toQueueMediaItem() })
+            // No prepare/play/seek — playback of the seed continues uninterrupted.
+        } else {
+            // Fresh station (artist radio, or a song radio for a track that isn't
+            // the current one): replace the queue and start from the top.
+            controller.setMediaItems(firstBatch.map { it.toQueueMediaItem() }, 0, 0L)
+            controller.prepare()
+            controller.play()
+        }
         _radioSeedLabel.value = when (seed) {
             is com.stash.core.data.radio.RadioSeed.Artist -> seed.name
             is com.stash.core.data.radio.RadioSeed.Song -> seed.title

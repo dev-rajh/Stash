@@ -1,7 +1,10 @@
 package com.stash.core.media
 
+import android.os.Bundle
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
 import androidx.media3.session.MediaController
+import com.stash.core.media.service.StashPlaybackService.Companion.EXTRA_TRACK_YOUTUBE_ID
 import androidx.test.core.app.ApplicationProvider
 import com.google.common.truth.Truth.assertThat
 import com.stash.core.data.db.dao.TrackDao
@@ -114,6 +117,38 @@ class PlayerRepositoryRadioTest {
         repo.setQueue(listOf(track(9)))
 
         assertThat(repo.radioSeedLabel.value).isNull()
+    }
+
+    @Test fun `startRadio splices around the current track when it is the seed (no restart)`() = runTest {
+        // Now Playing "Start radio": the seed IS the currently-playing track, so
+        // startRadio must NOT setMediaItems/prepare/play (that restarts it). It
+        // should keep the current item playing and splice the queue around it.
+        coEvery { streamingPreference.current() } returns true
+        val session = mockk<RadioSession>(relaxed = true)
+        // firstBatch[0] == the playing track (youtubeId "v1").
+        coEvery { radioGenerator.start(any()) } returns (session to listOf(track(1), track(2)))
+        val current = MediaItem.Builder()
+            .setMediaId("999")
+            .setMediaMetadata(
+                MediaMetadata.Builder()
+                    .setExtras(Bundle().apply { putString(EXTRA_TRACK_YOUTUBE_ID, "v1") })
+                    .build(),
+            )
+            .build()
+        every { controller.currentMediaItem } returns current
+        every { controller.mediaItemCount } returns 3
+        every { controller.currentMediaItemIndex } returns 1
+
+        val started = repo.startRadio(RadioSeed.Song("Pancake", "The Swirlies", "v1"))
+
+        assertThat(started).isTrue()
+        // Spliced: removed the items after and before the current one, appended the tail.
+        verify { controller.removeMediaItems(2, 3) }
+        verify { controller.removeMediaItems(0, 1) }
+        verify { controller.addMediaItems(any<List<MediaItem>>()) }
+        // Did NOT tear down / restart the seed track.
+        verify(exactly = 0) { controller.setMediaItems(any<List<MediaItem>>(), any<Int>(), any<Long>()) }
+        verify(exactly = 0) { controller.play() }
     }
 
     @Test fun `growRadio appends the next batch while a station is active`() = runTest {
