@@ -20,3 +20,29 @@ data class RadioCandidate(
 internal fun RadioCandidate.identity(): String =
     videoId?.takeIf { it.isNotBlank() }
         ?: (artist.trim().lowercase() + "|" + title.trim().lowercase())
+
+/**
+ * Live, in-memory state of one station. Mutable cursor + no-repeat set; not
+ * persisted (a process kill ends the station — queued tracks still play out).
+ * Created and mutated only by [RadioStationGenerator]; consumed by the player.
+ */
+class RadioSession internal constructor(
+    internal val seed: RadioSeed,
+    internal val ordered: MutableList<RadioCandidate>,
+    internal val played: MutableSet<String>,   // identity() + resolved-videoId keys already emitted
+) {
+    internal var cursor: Int = 0
+
+    /** True once the pool is exhausted and no further widening is possible. */
+    internal var exhausted: Boolean = false
+
+    /**
+     * Neighbors not yet used, consumed NEIGHBOR_POOL at a time by widening.
+     * This is what keeps the station extending: artist radio fills it at start
+     * (with the neighbors AFTER the first pool); song radio lazy-loads it on the
+     * first widen. Draining it — not re-fetching the same top-N — is the fix for
+     * "widen returns the same already-played neighbors."
+     */
+    internal val remainingNeighbors: ArrayDeque<com.stash.core.data.lastfm.LastFmSimilarArtist> = ArrayDeque()
+    internal var neighborsLoaded: Boolean = false
+}
