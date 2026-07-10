@@ -125,9 +125,29 @@ class RadioStationGenerator @Inject constructor(
         isStreamable = true,
     )
 
-    // Replaced in Task A4.
-    private suspend fun startSong(seed: RadioSeed.Song): Pair<RadioSession, List<Track>> =
-        TODO("implemented in Task A4")
+    private suspend fun startSong(seed: RadioSeed.Song): Pair<RadioSession, List<Track>> {
+        val similar = lastFm.getSimilarTracks(seed.artist, seed.title, limit = NEIGHBOR_LIMIT)
+            .getOrDefault(emptyList())
+            .take(SONG_SIMILAR_POOL)
+        val seedTop = lastFm.getArtistTopTracks(seed.artist, limit = TRACKS_PER_ARTIST)
+            .getOrDefault(emptyList())
+
+        val similarWeightSum = similar.sumOf { it.match.coerceAtLeast(0.05f).toDouble() }.toFloat()
+        val seedWeight = if (similarWeightSum <= 0f) 1f
+            else (SEED_SHARE / (1f - SEED_SHARE)) * similarWeightSum
+
+        val pool = ArrayList<RadioCandidate>()
+        // Seed share: the seeded track first, then the seed artist's top tracks.
+        pool += RadioCandidate(seed.artist, seed.title, seed.ytVideoId, seedWeight)
+        seedTop.filterNot { it.title.equals(seed.title, ignoreCase = true) }
+            .forEach { pool += RadioCandidate(seed.artist, it.title, null, seedWeight) }
+        // Neighbors: each similar track, weighted by match; artist keyed for interleave.
+        for (s in similar) {
+            pool += RadioCandidate(s.artist, s.title, null, s.match.coerceAtLeast(0.05f))
+        }
+        val session = RadioSession(seed, RadioInterleaver.order(pool).toMutableList(), mutableSetOf())
+        return session to drainBatch(session, FIRST_BATCH)
+    }
 
     companion object {
         const val SEED_SHARE = 1f / 3f
