@@ -90,6 +90,7 @@ class PlayerRepositoryImpl @Inject constructor(
     private val connectivity: ConnectivityMonitor,
     private val trackDao: TrackDao,
     private val playbackResumer: PlaybackResumer,
+    private val radioGenerator: com.stash.core.data.radio.RadioStationGenerator,
 ) : PlayerRepository {
 
     /**
@@ -248,6 +249,20 @@ class PlayerRepositoryImpl @Inject constructor(
     @Volatile
     private var librarySnapshot: List<Track> = emptyList()
 
+    /** Radio station state. `radioActive` arms the radio grow watcher; the
+     *  session holds the generator's cursor/no-repeat state. Mutually exclusive
+     *  with library shuffle — startRadio disarms shuffle and vice-versa. */
+    @Volatile
+    private var radioActive: Boolean = false
+
+    @Volatile
+    private var radioSession: com.stash.core.data.radio.RadioSession? = null
+
+    private val _radioSeedLabel = MutableStateFlow<String?>(null)
+    override val radioSeedLabel: StateFlow<String?> = _radioSeedLabel.asStateFlow()
+
+    private val radioGrowMutex = Mutex()
+
     /**
      * The LOGICAL playback queue — the user-intended track order. Since the
      * full-timeline migration (2026-07-04) the controller timeline mirrors
@@ -377,9 +392,13 @@ class PlayerRepositoryImpl @Inject constructor(
     ) {
         // Any explicit setQueue (playlist tap, single-song play, etc.) leaves
         // library-shuffle mode behind. Snapshot is cleared so a stale Track
-        // list doesn't grow back into a different queue later.
+        // list doesn't grow back into a different queue later. A radio station
+        // also ends (the user picked something else).
         libraryShuffleActive = false
         librarySnapshot = emptyList()
+        radioActive = false
+        radioSession = null
+        _radioSeedLabel.value = null
 
         val controller = ensureController() ?: return
         if (tracks.isEmpty()) return
@@ -599,6 +618,10 @@ class PlayerRepositoryImpl @Inject constructor(
         val shuffled = all.shuffled()
         librarySnapshot = shuffled
         libraryShuffleActive = true
+        // Mutually exclusive with radio: shuffling the library ends any station.
+        radioActive = false
+        radioSession = null
+        _radioSeedLabel.value = null
         // Keep the logical queue in lockstep: all-downloaded tracks resolve
         // 1:1 into the timeline, but a stale logical list from an earlier
         // setQueue would otherwise hijack the queue display whenever the
@@ -614,6 +637,36 @@ class PlayerRepositoryImpl @Inject constructor(
         // we hand to the controller IS the playback order.
         controller.prepare()
         controller.play()
+    }
+
+    override suspend fun startRadio(seed: com.stash.core.data.radio.RadioSeed): Boolean {
+        if (!streamingPreference.current()) return false
+        val controller = ensureController() ?: return false
+        val (session, firstBatch) = radioGenerator.start(seed)
+        if (firstBatch.isEmpty()) return false
+        radioSession = session
+        radioActive = true
+        // Only ONE grower may run: startRadio bypasses setQueueInternal (which is
+        // what normally disarms library shuffle), so disarm it here explicitly —
+        // otherwise both watchers append as the queue drains and library tracks
+        // pollute the station.
+        libraryShuffleActive = false
+        librarySnapshot = emptyList()
+        currentQueueTracks = firstBatch
+        controller.setMediaItems(firstBatch.map { it.toMediaItem() }, 0, 0L)
+        controller.prepare()
+        controller.play()
+        _radioSeedLabel.value = when (seed) {
+            is com.stash.core.data.radio.RadioSeed.Artist -> seed.name
+            is com.stash.core.data.radio.RadioSeed.Song -> seed.title
+        }
+        return true
+    }
+
+    override fun stopRadio() {
+        radioActive = false
+        radioSession = null
+        _radioSeedLabel.value = null
     }
 
     /**

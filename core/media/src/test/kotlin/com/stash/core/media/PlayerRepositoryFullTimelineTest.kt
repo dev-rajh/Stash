@@ -59,6 +59,7 @@ class PlayerRepositoryFullTimelineTest {
             connectivity = connectivity,
             trackDao = trackDao,
             playbackResumer = PlaybackResumer(playbackStateStore, trackDao),
+            radioGenerator = mockk(relaxed = true),
         )
         repo.controllerDeferred = controller
     }
