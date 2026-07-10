@@ -175,6 +175,7 @@ fun SearchScreen(
                     onDownload = { t -> viewModel.onDownload(t.toTrackItem()) },
                     onPlayNext = viewModel::onPlayNext,
                     onAddToQueue = viewModel::onAddToQueue,
+                    onStartRadio = viewModel::onStartRadio,
                     onRequestAddToPlaylist = viewModel::onRequestAddToPlaylist,
                     onVisibleSongIdsChanged = viewModel::prefetchVisible,
                 )
@@ -413,6 +414,7 @@ private fun SectionedResultsList(
     onDownload: (TrackSummary) -> Unit,
     onPlayNext: (TrackItem) -> Unit = {},
     onAddToQueue: (TrackItem) -> Unit = {},
+    onStartRadio: (TrackItem) -> Unit = {},
     onRequestAddToPlaylist: (TrackItem) -> Unit = {},
     onVisibleSongIdsChanged: (List<String>) -> Unit = {},
 ) {
@@ -500,6 +502,7 @@ private fun SectionedResultsList(
                             onDownload = { onDownload(t) },
                             onPlayNext = { onPlayNext(t.toTrackItem()) },
                             onAddToQueue = { onAddToQueue(t.toTrackItem()) },
+                            onStartRadio = { onStartRadio(t.toTrackItem()) },
                             onAddToPlaylist = { onRequestAddToPlaylist(t.toTrackItem()) },
                             modifier = Modifier.padding(horizontal = 16.dp),
                         )

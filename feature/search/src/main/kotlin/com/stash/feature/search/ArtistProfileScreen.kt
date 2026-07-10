@@ -146,6 +146,7 @@ fun ArtistProfileScreen(
                         onDownload = { vm.delegate.downloadTrack(it.toTrackItem()) },
                         onPlayNext = vm::onPlayNext,
                         onAddToQueue = vm::onAddToQueue,
+                        onStartRadio = vm::onStartRadio,
                         onRequestAddToPlaylist = vm::onRequestAddToPlaylist,
                         onNavigateToAlbum = onNavigateToAlbum,
                         onNavigateToArtist = onNavigateToArtist,
@@ -165,6 +166,7 @@ fun ArtistProfileScreen(
                     onDownload = { vm.delegate.downloadTrack(it.toTrackItem()) },
                     onPlayNext = vm::onPlayNext,
                     onAddToQueue = vm::onAddToQueue,
+                    onStartRadio = vm::onStartRadio,
                     onRequestAddToPlaylist = vm::onRequestAddToPlaylist,
                     onNavigateToAlbum = onNavigateToAlbum,
                     onNavigateToArtist = onNavigateToArtist,
@@ -204,6 +206,7 @@ private fun androidx.compose.foundation.lazy.LazyListScope.contentSections(
     onDownload: (SearchResultItem) -> Unit,
     onPlayNext: (TrackItem) -> Unit,
     onAddToQueue: (TrackItem) -> Unit,
+    onStartRadio: (TrackItem) -> Unit,
     onRequestAddToPlaylist: (TrackItem) -> Unit,
     onNavigateToAlbum: (album: AlbumSummary) -> Unit,
     onNavigateToArtist: (artistId: String, name: String, avatarUrl: String?) -> Unit,
@@ -224,6 +227,7 @@ private fun androidx.compose.foundation.lazy.LazyListScope.contentSections(
                 onDownload = onDownload,
                 onPlayNext = onPlayNext,
                 onAddToQueue = onAddToQueue,
+                onStartRadio = onStartRadio,
                 onRequestAddToPlaylist = onRequestAddToPlaylist,
             )
         }

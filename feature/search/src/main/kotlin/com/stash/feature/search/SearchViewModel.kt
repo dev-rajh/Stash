@@ -110,6 +110,10 @@ class SearchViewModel @Inject constructor(
         recordTrack(item)
         delegate.playNext(item)
     }
+    fun onStartRadio(item: TrackItem) {
+        recordTrack(item)
+        delegate.startRadio(item)
+    }
     fun onAddToQueue(item: TrackItem) {
         recordTrack(item)
         delegate.addToQueue(item)

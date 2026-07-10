@@ -224,6 +224,7 @@ fun AlbumDiscoveryScreen(
                                 },
                                 onPlayNext = { vm.onPlayNext(trackItem) },
                                 onAddToQueue = { vm.onAddToQueue(trackItem) },
+                                onStartRadio = { vm.onStartRadio(trackItem) },
                                 onAddToPlaylist = { vm.onRequestAddToPlaylist(trackItem) },
                                 modifier = Modifier
                                     .padding(horizontal = 16.dp, vertical = 4.dp)

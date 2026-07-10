@@ -47,6 +47,7 @@ fun PopularTracksSection(
     onDownload: (SearchResultItem) -> Unit,
     onPlayNext: (TrackItem) -> Unit = {},
     onAddToQueue: (TrackItem) -> Unit = {},
+    onStartRadio: (TrackItem) -> Unit = {},
     onRequestAddToPlaylist: (TrackItem) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
@@ -74,6 +75,7 @@ fun PopularTracksSection(
                 onDownload = { onDownload(item) },
                 onPlayNext = { onPlayNext(trackItem) },
                 onAddToQueue = { onAddToQueue(trackItem) },
+                onStartRadio = { onStartRadio(trackItem) },
                 onAddToPlaylist = { onRequestAddToPlaylist(trackItem) },
             )
         }

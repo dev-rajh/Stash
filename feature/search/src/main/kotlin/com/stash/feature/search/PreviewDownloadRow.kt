@@ -21,6 +21,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.PlaylistAddCheck
 import androidx.compose.material.icons.filled.PlaylistPlay
+import androidx.compose.material.icons.filled.Radio
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material3.CircularProgressIndicator
@@ -89,6 +90,7 @@ fun PreviewDownloadRow(
     onPlayNext: () -> Unit = {},
     onAddToQueue: () -> Unit = {},
     onAddToPlaylist: () -> Unit = {},
+    onStartRadio: () -> Unit = {},
 ) {
     val extendedColors = StashTheme.extendedColors
 
@@ -255,6 +257,11 @@ fun PreviewDownloadRow(
                     text = { Text("Add to playlist") },
                     leadingIcon = { Icon(Icons.Default.PlaylistAddCheck, contentDescription = null) },
                     onClick = { menuOpen = false; onAddToPlaylist() },
+                )
+                DropdownMenuItem(
+                    text = { Text("Start radio") },
+                    leadingIcon = { Icon(Icons.Default.Radio, contentDescription = null) },
+                    onClick = { menuOpen = false; onStartRadio() },
                 )
             }
         }

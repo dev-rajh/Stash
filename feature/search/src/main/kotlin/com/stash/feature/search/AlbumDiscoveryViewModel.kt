@@ -119,6 +119,8 @@ class AlbumDiscoveryViewModel @Inject constructor(
         delegate.userPlaylists.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     fun onPlayNext(item: TrackItem) = delegate.playNext(item)
+
+    fun onStartRadio(item: TrackItem) = delegate.startRadio(item)
     fun onAddToQueue(item: TrackItem) = delegate.addToQueue(item)
     fun onRequestAddToPlaylist(item: TrackItem) { _playlistSheetItem.value = item }
     fun onDismissPlaylistSheet() { _playlistSheetItem.value = null }
