@@ -62,7 +62,11 @@ identities already played, it produces the next *balanced* batch of fully-playab
 - **`RadioSession`** — the in-memory station state (seed, rotation, cursors, dedup).
 - **`RadioInterleaver`** (pure) — weighted, no-adjacent-repeat interleave of the
   artist pool into a track order. Split out like the mix engine's `TagPoolBuilder`
-  so the ratio/weighting logic is unit-tested without any I/O.
+  so the ratio/weighting logic is unit-tested without any I/O. **Both seed types
+  flow through it:** artist radio feeds it the artist rotation directly; song radio
+  keys each candidate by its *artist* (seed artist vs. each similar track's artist)
+  and feeds those as the pool, so "~1/3 seed, no adjacent same-artist, match-score
+  weighting" means the same thing for both. There is one ordering path, not two.
 
 ### `core:media` — queue integration (extend existing)
 
@@ -130,6 +134,9 @@ match score.** These ratios are named constants (tunable knobs).
 ## 4. Playback integration & track identity
 
 - **Starting:** `startRadio(seed)` mirrors `shuffleLibrary` (queue + arm in one).
+  Ordering matters: it builds the queue **first** (the same internal path
+  `setQueue` uses), **then** arms the radio watcher — never the reverse — so radio
+  does not disarm itself on start.
   `generator.start` is **foreground-first**: resolve ~4 tracks fast, start
   playback immediately, background-fill the remainder of the first batch. Now
   Playing opens as usual.
@@ -141,7 +148,9 @@ match score.** These ratios are named constants (tunable knobs).
   `source = YOUTUBE`, synthetic `id = videoId.hashCode()`). Unlike the Qobuz
   discography tracks, they need **no `ensureTrackPersisted`** and **no `id=0`
   special-casing**. The stream still upgrades to qbdlx FLAC at play time via the
-  usual title/artist search-match. No new persistence.
+  usual title/artist search-match. No new persistence. (`id = videoId.hashCode()`
+  is the existing synthetic-key convention for streaming `Track`s built from a
+  videoId — radio follows it, not a new scheme.)
 - **Disarm & lifecycle:** any normal `setQueue` / `shuffleLibrary` / `playTrack`
   ends the station (user chose something else); plus an explicit "stop radio."
   The station is **in-memory / ephemeral**: on a process kill, the already-queued
