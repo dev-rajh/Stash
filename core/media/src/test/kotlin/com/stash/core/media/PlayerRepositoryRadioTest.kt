@@ -105,4 +105,24 @@ class PlayerRepositoryRadioTest {
 
         assertThat(repo.radioSeedLabel.value).isNull()
     }
+
+    @Test fun `growRadio appends the next batch while a station is active`() = runTest {
+        coEvery { streamingPreference.current() } returns true
+        val session = mockk<RadioSession>(relaxed = true)
+        coEvery { radioGenerator.start(any()) } returns (session to listOf(track(1)))
+        coEvery { radioGenerator.nextBatch(session) } returns listOf(track(2), track(3))
+        repo.startRadio(RadioSeed.Artist("MBV", "id"))
+
+        repo.growRadio()
+
+        coVerify { radioGenerator.nextBatch(session) }
+        verify { controller.addMediaItems(any<List<MediaItem>>()) }
+    }
+
+    @Test fun `growRadio is a no-op when no station is active`() = runTest {
+        repo.growRadio()
+
+        coVerify(exactly = 0) { radioGenerator.nextBatch(any()) }
+        verify(exactly = 0) { controller.addMediaItems(any<List<MediaItem>>()) }
+    }
 }

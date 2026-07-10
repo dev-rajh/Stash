@@ -188,6 +188,16 @@ class PlayerRepositoryImpl @Inject constructor(
             }
         }
 
+        // Radio auto-grow watcher. Mirrors the library-shuffle grower: when a
+        // station is armed and the queue nears the tail, append the next batch.
+        scope.launch {
+            playerState.collect { state ->
+                if (!radioActive) return@collect
+                val remaining = state.queue.size - state.currentIndex - 1
+                if (remaining in 0 until RADIO_GROW_THRESHOLD) growRadio()
+            }
+        }
+
         // Next-track prefetch watcher. Whenever the player advances (currentIndex
         // changes), eagerly resolve currentQueueTracks[currentIndex+1] so its URL
         // is cached + the controller's MediaItem URI is refreshed BEFORE ExoPlayer
@@ -667,6 +677,22 @@ class PlayerRepositoryImpl @Inject constructor(
         radioActive = false
         radioSession = null
         _radioSeedLabel.value = null
+    }
+
+    /** Append the next generated batch to the station queue. Single-flight via
+     *  [radioGrowMutex] so a flurry of state emissions can't fan out into
+     *  concurrent grows. Internal as a test seam (the watcher that fires it is
+     *  driven by the private _playerState listener, device-verified). */
+    internal suspend fun growRadio() {
+        radioGrowMutex.withLock {
+            if (!radioActive) return
+            val controller = controllerDeferred ?: return
+            val session = radioSession ?: return
+            val batch = radioGenerator.nextBatch(session)
+            if (batch.isEmpty()) return
+            controller.addMediaItems(batch.map { it.toMediaItem() })
+            currentQueueTracks = currentQueueTracks + batch
+        }
     }
 
     /**
@@ -1608,6 +1634,7 @@ class PlayerRepositoryImpl @Inject constructor(
         private const val POSITION_UPDATE_INTERVAL_MS = 250L
 
         /** Auto-grow fires once the remaining queue tail drops below this many tracks. */
+        private const val RADIO_GROW_THRESHOLD = 5
         private const val LIBRARY_SHUFFLE_GROW_THRESHOLD = 5
 
         /** How many tracks each grow appends. Big enough to outpace a fast-skipping user. */
