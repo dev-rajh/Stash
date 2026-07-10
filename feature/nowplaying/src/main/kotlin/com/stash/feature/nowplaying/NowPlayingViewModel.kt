@@ -128,6 +128,26 @@ class NowPlayingViewModel @Inject constructor(
      * `artist`. No-op when nothing is playing or a resolve is already in
      * flight (double-tap guard). Resolve miss/failure → snackbar, no nav.
      */
+    /** Live label of the active radio station (null when no station). */
+    val radioSeedLabel: StateFlow<String?> = playerRepository.radioSeedLabel
+
+    /** Start a song radio seeded from the currently-playing track. Streaming-only:
+     *  a false return (streaming off/offline) surfaces a hint, not a dead tap. */
+    fun startRadioFromCurrent() {
+        val track = _uiState.value.currentTrack ?: return
+        viewModelScope.launch {
+            val started = playerRepository.startRadio(
+                com.stash.core.data.radio.RadioSeed.Song(
+                    title = track.title, artist = track.artist, ytVideoId = track.youtubeId,
+                ),
+            )
+            if (!started) _userMessages.tryEmit("Radio needs Online mode — turn on streaming.")
+        }
+    }
+
+    /** Stop the active radio station. */
+    fun stopRadio() = playerRepository.stopRadio()
+
     fun onTrackInfoTapped() {
         val track = _uiState.value.currentTrack ?: return
         if (_resolvingArtist.value) return

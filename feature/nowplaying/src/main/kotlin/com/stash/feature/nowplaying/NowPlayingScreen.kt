@@ -19,6 +19,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Radio
+import androidx.compose.material3.TextButton
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material.icons.filled.BookmarkBorder
@@ -94,6 +97,7 @@ fun NowPlayingScreen(
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val track = uiState.currentTrack
     val resolvingArtist by viewModel.resolvingArtist.collectAsStateWithLifecycle()
+    val radioLabel by viewModel.radioSeedLabel.collectAsStateWithLifecycle()
     var showQueue by remember { mutableStateOf(false) }
     var showSaveSheet by remember { mutableStateOf(false) }
     // "This song is wrong" dialog — shown when the flag icon is tapped.
@@ -379,6 +383,59 @@ fun NowPlayingScreen(
                         textAlign = TextAlign.Center,
                         modifier = Modifier.fillMaxWidth(),
                     )
+                }
+
+                // Radio affordance: an active-station "Radio · <seed>" chip with a
+                // Stop button, or a "Start radio" button seeded from this song when
+                // no station is running. Hidden entirely when nothing is playing.
+                if (track != null) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    val label = radioLabel
+                    if (label != null) {
+                        Row(
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Radio,
+                                contentDescription = null,
+                                tint = Color.White.copy(alpha = 0.8f),
+                                modifier = Modifier.size(16.dp),
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "Radio · $label",
+                                fontSize = 13.sp,
+                                color = Color.White.copy(alpha = 0.8f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false),
+                            )
+                            IconButton(onClick = viewModel::stopRadio) {
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = "Stop radio",
+                                    tint = Color.White.copy(alpha = 0.6f),
+                                    modifier = Modifier.size(16.dp),
+                                )
+                            }
+                        }
+                    } else {
+                        TextButton(onClick = viewModel::startRadioFromCurrent) {
+                            Icon(
+                                imageVector = Icons.Default.Radio,
+                                contentDescription = null,
+                                tint = Color.White.copy(alpha = 0.8f),
+                                modifier = Modifier.size(16.dp),
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "Start radio",
+                                fontSize = 13.sp,
+                                color = Color.White.copy(alpha = 0.8f),
+                            )
+                        }
+                    }
                 }
 
                 // Quality line — codec + bit-depth/sample-rate + bitrate, when known.
