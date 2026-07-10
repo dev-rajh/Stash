@@ -96,9 +96,13 @@ testable by mocking them.
 
 ## 3. Generation strategy (the "balanced" feel)
 
-"Balanced blend" = recognizable but always drifting outward. Concretely:
-**~1 in 3 slots go to the seed; the other ~2/3 to neighbors weighted by Last.fm
-match score.** These ratios are named constants (tunable knobs).
+"Balanced blend" = recognizable but always drifting outward. Concretely, the
+seed is weighted to be the **single most frequent artist in the opening pool
+(~1 in 3 slots there); neighbors take the rest ∝ Last.fm match score.** Because
+the seed has a finite catalog, as the station widens to more neighbors the seed
+naturally recedes — a familiar open that drifts outward, rather than a literal
+steady 1/3 forever (which would require repeating the seed's few tracks, and the
+no-repeat set forbids repeats). These ratios are named constants (tunable knobs).
 
 ### Artist radio (seed = artist)
 1. `getSimilarArtists(seedName)` → ranked neighbors with match scores.

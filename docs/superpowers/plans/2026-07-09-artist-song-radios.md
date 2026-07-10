@@ -276,11 +276,20 @@ return a `RadioSession` holding the ordering + cursor + no-repeat set.
 class RadioSession internal constructor(
     internal val seed: RadioSeed,
     internal val ordered: MutableList<RadioCandidate>,
-    internal val played: MutableSet<String>,   // identity() values already emitted
+    internal val played: MutableSet<String>,   // identity() + resolved-videoId keys already emitted
 ) {
     internal var cursor: Int = 0
     /** True once the pool is exhausted and no further widening is possible. */
     internal var exhausted: Boolean = false
+    /**
+     * Neighbors not yet used, consumed NEIGHBOR_POOL at a time by widening.
+     * This is what keeps the station extending: artist radio fills it at start
+     * (with the neighbors AFTER the first pool); song radio lazy-loads it on the
+     * first widen. Draining it — not re-fetching the same top-N — is the fix for
+     * "widen returns the same already-played neighbors."
+     */
+    internal val remainingNeighbors: ArrayDeque<com.stash.core.data.lastfm.LastFmSimilarArtist> = ArrayDeque()
+    internal var neighborsLoaded: Boolean = false
 }
 ```
 
@@ -383,13 +392,20 @@ class RadioStationGenerator @Inject constructor(
     /** Start a station: returns the session + the first playable batch. */
     suspend fun start(seed: RadioSeed): Pair<RadioSession, List<Track>> = when (seed) {
         is RadioSeed.Artist -> startArtist(seed)
-        is RadioSeed.Song -> startSong(seed)   // Task A4
+        is RadioSeed.Song -> startSong(seed)
     }
 
+    // Replaced in Task A4. Present now so `start()` compiles in this task.
+    private suspend fun startSong(seed: RadioSeed.Song): Pair<RadioSession, List<Track>> =
+        TODO("implemented in Task A4")
+
     private suspend fun startArtist(seed: RadioSeed.Artist): Pair<RadioSession, List<Track>> {
-        val neighbors = lastFm.getSimilarArtists(seed.name, limit = NEIGHBOR_LIMIT)
+        // Fetch the FULL ranked neighbor list once; use the first NEIGHBOR_POOL now
+        // and page the rest during widening (see widen()). Fetching the same top-N
+        // again later would only re-return already-played neighbors.
+        val allNeighbors = lastFm.getSimilarArtists(seed.name, limit = NEIGHBOR_MAX)
             .getOrDefault(emptyList())
-            .take(NEIGHBOR_POOL)
+        val neighbors = allNeighbors.take(NEIGHBOR_POOL)
         // Resolve seed (via known browseId) + each neighbor's popular list, in parallel.
         val artistTracks: Map<String, List<TrackSummary>> = coroutineScope {
             val seedJob = async { seed.name to seedPopular(seed) }
@@ -400,6 +416,8 @@ class RadioStationGenerator @Inject constructor(
         }
         val pool = buildArtistPool(seed.name, neighbors, artistTracks)
         val session = RadioSession(seed, RadioInterleaver.order(pool).toMutableList(), mutableSetOf())
+        session.remainingNeighbors.addAll(allNeighbors.drop(NEIGHBOR_POOL))
+        session.neighborsLoaded = true
         return session to drainBatch(session, FIRST_BATCH)
     }
 
@@ -413,8 +431,16 @@ class RadioStationGenerator @Inject constructor(
         return runCatching { yt.getArtist(id).popular }.getOrDefault(emptyList())
     }
 
-    /** Seed weight tuned so the seed occupies ~[SEED_SHARE] of slots: with total
-     *  neighbor weight W, seed weight = SEED_SHARE/(1-SEED_SHARE) * W. */
+    /**
+     * Seed weight tuned so that WITHIN the current pool the seed is the single
+     * most frequent artist — weight = SEED_SHARE/(1-SEED_SHARE) * W (W = total
+     * neighbor weight) makes the seed's weight ~1/3 of the total, so the
+     * interleaver front-loads the seed's tracks across the opening. The seed has
+     * a finite catalog (~[TRACKS_PER_ARTIST] popular tracks), so as the station
+     * widens to more neighbors the seed naturally recedes — "recognizable open,
+     * always drifting outward." A literal steady 1/3-forever is impossible
+     * without repeating the seed's few tracks, which the no-repeat set forbids.
+     */
     private fun buildArtistPool(
         seedName: String,
         neighbors: List<com.stash.core.data.lastfm.LastFmSimilarArtist>,
@@ -437,7 +463,8 @@ class RadioStationGenerator @Inject constructor(
     }
 
     /** Walk the ordered pool from the cursor, emit up to [size] fresh tracks,
-     *  resolving any candidate that still lacks a videoId. Skips dupes + misses. */
+     *  resolving any candidate that still lacks a videoId. Skips dupes + misses.
+     *  Does NOT set `exhausted` — widen() owns that (the pool may still widen). */
     internal suspend fun drainBatch(session: RadioSession, size: Int): List<Track> {
         val out = ArrayList<Track>(size)
         while (out.size < size && session.cursor < session.ordered.size) {
@@ -446,10 +473,15 @@ class RadioStationGenerator @Inject constructor(
             if (id in session.played) continue
             val videoId = cand.videoId?.takeIf { it.isNotBlank() }
                 ?: yt.searchCanonicalVideoId(cand.artist, cand.title) ?: continue
+            // Two different candidates (e.g. a seed-artist top track and a similar
+            // track) can resolve to the SAME videoId — guard on the resolved id too
+            // so the same audio never plays twice in one station.
+            val vidKey = "vid:$videoId"
+            if (vidKey in session.played) continue
             session.played += id
+            session.played += vidKey
             out += cand.toTrack(videoId)
         }
-        if (session.cursor >= session.ordered.size) session.exhausted = true
         return out
     }
 
@@ -465,14 +497,22 @@ class RadioStationGenerator @Inject constructor(
 
     companion object {
         const val SEED_SHARE = 1f / 3f
-        const val NEIGHBOR_LIMIT = 30
-        const val NEIGHBOR_POOL = 12
+        const val NEIGHBOR_LIMIT = 30    // Last.fm page size for song getSimilarTracks
+        const val NEIGHBOR_MAX = 100     // full artist-neighbor list (paged by widen)
+        const val NEIGHBOR_POOL = 12     // neighbors consumed per pool/widen slice
         const val TRACKS_PER_ARTIST = 6
         const val FIRST_BATCH = 12
         const val GROW_BATCH = 12
     }
 }
 ```
+
+> **On the "~1/3 seed" feel (read before implementing):** the seed weight makes
+> the seed the most frequent artist in the opening pool, then the station drifts
+> outward as it widens — this is the intended "recognizable but always drifting
+> outward" behavior, not a bug. Don't try to force a literal steady 1/3 forever
+> (the seed's finite catalog makes that impossible without repeats). The
+> interleaver test asserts only that the seed is never *starved*.
 
 - [ ] **Step 5: Run to verify it passes**
 
@@ -630,16 +670,25 @@ class RadioStationGeneratorGrowTest {
     private fun prof(a: String, id: String) = ArtistProfile(id, a, null, null,
         (1..6).map { ts(a, it) }, emptyList(), emptyList(), emptyList())
 
-    @Test fun `nextBatch never repeats an already-played track`() = runTest {
-        coEvery { lastFm.getSimilarArtists(any(), any()) } returns
-            Result.success(listOf(LastFmSimilarArtist("Slowdive", 1.0f)))
+    @Test fun `nextBatch widens to fresh neighbors and never repeats a played track`() = runTest {
+        // 20 neighbors: start uses the first 12, widen must page into 13-20 —
+        // NOT re-return the first 12 (the no-op bug). Generic answers stub every
+        // neighbor so widen produces real fresh tracks. Define the generic
+        // getArtist(any()) FIRST, then the specific "MBV" so MockK's last-match
+        // wins for the seed.
+        coEvery { lastFm.getSimilarArtists(any(), any()) } returns Result.success(
+            (1..20).map { LastFmSimilarArtist("N$it", 1f / it) })
+        coEvery { yt.resolveArtist(any()) } answers
+            { ArtistSummary(firstArg<String>() + "_ID", firstArg(), null) }
+        coEvery { yt.getArtist(any()) } answers {
+            val id = firstArg<String>(); prof(id.removeSuffix("_ID"), id)
+        }
         coEvery { yt.getArtist("MBV") } returns prof("My Bloody Valentine", "MBV")
-        coEvery { yt.resolveArtist("Slowdive") } returns ArtistSummary("SD", "Slowdive", null)
-        coEvery { yt.getArtist("SD") } returns prof("Slowdive", "SD")
 
         val g = gen()
         val (session, first) = g.start(RadioSeed.Artist("My Bloody Valentine", "MBV"))
         val second = g.nextBatch(session)
+        assertThat(second).isNotEmpty() // widen actually produced fresh tracks (no-op guard)
         val allIds = (first + second).mapNotNull { it.youtubeId }
         assertThat(allIds.toSet()).hasSize(allIds.size) // zero repeats across batches
     }
@@ -680,20 +729,30 @@ Expected: FAIL — `nextBatch` unresolved.
         return drainBatch(session, GROW_BATCH)
     }
 
-    /** Append more candidates to the ordering. Artist radio: deeper into the
-     *  seed's neighbor list (fresh page); song radio: expand off the seed artist
-     *  as an artist radio. Best-effort — leaves [exhausted] set if nothing new. */
+    /** Append more candidates by PAGING the unused neighbor list (never
+     *  re-fetching the same top-N, which would only re-return already-played
+     *  neighbors). Song radio lazy-loads the neighbor list here on first widen;
+     *  artist radio filled it at start. Sets [exhausted] only when no neighbors
+     *  remain to try. */
     private suspend fun widen(session: RadioSession) {
-        val seedArtistName = when (val s = session.seed) {
-            is RadioSeed.Artist -> s.name
-            is RadioSeed.Song -> s.artist
+        if (!session.neighborsLoaded) {
+            val seedArtistName = when (val s = session.seed) {
+                is RadioSeed.Artist -> s.name
+                is RadioSeed.Song -> s.artist
+            }
+            session.remainingNeighbors.addAll(
+                lastFm.getSimilarArtists(seedArtistName, limit = NEIGHBOR_MAX).getOrDefault(emptyList()),
+            )
+            session.neighborsLoaded = true
         }
-        val neighbors = lastFm.getSimilarArtists(seedArtistName, limit = NEIGHBOR_LIMIT)
-            .getOrDefault(emptyList())
-            .take(NEIGHBOR_POOL)
-        if (neighbors.isEmpty()) { session.exhausted = true; return }
+        if (session.remainingNeighbors.isEmpty()) { session.exhausted = true; return }
+        // Page the next slice of never-used neighbors.
+        val next = ArrayList<com.stash.core.data.lastfm.LastFmSimilarArtist>()
+        while (next.size < NEIGHBOR_POOL && session.remainingNeighbors.isNotEmpty()) {
+            next += session.remainingNeighbors.removeFirst()
+        }
         val fresh = ArrayList<RadioCandidate>()
-        for (n in neighbors) {
+        for (n in next) {
             val id = yt.resolveArtist(n.name)?.id ?: continue
             val popular = runCatching { yt.getArtist(id).popular }.getOrDefault(emptyList())
             popular.take(TRACKS_PER_ARTIST).forEach {
@@ -701,7 +760,11 @@ Expected: FAIL — `nextBatch` unresolved.
                 if (cand.identity() !in session.played) fresh += cand
             }
         }
-        if (fresh.isEmpty()) { session.exhausted = true; return }
+        if (fresh.isEmpty()) {
+            // This slice yielded nothing new; only truly done when no neighbors remain.
+            if (session.remainingNeighbors.isEmpty()) session.exhausted = true
+            return
+        }
         session.ordered += RadioInterleaver.order(fresh)
     }
 ```
@@ -771,33 +834,40 @@ import io.mockk.mockk
 import kotlinx.coroutines.test.runTest
 import org.junit.Test
 
+@RunWith(RobolectricTestRunner::class)
 class PlayerRepositoryRadioTest {
-    // Reuse the same construction harness as PlayerRepositoryStreamingTest:
-    // real PlayerRepositoryImpl with mocked collaborators + an injected mock
-    // MediaController via `controllerDeferred`. See that test for the setup;
-    // add a mocked RadioStationGenerator.
+    // Harness: copy PlayerRepositoryFullTimelineTest.kt exactly — it builds a real
+    // PlayerRepositoryImpl in @Before with all mocked collaborators AND assigns a
+    // relaxed mock MediaController to the internal seam: `repo.controllerDeferred =
+    // controller`. Add one collaborator: `radioGenerator: RadioStationGenerator =
+    // mockk()`, and pass it as the new last constructor arg.
 
     @Test fun `startRadio returns false and does not arm when streaming is off`() = runTest {
-        // streamingPreference.current() = false
-        // assert startRadio(...) == false; radioSeedLabel.value == null
+        // coEvery { streamingPreference.current() } returns false
+        // assertThat(repo.startRadio(RadioSeed.Artist("MBV", "id"))).isFalse()
+        // assertThat(repo.radioSeedLabel.value).isNull()
+        // coVerify(exactly = 0) { radioGenerator.start(any()) }
     }
 
     @Test fun `startRadio sets queue, plays, arms watcher, and exposes seed label`() = runTest {
-        // streamingPreference.current() = true; generator.start(seed) returns a
-        // non-empty batch; assert controller.setMediaItems + play called,
-        // radioSeedLabel.value == "My Bloody Valentine", radioActive == true.
+        // coEvery { streamingPreference.current() } returns true
+        // coEvery { radioGenerator.start(any()) } returns (session to listOf(track1, track2))
+        // repo.startRadio(RadioSeed.Artist("My Bloody Valentine", "id"))
+        // verify { controller.setMediaItems(any(), 0, 0L) }; verify { controller.play() }
+        // assertThat(repo.radioSeedLabel.value).isEqualTo("My Bloody Valentine")
     }
 
     @Test fun `setQueue disarms the station`() = runTest {
-        // after startRadio, call setQueue(...) → radioActive == false, label null.
+        // after startRadio, repo.setQueue(listOf(someTrack))
+        // → radioSeedLabel.value == null (station ended)
     }
 }
 ```
 
-> Implementer note: `PlayerRepositoryStreamingTest.kt` already builds a
-> `PlayerRepositoryImpl` with a mock controller assigned to the internal
-> `controllerDeferred` seam. Copy that harness; add `RadioStationGenerator = mockk()`.
-> Keep assertions to the three behaviors above.
+> Implementer note: use `PlayerRepositoryFullTimelineTest.kt` (not the Streaming
+> one) as the harness — it is the test that assigns a mock `MediaController` to
+> `controllerDeferred`, which `startRadio`/the watcher need. Keep assertions to the
+> behaviors above.
 
 - [ ] **Step 3: Run to verify it fails**
 
@@ -827,6 +897,12 @@ Implement the methods:
         if (firstBatch.isEmpty()) return false
         radioSession = session
         radioActive = true
+        // Only ONE grower may run: startRadio bypasses setQueueInternal (which is
+        // what normally disarms library shuffle), so disarm it here explicitly —
+        // otherwise both watchers append as the queue drains and library tracks
+        // pollute the station.
+        libraryShuffleActive = false
+        librarySnapshot = emptyList()
         currentQueueTracks = firstBatch
         controller.setMediaItems(firstBatch.map { it.toMediaItem() }, 0, 0L)
         controller.prepare()
@@ -947,7 +1023,8 @@ git commit -m "feat(radio): single-flight auto-grow watcher refills the station 
 
 **Files:**
 - Modify: `feature/search/src/main/kotlin/com/stash/feature/search/ArtistProfileViewModel.kt`
-- Modify: `feature/search/src/main/kotlin/com/stash/feature/search/ArtistProfileScreen.kt` + the hero composable that renders the Play button (`onPlayArtist`; find the header — likely `AlbumHero.kt`/an artist hero) — add a `onStartRadio` button next to Play.
+- Modify: `feature/search/src/main/kotlin/com/stash/feature/search/ArtistHero.kt` — the Play button host (`onPlayArtist` param ~line 61, button ~line 116). Add an `onStartRadio: () -> Unit` param and a **Radio** button next to Play.
+- Modify: `feature/search/src/main/kotlin/com/stash/feature/search/ArtistProfileScreen.kt:120` — pass `onStartRadio = vm::startRadio` alongside `onPlayArtist = vm::playArtist`.
 - Test: `feature/search/src/test/kotlin/com/stash/feature/search/ArtistProfileViewModelRadioTest.kt`
 
 - [ ] **Step 1: Write the failing test**
@@ -1044,8 +1121,8 @@ git commit -m "feat(radio): Start radio in the shared track overflow menu"
 
 **Files:**
 - Modify: `feature/nowplaying/src/main/kotlin/com/stash/feature/nowplaying/NowPlayingViewModel.kt` (add `startRadioFromCurrent()` + `stopRadio()`; expose `playerRepository.radioSeedLabel`)
-- Modify the Now Playing screen: a "Start radio" action in the player overflow, and a small "Radio · \<label\>" chip (with a Stop affordance) shown when `radioSeedLabel != null`.
-- Test: `feature/nowplaying/src/test/kotlin/.../NowPlayingViewModelRadioTest.kt`
+- Modify: `feature/nowplaying/src/main/kotlin/com/stash/feature/nowplaying/NowPlayingScreen.kt` — a "Start radio" action in the player overflow, and a small "Radio · \<label\>" chip (with a Stop affordance) shown when `radioSeedLabel != null`.
+- Test: `feature/nowplaying/src/test/kotlin/com/stash/feature/nowplaying/NowPlayingViewModelRadioTest.kt`
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1126,4 +1203,4 @@ git add -A && git commit -m "chore(radio): integration wiring + smoke-test fixes
 - **Real videoIds → no persistence.** Do **not** call `ensureTrackPersisted` for radio tracks (that was a Qobuz-native concern). `id = videoId.hashCode()` is the existing convention.
 - **Watcher discipline.** The radio watcher must early-return when `!radioActive`, and `growRadio` is single-flight via `radioGrowMutex`. `setQueue`/`shuffleLibrary`/explicit stop all disarm.
 - **Pre-existing test noise:** the `:data:ytmusic` and `:feature:search` modules have known-failing unrelated tests (see memory `infra_preexisting_matcher_test_failures`) — always use `--tests` filters; don't gate on the flaky `:core:media` network test.
-- **Offline gate** reuses `streamingPreference.current()`; entry points disable when false.
+- **Offline gate:** `startRadio` guards on `streamingPreference.current()` and, being streaming-only, returns `false` gracefully when offline (empty batch). The entry-point affordances (artist Radio button, ⋮ item, Now Playing action) should disable/hint when streaming is off **or** there is no network — reuse `streamingPreference.enabled` and the existing connectivity signal (spec §5, "no dead taps"). A disabled button never calls `startRadio`.
