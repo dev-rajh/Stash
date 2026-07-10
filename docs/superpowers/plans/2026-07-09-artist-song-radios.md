@@ -171,15 +171,16 @@ class RadioInterleaverTest {
         assertThat(adjacent).isAtMost(1) // tolerate a single tail collision
     }
 
-    @Test fun `seed lands roughly one third of slots`() {
+    @Test fun `higher-weight seed is the most frequent artist, never starved`() {
         val pool = buildList {
             repeat(12) { add(cand("Seed", "s$it", 6f)) }          // seed weight tuned by generator
             repeat(4) { add(cand("N${it % 4}", "n$it", 1f)) }     // 4 neighbors, 1 each
         }
         val out = RadioInterleaver.order(pool.shuffled())
         val seedCount = out.count { it.artist == "Seed" }
-        // 12 seed of 16 total is 3/4 here — this test only pins that the seed is
-        // NOT starved: with higher weight it appears at least as often as any neighbor.
+        // Pins only that the seed is the MOST frequent artist (never starved) — NOT
+        // a literal 1/3. The generator's finite seed catalog + no-repeat set make a
+        // steady 1/3-forever impossible; the feel is "seed-heavy open, drifting out."
         val maxNeighbor = out.filter { it.artist != "Seed" }.groupingBy { it.artist }.eachCount().values.max()
         assertThat(seedCount).isAtLeast(maxNeighbor)
     }
@@ -670,25 +671,33 @@ class RadioStationGeneratorGrowTest {
     private fun prof(a: String, id: String) = ArtistProfile(id, a, null, null,
         (1..6).map { ts(a, it) }, emptyList(), emptyList(), emptyList())
 
-    @Test fun `nextBatch widens to fresh neighbors and never repeats a played track`() = runTest {
-        // 20 neighbors: start uses the first 12, widen must page into 13-20 —
-        // NOT re-return the first 12 (the no-op bug). Generic answers stub every
-        // neighbor so widen produces real fresh tracks. Define the generic
-        // getArtist(any()) FIRST, then the specific "MBV" so MockK's last-match
-        // wins for the seed.
+    @Test fun `nextBatch widens PAST the initial pool into fresh neighbors`() = runTest {
+        // This test must genuinely trigger widen() — not just drain a big pre-built
+        // pool. The generator constants make the widen threshold `ordered.size - 6`,
+        // so the INITIAL pool must be small enough that one 12-track batch crosses
+        // it. We give the seed its 6 popular tracks but each neighbor only ONE, so
+        // the initial pool = 6 + 12×1 = 18; after the first batch cursor=12 and
+        // 12 >= 18-6 → widen fires and must page neighbors 13-20 (absent from the
+        // initial 12-neighbor pool). A track from N13..N20 in the 2nd batch can
+        // ONLY come from widen — so this fails if widen reverts to the no-op.
+        // Define generic getArtist(any()) FIRST, then specific "MBV" (MockK last-match).
         coEvery { lastFm.getSimilarArtists(any(), any()) } returns Result.success(
             (1..20).map { LastFmSimilarArtist("N$it", 1f / it) })
         coEvery { yt.resolveArtist(any()) } answers
             { ArtistSummary(firstArg<String>() + "_ID", firstArg(), null) }
         coEvery { yt.getArtist(any()) } answers {
-            val id = firstArg<String>(); prof(id.removeSuffix("_ID"), id)
+            val id = firstArg<String>(); val name = id.removeSuffix("_ID")
+            ArtistProfile(id, name, null, null, listOf(ts(name, 1)),   // ONE popular track
+                emptyList(), emptyList(), emptyList())
         }
-        coEvery { yt.getArtist("MBV") } returns prof("My Bloody Valentine", "MBV")
+        coEvery { yt.getArtist("MBV") } returns prof("My Bloody Valentine", "MBV") // seed: 6 tracks
 
         val g = gen()
         val (session, first) = g.start(RadioSeed.Artist("My Bloody Valentine", "MBV"))
         val second = g.nextBatch(session)
-        assertThat(second).isNotEmpty() // widen actually produced fresh tracks (no-op guard)
+
+        val widened = (13..20).map { "N$it" }
+        assertThat(second.map { it.artist }.any { it in widened }).isTrue() // widen actually ran
         val allIds = (first + second).mapNotNull { it.youtubeId }
         assertThat(allIds.toSet()).hasSize(allIds.size) // zero repeats across batches
     }
@@ -1186,7 +1195,7 @@ git commit -m "feat(radio): start-from-current + live station chip on Now Playin
   2. Song ⋮ → **Start radio** → station seeded from that track.
   3. Now Playing overflow → **Start radio** → chip shows "Radio · \<label\>"; **Stop** ends grow.
   4. Toggle streaming **off** → radio affordances disabled with the hint.
-  Watch logcat for `startRadio`/`nextBatch` activity and confirm real videoIds resolve (qbdlx FLAC upgrade at play time, same as other streaming tracks).
+  Watch logcat for `startRadio`/`nextBatch` activity and confirm real videoIds resolve (qbdlx FLAC upgrade at play time, same as other streaming tracks). Also watch, near station exhaustion, for a YT-lookup burst (the watcher can fire `growRadio` on each `playerState` emission while a barren widen yields nothing) — bounded and single-flight, so acceptable for v1, but if it's a visible storm add a "last-widen-yielded-nothing" backoff. `ponytail:` YAGNI unless observed.
 
 - [ ] **Step 4: Commit** any wiring/nit fixes from the smoke test.
 

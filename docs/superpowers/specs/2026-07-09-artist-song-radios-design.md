@@ -200,8 +200,9 @@ no-repeat set forbids repeats). These ratios are named constants (tunable knobs)
 
 ## 7. Testing (TDD, mock the two clients)
 
-- **`RadioInterleaver` (pure):** balanced ratio (~1/3 seed) holds across a batch;
-  match-score weighting orders neighbors; no adjacent same-artist repeat.
+- **`RadioInterleaver` (pure):** the higher-weight seed is the most frequent
+  artist in the pool (never starved — not a literal 1/3); match-score weighting
+  orders neighbors; no adjacent same-artist repeat.
 - **`RadioStationGenerator`:** artist-seed path; song-seed path; no-repeat dedup
   across batches; "Fans also like" browseId shortcut skips the resolve hop;
   degenerate/empty-neighbor fallback; Last.fm failure → seed-only.
