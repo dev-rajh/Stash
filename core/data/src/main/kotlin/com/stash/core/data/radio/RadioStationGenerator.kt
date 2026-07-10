@@ -115,6 +115,53 @@ class RadioStationGenerator @Inject constructor(
         return out
     }
 
+    /** The next playable batch. Widens the pool when it nears exhaustion. */
+    suspend fun nextBatch(session: RadioSession): List<Track> {
+        if (session.cursor >= session.ordered.size - WIDEN_THRESHOLD && !session.exhausted) {
+            widen(session)
+        }
+        return drainBatch(session, GROW_BATCH)
+    }
+
+    /** Append more candidates by PAGING the unused neighbor list (never
+     *  re-fetching the same top-N, which would only re-return already-played
+     *  neighbors). Song radio lazy-loads the neighbor list here on first widen;
+     *  artist radio filled it at start. Sets [exhausted] only when no neighbors
+     *  remain to try. */
+    private suspend fun widen(session: RadioSession) {
+        if (!session.neighborsLoaded) {
+            val seedArtistName = when (val s = session.seed) {
+                is RadioSeed.Artist -> s.name
+                is RadioSeed.Song -> s.artist
+            }
+            session.remainingNeighbors.addAll(
+                lastFm.getSimilarArtists(seedArtistName, limit = NEIGHBOR_MAX).getOrDefault(emptyList()),
+            )
+            session.neighborsLoaded = true
+        }
+        if (session.remainingNeighbors.isEmpty()) { session.exhausted = true; return }
+        // Page the next slice of never-used neighbors.
+        val next = ArrayList<LastFmSimilarArtist>()
+        while (next.size < NEIGHBOR_POOL && session.remainingNeighbors.isNotEmpty()) {
+            next += session.remainingNeighbors.removeFirst()
+        }
+        val fresh = ArrayList<RadioCandidate>()
+        for (n in next) {
+            val id = yt.resolveArtist(n.name)?.id ?: continue
+            val popular = runCatching { yt.getArtist(id).popular }.getOrDefault(emptyList())
+            popular.take(TRACKS_PER_ARTIST).forEach {
+                val cand = RadioCandidate(n.name, it.title, it.videoId, n.match.coerceAtLeast(0.05f))
+                if (cand.identity() !in session.played) fresh += cand
+            }
+        }
+        if (fresh.isEmpty()) {
+            // This slice yielded nothing new; only truly done when no neighbors remain.
+            if (session.remainingNeighbors.isEmpty()) session.exhausted = true
+            return
+        }
+        session.ordered += RadioInterleaver.order(fresh)
+    }
+
     private fun RadioCandidate.toTrack(videoId: String) = Track(
         id = videoId.hashCode().toLong(),
         title = title,
