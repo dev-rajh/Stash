@@ -206,6 +206,28 @@ class ArtistProfileViewModelTest {
     }
 
     @Test
+    fun `startRadio starts an artist radio seeded with the browseId`() = runTest {
+        val profile = ArtistProfile(
+            id = "UC1", name = "LocalName", avatarUrl = null, subscribersText = null,
+            popular = emptyList(), albums = emptyList(), singles = emptyList(), related = emptyList(),
+        )
+        val cache = mock<ArtistCache>()
+        whenever(cache.get(eq("UC1"))).thenReturn(flowOf(CachedProfile.Fresh(profile)))
+        val player = mock<PlayerRepository> { onBlocking { startRadio(any()) } doReturn true }
+        val vm = vmWith(cache = cache, playerRepository = player)
+        advanceUntilIdle()
+
+        vm.startRadio()
+        advanceUntilIdle()
+
+        val seedCaptor = argumentCaptor<com.stash.core.data.radio.RadioSeed>()
+        verify(player).startRadio(seedCaptor.capture())
+        val seed = seedCaptor.firstValue as com.stash.core.data.radio.RadioSeed.Artist
+        assertEquals("UC1", seed.ytBrowseId)
+        assertEquals("LocalName", seed.name)
+    }
+
+    @Test
     fun `playArtist sets queue from popular when popular is non-empty`() = runTest {
         val profile = ArtistProfile(
             id = "UC1",

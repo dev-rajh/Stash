@@ -218,6 +218,22 @@ class ArtistProfileViewModel @Inject constructor(
      * Double-tap-safe: a second invocation cancels the prior fill job before
      * relaunching. Per spec, no Snackbar — actual playback IS the feedback.
      */
+    /**
+     * Start an artist radio seeded from this artist. The browseId is already in
+     * hand (nav arg), so the generator skips a resolveArtist hop. On a false
+     * return (streaming off/offline, or no seed tracks) we surface a one-shot
+     * hint instead of a dead tap.
+     */
+    fun startRadio() {
+        viewModelScope.launch {
+            val name = _uiState.value.hero.name.ifBlank { initialName }
+            val started = playerRepository.startRadio(
+                com.stash.core.data.radio.RadioSeed.Artist(name, ytBrowseId = artistId),
+            )
+            if (!started) _userMessages.emit("Radio needs Online mode — turn on streaming.")
+        }
+    }
+
     fun playArtist() {
         fillCatalogJob?.cancel()
         fillCatalogJob = viewModelScope.launch {

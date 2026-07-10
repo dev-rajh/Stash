@@ -118,6 +118,7 @@ fun ArtistProfileScreen(
                     status = state.status,
                     onBack = onBack,
                     onPlayArtist = vm::playArtist,
+                    onStartRadio = vm::startRadio,
                 )
             }
 
