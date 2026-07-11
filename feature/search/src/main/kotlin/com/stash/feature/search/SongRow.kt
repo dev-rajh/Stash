@@ -104,6 +104,9 @@ fun SongRow(
     /** True when this row's track is the one currently playing — renders the
      *  accent tint + equalizer glyph. See [isRowPlaying]. */
     isPlaying: Boolean = false,
+    /** Whether the one-tap download control shows. False for Qobuz-native album
+     *  tracks (no videoId → no download-by-id in Phase 1). */
+    downloadSupported: Boolean = true,
 ) {
     val extendedColors = StashTheme.extendedColors
     // Dim the art behind the loading spinner / stop glyph so it reads clearly.
@@ -222,7 +225,8 @@ fun SongRow(
 
         Spacer(modifier = Modifier.width(8.dp))
 
-        // Download action button
+        // Download action button (hidden where download-by-id isn't supported).
+        if (downloadSupported) {
         Box(
             modifier = Modifier.size(40.dp),
             contentAlignment = Alignment.Center,
@@ -266,6 +270,7 @@ fun SongRow(
                     }
                 }
             }
+        }
         }
 
         // Overflow: Play next / Add to queue / Add to playlist

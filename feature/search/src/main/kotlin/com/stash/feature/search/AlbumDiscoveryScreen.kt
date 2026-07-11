@@ -1,21 +1,15 @@
 package com.stash.feature.search
 
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -85,6 +79,7 @@ fun AlbumDiscoveryScreen(
     val downloadedIds by vm.delegate.downloadedIds.collectAsStateWithLifecycle()
     val previewLoadingId by vm.delegate.previewLoadingId.collectAsStateWithLifecycle()
     val previewState by vm.delegate.previewState.collectAsStateWithLifecycle()
+    val currentPlayingYoutubeId by vm.currentPlayingYoutubeId.collectAsStateWithLifecycle()
     val playlistSheetItem by vm.playlistSheetItem.collectAsStateWithLifecycle()
     val userPlaylists by vm.userPlaylists.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
@@ -165,20 +160,6 @@ fun AlbumDiscoveryScreen(
                             // (never reordered), so the index is a stable key.
                             key = { index, t -> "album_track_${index}_${t.videoId}" },
                         ) { index, track ->
-                            // Qobuz tracks have no videoId, so the videoId-keyed
-                            // preview/download row can't represent them (every row
-                            // would share the blank identity). Render a simple
-                            // play-on-tap row instead.
-                            if (vm.isNativeAlbum) {
-                                NativeAlbumTrackRow(
-                                    title = track.title,
-                                    artist = track.artist,
-                                    durationSeconds = track.durationSeconds,
-                                    onPlay = { vm.playAlbum(startIndex = index) },
-                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-                                )
-                                return@itemsIndexed
-                            }
                             val currentPreviewState = previewState
                             val isPreviewPlaying = currentPreviewState is PreviewState.Playing &&
                                 currentPreviewState.videoId == track.videoId
@@ -191,44 +172,31 @@ fun AlbumDiscoveryScreen(
                                 album = state.hero.title,
                                 albumArtist = state.hero.artist,
                             )
-                            // Warm the lossless URL cache as each album track row
-                            // enters composition. Idempotent — dedupes by videoId.
+                            // Warm the lossless URL cache as each YT album track row
+                            // enters composition (blank-videoId Qobuz rows dedupe to
+                            // a no-op). Idempotent.
                             LaunchedEffect(track.videoId) {
                                 vm.losslessPrefetcher.warmUp(trackItem)
                             }
-                            // Row body is clickable to play the album from this
-                            // track's position. The inline preview/download
-                            // buttons inside PreviewDownloadRow have their own
-                            // click handlers that consume the event, so the
-                            // outer clickable only fires on the metadata area.
+                            // One row for every album track. Tapping plays the album
+                            // from this position (album context — not a loose preview).
+                            // Download is hidden for Qobuz-native tracks (no videoId).
                             SongRow(
                                 item = track.toSearchResultItem(),
                                 isDownloading = track.videoId in downloadingIds,
                                 isDownloaded = track.videoId in downloadedIds,
                                 isPreviewLoading = previewLoadingId == track.videoId,
                                 isPreviewPlaying = isPreviewPlaying,
-                                onPlay = { vm.delegate.previewTrack(trackItem) },
+                                isPlaying = isRowPlaying(track.videoId, currentPlayingYoutubeId),
+                                downloadSupported = vm.downloadSupported,
+                                onPlay = { vm.playAlbum(startIndex = index) },
                                 onStopPreview = { vm.delegate.stopPreview() },
-                                onDownload = {
-                                    vm.delegate.downloadTrack(
-                                        TrackItem(
-                                            videoId = track.videoId,
-                                            title = track.title,
-                                            artist = track.artist,
-                                            durationSeconds = track.durationSeconds,
-                                            thumbnailUrl = track.thumbnailUrl,
-                                            album = state.hero.title,
-                                            albumArtist = state.hero.artist,
-                                        ),
-                                    )
-                                },
+                                onDownload = { vm.delegate.downloadTrack(trackItem) },
                                 onPlayNext = { vm.onPlayNext(trackItem) },
                                 onAddToQueue = { vm.onAddToQueue(trackItem) },
                                 onStartRadio = { vm.onStartRadio(trackItem) },
                                 onAddToPlaylist = { vm.onRequestAddToPlaylist(trackItem) },
-                                modifier = Modifier
-                                    .padding(horizontal = 16.dp, vertical = 4.dp)
-                                    .clickable { vm.playAlbum(startIndex = index) },
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
                             )
                         }
                         if (state.moreByArtist.isNotEmpty()) {
@@ -287,60 +255,3 @@ fun AlbumDiscoveryScreen(
     }
 }
 
-/**
- * Minimal track row for a native (Qobuz) album. These tracks have no videoId,
- * so the videoId-keyed [PreviewDownloadRow] (preview = 30s YouTube clip,
- * download = by videoId) can't represent them. Tap plays the track natively —
- * the whole row is the play affordance.
- */
-@Composable
-private fun NativeAlbumTrackRow(
-    title: String,
-    artist: String,
-    durationSeconds: Double,
-    onPlay: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .clickable(onClick = onPlay),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(
-            imageVector = Icons.Default.PlayArrow,
-            contentDescription = "Play",
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.size(28.dp),
-        )
-        Spacer(Modifier.width(12.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = title,
-                style = MaterialTheme.typography.bodyLarge,
-                color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Text(
-                text = artist,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-        Spacer(Modifier.width(12.dp))
-        Text(
-            text = formatTrackDuration(durationSeconds),
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    }
-}
-
-/** Seconds → `m:ss`. */
-private fun formatTrackDuration(seconds: Double): String {
-    val total = seconds.toInt()
-    return "%d:%02d".format(total / 60, total % 60)
-}
