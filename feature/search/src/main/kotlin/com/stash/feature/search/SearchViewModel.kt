@@ -114,6 +114,16 @@ class SearchViewModel @Inject constructor(
             .distinctUntilChanged()
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), null)
 
+    /** Online/Offline mode for the Search-header chip (same source Home reads). */
+    val streamingEnabled: StateFlow<Boolean> =
+        streamingPreference.enabled.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), false)
+
+    /** Flip streaming mode from the Search header. Mirrors Home's toggle
+     *  (`MusicRepository.applyStreamingMode`, currently just this pref set). */
+    fun applyStreamingMode(enabled: Boolean) {
+        viewModelScope.launch { streamingPreference.setEnabled(enabled) }
+    }
+
     fun onPlayNext(item: TrackItem) {
         recordTrack(item)
         delegate.playNext(item)

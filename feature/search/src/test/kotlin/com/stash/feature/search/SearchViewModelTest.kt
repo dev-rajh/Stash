@@ -25,6 +25,7 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.After
+import kotlinx.coroutines.flow.first
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -421,5 +422,26 @@ class SearchViewModelTest {
         advanceUntilIdle()
 
         verifyBlocking(store, never()) { record(any()) }
+    }
+
+    @Test
+    fun `streamingEnabled reflects the preference and applyStreamingMode flips it`() = runTest {
+        val streamingPreference = mock<StreamingPreference> {
+            onBlocking { current() } doReturn false
+            on { enabled } doReturn kotlinx.coroutines.flow.flowOf(true)
+        }
+        val vm = newVm(streamingPreference = streamingPreference)
+
+        // WhileSubscribed stateIn only collects upstream once subscribed — a bare
+        // .value/.first() returns the seed. Subscribe, then read the reflected value.
+        val seen = mutableListOf<Boolean>()
+        backgroundScope.launch { vm.streamingEnabled.collect { seen.add(it) } }
+        advanceUntilIdle()
+        assertEquals(true, seen.last())
+
+        vm.applyStreamingMode(false)
+        advanceUntilIdle()
+
+        verifyBlocking(streamingPreference) { setEnabled(false) }
     }
 }

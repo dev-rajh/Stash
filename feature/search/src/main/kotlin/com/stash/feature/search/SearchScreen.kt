@@ -51,6 +51,11 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import com.stash.core.common.constants.StashConstants
+import com.stash.core.ui.components.streaming.StreamingModeChip
+import com.stash.core.ui.components.streaming.StreamingModeSheet
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -96,6 +101,7 @@ import com.stash.data.ytmusic.model.TrackSummary
  * failures surface as toasts without flipping the entire screen into an
  * error state.
  */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 fun SearchScreen(
     onNavigateToArtist: (artistId: String, name: String, avatarUrl: String?) -> Unit,
@@ -113,6 +119,9 @@ fun SearchScreen(
     val userPlaylists by viewModel.userPlaylists.collectAsStateWithLifecycle()
     val recentSearches by viewModel.recentSearches.collectAsStateWithLifecycle()
     val currentPlayingYoutubeId by viewModel.currentPlayingYoutubeId.collectAsStateWithLifecycle()
+    val streamingEnabled by viewModel.streamingEnabled.collectAsStateWithLifecycle()
+    var showStreamingSheet by remember { mutableStateOf(false) }
+    val streamingSheetState = androidx.compose.material3.rememberModalBottomSheetState()
     val snackbarHostState = remember { SnackbarHostState() }
 
     LaunchedEffect(viewModel) {
@@ -133,12 +142,25 @@ fun SearchScreen(
                 .background(MaterialTheme.colorScheme.background)
                 .statusBarsPadding(),
         ) {
-            SearchBar(
-                query = state.query,
-                onQueryChanged = viewModel::onQueryChanged,
-                onClear = { viewModel.onQueryChanged("") },
-                onSearch = viewModel::onSearchCommitted,
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(end = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                SearchBar(
+                    query = state.query,
+                    onQueryChanged = viewModel::onQueryChanged,
+                    onClear = { viewModel.onQueryChanged("") },
+                    onSearch = viewModel::onSearchCommitted,
+                    modifier = Modifier.weight(1f),
+                )
+                if (StashConstants.STREAMING_ENGINE_ENABLED) {
+                    Spacer(Modifier.width(8.dp))
+                    StreamingModeChip(
+                        streamingEnabled = streamingEnabled,
+                        onClick = { showStreamingSheet = true },
+                    )
+                }
+            }
 
             when (val status = state.status) {
                 SearchStatus.Idle -> RecentSearches(
@@ -186,6 +208,18 @@ fun SearchScreen(
             }
         }
 
+        if (showStreamingSheet) {
+            StreamingModeSheet(
+                streamingEnabled = streamingEnabled,
+                onSelect = { requested ->
+                    viewModel.applyStreamingMode(requested)
+                    showStreamingSheet = false
+                },
+                onDismiss = { showStreamingSheet = false },
+                sheetState = streamingSheetState,
+            )
+        }
+
         if (playlistSheetItem != null) {
             com.stash.core.ui.components.SaveToPlaylistSheet(
                 playlists = userPlaylists.map {
@@ -209,6 +243,7 @@ private fun SearchBar(
     onQueryChanged: (String) -> Unit,
     onClear: () -> Unit,
     onSearch: () -> Unit = {},
+    modifier: Modifier = Modifier,
 ) {
     val focusRequester = remember { FocusRequester() }
     val keyboardController = LocalSoftwareKeyboardController.current
@@ -216,8 +251,7 @@ private fun SearchBar(
     OutlinedTextField(
         value = query,
         onValueChange = onQueryChanged,
-        modifier = Modifier
-            .fillMaxWidth()
+        modifier = modifier
             .padding(horizontal = 16.dp, vertical = 12.dp)
             .focusRequester(focusRequester),
         placeholder = {
