@@ -1,10 +1,7 @@
 package com.stash.core.media
 
-import android.os.Bundle
 import androidx.media3.common.MediaItem
-import androidx.media3.common.MediaMetadata
 import androidx.media3.session.MediaController
-import com.stash.core.media.service.StashPlaybackService.Companion.EXTRA_TRACK_YOUTUBE_ID
 import androidx.test.core.app.ApplicationProvider
 import com.google.common.truth.Truth.assertThat
 import com.stash.core.data.db.dao.TrackDao
@@ -119,33 +116,39 @@ class PlayerRepositoryRadioTest {
         assertThat(repo.radioSeedLabel.value).isNull()
     }
 
-    @Test fun `startRadio splices around the current track when it is the seed (no restart)`() = runTest {
-        // Now Playing "Start radio": the seed IS the currently-playing track, so
-        // startRadio must NOT setMediaItems/prepare/play (that restarts it). It
-        // should keep the current item playing and splice the queue around it.
+    @Test fun `startRadio(keepCurrent) splices around the playing track without restarting it`() = runTest {
+        // Now Playing "Start radio": keepCurrent=true means the seed IS the playing
+        // track. startRadio must NOT setMediaItems/prepare/play (that restarts it) —
+        // it keeps the current item playing and splices discoveries around it. The
+        // seed is matched by normalized title|artist (NOT videoId), because the
+        // playing item and the freshly-resolved seed track may have different ids.
         coEvery { streamingPreference.current() } returns true
         val session = mockk<RadioSession>(relaxed = true)
-        // firstBatch[0] == the playing track (youtubeId "v1").
-        coEvery { radioGenerator.start(any()) } returns (session to listOf(track(1), track(2)))
-        val current = MediaItem.Builder()
-            .setMediaId("999")
-            .setMediaMetadata(
-                MediaMetadata.Builder()
-                    .setExtras(Bundle().apply { putString(EXTRA_TRACK_YOUTUBE_ID, "v1") })
-                    .build(),
-            )
-            .build()
-        every { controller.currentMediaItem } returns current
+        // firstBatch has the seed (title/artist match) + one discovery. Give the
+        // seed track a DIFFERENT videoId than any id-based guess to prove matching
+        // is by title/artist, not id.
+        val seedTrack = Track(id = 1L, title = "Pancake", artist = "The Swirlies",
+            youtubeId = "freshlySearchedId", isStreamable = true)
+        val discovery = Track(id = 2L, title = "Bell", artist = "Slowdive",
+            youtubeId = "v2", isStreamable = true)
+        coEvery { radioGenerator.start(any()) } returns (session to listOf(seedTrack, discovery))
+        // Current item has NO youtube-id extras at all (Spotify-synced case).
+        every { controller.currentMediaItem } returns MediaItem.Builder().setMediaId("999").build()
         every { controller.mediaItemCount } returns 3
         every { controller.currentMediaItemIndex } returns 1
+        val appended = slot<List<MediaItem>>()
+        every { controller.addMediaItems(capture(appended)) } returns Unit
 
-        val started = repo.startRadio(RadioSeed.Song("Pancake", "The Swirlies", "v1"))
+        val started = repo.startRadio(
+            RadioSeed.Song("Pancake", "The Swirlies", "v1"), keepCurrent = true,
+        )
 
         assertThat(started).isTrue()
-        // Spliced: removed the items after and before the current one, appended the tail.
+        // Spliced: removed items after (2..3) and before (0..1) the current one.
         verify { controller.removeMediaItems(2, 3) }
         verify { controller.removeMediaItems(0, 1) }
-        verify { controller.addMediaItems(any<List<MediaItem>>()) }
+        // Appended ONLY the discoveries (seed dropped — it's already playing).
+        assertThat(appended.captured).hasSize(1)
         // Did NOT tear down / restart the seed track.
         verify(exactly = 0) { controller.setMediaItems(any<List<MediaItem>>(), any<Int>(), any<Long>()) }
         verify(exactly = 0) { controller.play() }

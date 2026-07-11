@@ -424,7 +424,9 @@ class NowPlayingViewModelTrackTapTest {
         advanceUntilIdle()
 
         val seedSlot = slot<com.stash.core.data.radio.RadioSeed>()
-        coVerify { playerRepository.startRadio(capture(seedSlot)) }
+        // keepCurrent MUST be true — the seed is the currently-playing track, so
+        // the player keeps it playing instead of restarting it.
+        coVerify { playerRepository.startRadio(capture(seedSlot), keepCurrent = true) }
         val seed = seedSlot.captured as com.stash.core.data.radio.RadioSeed.Song
         assertEquals("song", seed.title)
         assertEquals("artist", seed.artist)

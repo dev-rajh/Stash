@@ -649,7 +649,10 @@ class PlayerRepositoryImpl @Inject constructor(
         controller.play()
     }
 
-    override suspend fun startRadio(seed: com.stash.core.data.radio.RadioSeed): Boolean {
+    override suspend fun startRadio(
+        seed: com.stash.core.data.radio.RadioSeed,
+        keepCurrent: Boolean,
+    ): Boolean {
         if (!streamingPreference.current()) return false
         val controller = ensureController() ?: return false
         val (session, firstBatch) = radioGenerator.start(seed)
@@ -662,32 +665,40 @@ class PlayerRepositoryImpl @Inject constructor(
         // pollute the station.
         libraryShuffleActive = false
         librarySnapshot = emptyList()
-        currentQueueTracks = firstBatch
 
         // Radio tracks are STREAMING tracks (no filePath) — they must become
         // stash-resolve:// placeholders (toQueueMediaItem), NOT bare toMediaItem()
         // which sets a null URI and makes Media3's DefaultMediaSourceFactory NPE
         // on the missing localConfiguration. (shuffleLibrary can use toMediaItem
         // because it only ever queues downloaded, file://-backed tracks.)
-        val currentYtId = controller.currentMediaItem
-            ?.mediaMetadata?.extras?.getString(EXTRA_TRACK_YOUTUBE_ID)
-        val seedYtId = firstBatch.first().youtubeId
-        if (currentYtId != null && currentYtId == seedYtId && controller.mediaItemCount > 0) {
-            // Seamless: a song radio seeded from the currently-playing track (the
-            // Now Playing "Start radio" case). The seed IS firstBatch[0], so DON'T
-            // tear the player down and restart it — keep the current item playing
-            // untouched and just splice the queue around it: drop everything before
-            // and after it, then append the rest of the station after it.
+        //
+        // Seamless start-from-current (Now Playing "Start radio"): keepCurrent is
+        // set BY THE CALLER because it knows the seed is the playing track — we do
+        // NOT infer it by matching videoIds (the playing item and the freshly-
+        // resolved seed track often have different/absent youtubeIds because they
+        // came through different resolution paths, which is why matching failed).
+        // Identify the seed inside firstBatch by normalized title|artist (the seed
+        // Song carries both), drop that one, and splice the discoveries around the
+        // still-playing current item instead of tearing the player down.
+        val songSeed = seed as? com.stash.core.data.radio.RadioSeed.Song
+        if (keepCurrent && songSeed != null && controller.currentMediaItem != null &&
+            controller.mediaItemCount > 0
+        ) {
+            val seedKey = radioIdentity(songSeed.artist, songSeed.title)
+            val seedTrack = firstBatch.firstOrNull { radioIdentity(it.artist, it.title) == seedKey }
+            val discoveries = firstBatch.filter { it !== seedTrack }
+            currentQueueTracks = listOfNotNull(seedTrack) + discoveries
             val curIdx = controller.currentMediaItemIndex
             if (curIdx + 1 < controller.mediaItemCount) {
                 controller.removeMediaItems(curIdx + 1, controller.mediaItemCount)
             }
             if (curIdx > 0) controller.removeMediaItems(0, curIdx)
-            controller.addMediaItems(firstBatch.drop(1).map { it.toQueueMediaItem() })
-            // No prepare/play/seek — playback of the seed continues uninterrupted.
+            controller.addMediaItems(discoveries.map { it.toQueueMediaItem() })
+            // No prepare/play/seek — the current item keeps playing uninterrupted.
         } else {
-            // Fresh station (artist radio, or a song radio for a track that isn't
-            // the current one): replace the queue and start from the top.
+            // Fresh station (artist radio, song ⋮ menu on a non-playing row):
+            // replace the queue and start from the top.
+            currentQueueTracks = firstBatch
             controller.setMediaItems(firstBatch.map { it.toQueueMediaItem() }, 0, 0L)
             controller.prepare()
             controller.play()
@@ -703,6 +714,14 @@ class PlayerRepositoryImpl @Inject constructor(
         radioActive = false
         radioSession = null
         _radioSeedLabel.value = null
+    }
+
+    /** Normalized track identity for matching the radio seed against the batch —
+     *  lowercase, trimmed, whitespace-collapsed `title|artist`. Robust across the
+     *  different resolution paths that produce the same song. */
+    private fun radioIdentity(artist: String, title: String): String {
+        fun norm(s: String) = s.trim().lowercase().replace(Regex("\\s+"), " ")
+        return norm(title) + "|" + norm(artist)
     }
 
     /** Append the next generated batch to the station queue. Single-flight via

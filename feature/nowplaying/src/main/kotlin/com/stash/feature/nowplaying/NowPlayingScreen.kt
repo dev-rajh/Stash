@@ -19,9 +19,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Radio
-import androidx.compose.material3.TextButton
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material.icons.filled.BookmarkBorder
@@ -291,6 +289,13 @@ fun NowPlayingScreen(
                     isLiked = uiState.currentTrack?.stashLikedAt != null,
                     onDownloadTap = viewModel::toggleDownloadForCurrentTrack,
                     isDownloaded = uiState.currentTrack?.isDownloaded == true,
+                    // Radio toggle: start a station seeded from this song, or stop
+                    // the active one. Lives in the TopBar icon row (no vertical
+                    // footprint); accented while a station is running.
+                    radioActive = radioLabel != null,
+                    onStartRadio = viewModel::startRadioFromCurrent,
+                    onStopRadio = viewModel::stopRadio,
+                    accentColor = uiState.vibrantColor,
                 )
 
                 Spacer(modifier = Modifier.height(24.dp))
@@ -385,59 +390,6 @@ fun NowPlayingScreen(
                     )
                 }
 
-                // Radio affordance: an active-station "Radio · <seed>" chip with a
-                // Stop button, or a "Start radio" button seeded from this song when
-                // no station is running. Hidden entirely when nothing is playing.
-                if (track != null) {
-                    Spacer(modifier = Modifier.height(8.dp))
-                    val label = radioLabel
-                    if (label != null) {
-                        Row(
-                            horizontalArrangement = Arrangement.Center,
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Radio,
-                                contentDescription = null,
-                                tint = Color.White.copy(alpha = 0.8f),
-                                modifier = Modifier.size(16.dp),
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = "Radio · $label",
-                                fontSize = 13.sp,
-                                color = Color.White.copy(alpha = 0.8f),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f, fill = false),
-                            )
-                            IconButton(onClick = viewModel::stopRadio) {
-                                Icon(
-                                    imageVector = Icons.Default.Close,
-                                    contentDescription = "Stop radio",
-                                    tint = Color.White.copy(alpha = 0.6f),
-                                    modifier = Modifier.size(16.dp),
-                                )
-                            }
-                        }
-                    } else {
-                        TextButton(onClick = viewModel::startRadioFromCurrent) {
-                            Icon(
-                                imageVector = Icons.Default.Radio,
-                                contentDescription = null,
-                                tint = Color.White.copy(alpha = 0.8f),
-                                modifier = Modifier.size(16.dp),
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = "Start radio",
-                                fontSize = 13.sp,
-                                color = Color.White.copy(alpha = 0.8f),
-                            )
-                        }
-                    }
-                }
-
                 // Quality line — codec + bit-depth/sample-rate + bitrate, when known.
                 // Sized smaller than the artist/album line; degrades gracefully when
                 // some fields are missing (returns a partial line, not nothing).
@@ -526,6 +478,10 @@ private fun TopBar(
     isLiked: Boolean,
     onDownloadTap: () -> Unit,
     isDownloaded: Boolean,
+    radioActive: Boolean,
+    onStartRadio: () -> Unit,
+    onStopRadio: () -> Unit,
+    accentColor: Color,
 ) {
     Row(
         modifier = Modifier
@@ -543,6 +499,19 @@ private fun TopBar(
         }
 
         Spacer(modifier = Modifier.weight(1f))
+
+        // Radio toggle — start a station from the current song, or stop the
+        // running one. Accent tint signals an active station.
+        if (hasTrack) {
+            IconButton(onClick = { if (radioActive) onStopRadio() else onStartRadio() }) {
+                Icon(
+                    imageVector = Icons.Default.Radio,
+                    contentDescription = if (radioActive) "Stop radio" else "Start radio",
+                    tint = if (radioActive) accentColor else Color.White,
+                    modifier = Modifier.size(24.dp),
+                )
+            }
+        }
 
         // Flag as wrong match — only shown when a track is loaded. Lives
         // here (not in the Playlist Detail row menu) because Now Playing

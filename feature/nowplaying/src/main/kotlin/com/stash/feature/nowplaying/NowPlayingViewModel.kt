@@ -140,6 +140,8 @@ class NowPlayingViewModel @Inject constructor(
                 com.stash.core.data.radio.RadioSeed.Song(
                     title = track.title, artist = track.artist, ytVideoId = track.youtubeId,
                 ),
+                // The seed IS the currently-playing track — keep it playing, don't restart.
+                keepCurrent = true,
             )
             if (!started) _userMessages.tryEmit("Radio needs Online mode — turn on streaming.")
         }
