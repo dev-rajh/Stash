@@ -137,6 +137,44 @@ class PlayerRepositoryFullTimelineTest {
     }
 
     @Test
+    fun `negative synthetic id gets stamped and its youtube-thumbnail art upgraded to the cover`() {
+        // Radio/search tracks use videoId.hashCode() ids, which are frequently
+        // NEGATIVE — the stamp must run for them (the old `<= 0L` guard skipped
+        // them, leaving "opus" + low-res art). It must also upgrade a low-res
+        // i.ytimg thumbnail to the resolved square cover.
+        val negId = -600172367L
+        val placeholder = MediaItem.Builder()
+            .setMediaId(negId.toString())
+            .setUri("stash-resolve://track/$negId")
+            .setMediaMetadata(
+                androidx.media3.common.MediaMetadata.Builder()
+                    .setArtworkUri(android.net.Uri.parse("https://i.ytimg.com/vi/abc/mqdefault.jpg"))
+                    .setExtras(android.os.Bundle().apply { putLong(EXTRA_TRACK_ID, negId) })
+                    .build(),
+            )
+            .build()
+        every { controller.currentMediaItem } returns placeholder
+        every { controller.currentMediaItemIndex } returns 2
+        every { streamUrlCache.get(negId) } returns
+            com.stash.core.media.streaming.StreamUrl(
+                url = "https://cdn/x.flac",
+                expiresAtMs = Long.MAX_VALUE,
+                codec = "flac",
+                coverArtUrl = "https://qobuz/cover-large.jpg",
+                origin = "qbdlx",
+            )
+        val stamped = slot<MediaItem>()
+        every { controller.replaceMediaItem(2, capture(stamped)) } returns Unit
+
+        repo.maybeStampCurrentItemQuality(controller)
+
+        assertThat(stamped.captured.mediaMetadata.extras!!.getString("stash_stream_codec"))
+            .isEqualTo("flac")
+        assertThat(stamped.captured.mediaMetadata.artworkUri?.toString())
+            .isEqualTo("https://qobuz/cover-large.jpg")
+    }
+
+    @Test
     fun `stamped or uncached items are left alone`() {
         every { controller.currentMediaItem } returns MediaItem.Builder()
             .setMediaId("7").setUri("stash-resolve://track/7")

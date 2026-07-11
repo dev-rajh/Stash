@@ -1537,10 +1537,14 @@ class PlayerRepositoryImpl @Inject constructor(
         val item = controller.currentMediaItem ?: return
         val extras = item.mediaMetadata.extras ?: return
         if (extras.getString(EXTRA_STREAM_CODEC) != null) return // already stamped
-        val trackId = extras.getLong(EXTRA_TRACK_ID, -1L)
-        if (trackId <= 0L) return
+        // Sentinel 0 = absent. Radio/search-synthetic ids are videoId.hashCode(),
+        // which is frequently NEGATIVE — the old `<= 0L` guard skipped the stamp
+        // for those, so the badge stayed "opus" and the art stayed the low-res
+        // placeholder. Allow any non-zero id.
+        val trackId = extras.getLong(EXTRA_TRACK_ID, 0L)
+        if (trackId == 0L) return
         val stream = streamUrlCache.get(trackId) ?: return // downloaded/unresolved: nothing to stamp
-        if (stream.codec == null && stream.origin == null) return
+        if (stream.codec == null && stream.origin == null && stream.coverArtUrl == null) return
         val newExtras = Bundle(extras).apply {
             stream.codec?.let { putString(EXTRA_STREAM_CODEC, it) }
             stream.bitsPerSample?.let { putInt(EXTRA_STREAM_BIT_DEPTH, it) }
@@ -1548,8 +1552,19 @@ class PlayerRepositoryImpl @Inject constructor(
             stream.bitrateKbps?.let { putInt(EXTRA_STREAM_BITRATE, it) }
             stream.origin?.let { putString(EXTRA_STREAM_ORIGIN, it) }
         }
+        // Upgrade the artwork to the source's square cover (e.g. the high-res
+        // Qobuz cover) when the current art is a blank/low-res YouTube video
+        // thumbnail — those are letterboxed/soft; the resolved cover is square.
+        val currentArt = item.mediaMetadata.artworkUri?.toString()
+        val betterArt = stream.coverArtUrl?.takeIf {
+            it != currentArt &&
+                (currentArt.isNullOrBlank() ||
+                    com.stash.core.common.ArtUrlUpgrader.isYouTubeVideoThumbnail(currentArt))
+        }
+        val metaBuilder = item.mediaMetadata.buildUpon().setExtras(newExtras)
+        betterArt?.let { metaBuilder.setArtworkUri(Uri.parse(it)) }
         val stamped = item.buildUpon()
-            .setMediaMetadata(item.mediaMetadata.buildUpon().setExtras(newExtras).build())
+            .setMediaMetadata(metaBuilder.build())
             .build()
         controller.replaceMediaItem(controller.currentMediaItemIndex, stamped)
     }
