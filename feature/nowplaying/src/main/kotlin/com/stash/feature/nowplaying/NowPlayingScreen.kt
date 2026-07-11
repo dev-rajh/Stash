@@ -95,6 +95,7 @@ fun NowPlayingScreen(
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val track = uiState.currentTrack
     val resolvingArtist by viewModel.resolvingArtist.collectAsStateWithLifecycle()
+    val isDownloadingCurrent by viewModel.isDownloadingCurrent.collectAsStateWithLifecycle()
     val radioLabel by viewModel.radioSeedLabel.collectAsStateWithLifecycle()
     var showQueue by remember { mutableStateOf(false) }
     var showSaveSheet by remember { mutableStateOf(false) }
@@ -277,7 +278,7 @@ fun NowPlayingScreen(
                     .padding(horizontal = 24.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                // -- Top bar: dismiss, label, flag, like, download, save, queue --
+                // -- Top bar: dismiss, radio, flag, download, save, queue --
                 TopBar(
                     onDismiss = onDismiss,
                     onFlagWrongMatch = { showWrongMatchDialog = true },
@@ -285,10 +286,9 @@ fun NowPlayingScreen(
                     onQueueClick = { showQueue = true },
                     hasTrack = uiState.hasTrack,
                     queueSize = uiState.queueSize,
-                    onLikeTap = viewModel::onLikeTap,
-                    isLiked = uiState.currentTrack?.stashLikedAt != null,
                     onDownloadTap = viewModel::toggleDownloadForCurrentTrack,
                     isDownloaded = uiState.currentTrack?.isDownloaded == true,
+                    isDownloading = isDownloadingCurrent,
                     // Radio toggle: start a station seeded from this song, or stop
                     // the active one. Lives in the TopBar icon row (no vertical
                     // footprint); accented while a station is running.
@@ -313,9 +313,14 @@ fun NowPlayingScreen(
                 // -- Track info -- (tap the title/artist to open the artist
                 // profile; the trailing chevron signals it's actionable, and
                 // swaps to a spinner while the artist name is being resolved).
+                // The like heart floats at the right edge (relocated out of the
+                // crowded top icon row); symmetric horizontal padding keeps the
+                // title/artist block optically centred under the album art.
+                Box(modifier = Modifier.fillMaxWidth()) {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .padding(horizontal = 40.dp)
                         .then(
                             if (track != null) {
                                 Modifier.clickable(enabled = !resolvingArtist) {
@@ -388,6 +393,19 @@ fun NowPlayingScreen(
                         textAlign = TextAlign.Center,
                         modifier = Modifier.fillMaxWidth(),
                     )
+                }
+                    // Like heart — relocated from the top icon row to a cleaner
+                    // primary spot, floated to the trailing edge and vertically
+                    // centred against the title/artist block.
+                    if (track != null) {
+                        com.stash.core.ui.components.LikeButton(
+                            isLiked = uiState.currentTrack?.stashLikedAt != null,
+                            onTap = viewModel::onLikeTap,
+                            unlikedTint = Color.White.copy(alpha = 0.7f),
+                            size = 26.dp,
+                            modifier = Modifier.align(Alignment.CenterEnd),
+                        )
+                    }
                 }
 
                 // Quality line — codec + bit-depth/sample-rate + bitrate, when known.
@@ -474,10 +492,9 @@ private fun TopBar(
     onQueueClick: () -> Unit,
     hasTrack: Boolean,
     queueSize: Int,
-    onLikeTap: () -> Unit,
-    isLiked: Boolean,
     onDownloadTap: () -> Unit,
     isDownloaded: Boolean,
+    isDownloading: Boolean,
     radioActive: Boolean,
     onStartRadio: () -> Unit,
     onStopRadio: () -> Unit,
@@ -528,31 +545,32 @@ private fun TopBar(
             }
         }
 
-        // v0.9.13: Like button — Stash-only toggle. Tap on empty saves to
-        // Stash Liked Songs; tap on filled removes. Long-press is a no-op
-        // by design; the override sheet was deprecated in favor of the
-        // simpler standard like-button UX.
-        if (hasTrack) {
-            com.stash.core.ui.components.LikeButton(
-                isLiked = isLiked,
-                onTap = onLikeTap,
-                unlikedTint = Color.White,
-                modifier = Modifier.padding(horizontal = 4.dp),
-            )
-        }
-
         // Download / Remove-download toggle — single button that flips
         // based on the current track's on-disk state. Streaming-mode
         // users use this to grab the song they're listening to right now
-        // without leaving Now Playing.
+        // without leaving Now Playing. While a download is in flight a
+        // spinner replaces the icon so it isn't a silent background job.
         if (hasTrack) {
-            IconButton(onClick = onDownloadTap) {
-                Icon(
-                    imageVector = if (isDownloaded) Icons.Default.DownloadDone else Icons.Default.Download,
-                    contentDescription = if (isDownloaded) "Remove download" else "Download",
-                    tint = Color.White,
-                    modifier = Modifier.size(24.dp),
-                )
+            if (isDownloading) {
+                Box(
+                    modifier = Modifier.size(48.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(22.dp),
+                        strokeWidth = 2.5.dp,
+                        color = Color.White,
+                    )
+                }
+            } else {
+                IconButton(onClick = onDownloadTap) {
+                    Icon(
+                        imageVector = if (isDownloaded) Icons.Default.DownloadDone else Icons.Default.Download,
+                        contentDescription = if (isDownloaded) "Remove download" else "Download",
+                        tint = Color.White,
+                        modifier = Modifier.size(24.dp),
+                    )
+                }
             }
         }
 
