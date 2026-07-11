@@ -91,6 +91,7 @@ class AlbumDiscoveryViewModelQobuzTest {
         prefetcher = prefetcher,
         playerRepository = player,
         musicRepository = musicRepo,
+        streamingPreference = mock(),
         delegate = delegate,
         losslessPrefetcher = mock(),
     )

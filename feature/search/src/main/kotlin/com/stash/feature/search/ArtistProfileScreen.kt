@@ -48,6 +48,7 @@ import kotlinx.coroutines.flow.merge
  * Snackbar host — refresh failures show a one-liner but the cached data
  * keeps rendering underneath, matching §3.4's stale-while-revalidate UX.
  */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 fun ArtistProfileScreen(
     onBack: () -> Unit,
@@ -61,6 +62,9 @@ fun ArtistProfileScreen(
     val downloadedIds by vm.delegate.downloadedIds.collectAsStateWithLifecycle()
     val previewLoadingId by vm.delegate.previewLoadingId.collectAsStateWithLifecycle()
     val currentPlayingYoutubeId by vm.currentPlayingYoutubeId.collectAsStateWithLifecycle()
+    val streamingEnabled by vm.streamingEnabled.collectAsStateWithLifecycle()
+    var showStreamingSheet by rememberSaveable { mutableStateOf(false) }
+    val streamingSheetState = androidx.compose.material3.rememberModalBottomSheetState()
     val playlistSheetItem by vm.playlistSheetItem.collectAsStateWithLifecycle()
     val userPlaylists by vm.userPlaylists.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
@@ -120,6 +124,8 @@ fun ArtistProfileScreen(
                     onBack = onBack,
                     onPlayArtist = vm::playArtist,
                     onStartRadio = vm::startRadio,
+                    streamingEnabled = streamingEnabled,
+                    onStreamingClick = { showStreamingSheet = true },
                 )
             }
 
@@ -176,6 +182,18 @@ fun ArtistProfileScreen(
                     focus = focus,
                 )
             }
+        }
+
+        if (showStreamingSheet) {
+            com.stash.core.ui.components.streaming.StreamingModeSheet(
+                streamingEnabled = streamingEnabled,
+                onSelect = { requested ->
+                    vm.applyStreamingMode(requested)
+                    showStreamingSheet = false
+                },
+                onDismiss = { showStreamingSheet = false },
+                sheetState = streamingSheetState,
+            )
         }
 
         if (playlistSheetItem != null) {

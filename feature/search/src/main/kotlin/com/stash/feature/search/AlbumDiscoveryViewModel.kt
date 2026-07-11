@@ -71,6 +71,7 @@ class AlbumDiscoveryViewModel @Inject constructor(
     private val prefetcher: PreviewPrefetcher,
     private val playerRepository: PlayerRepository,
     private val musicRepository: MusicRepository,
+    private val streamingPreference: com.stash.core.data.prefs.StreamingPreference,
     val delegate: TrackActionsDelegate,
     val losslessPrefetcher: LosslessUrlPrefetcher,
 ) : ViewModel() {
@@ -126,6 +127,14 @@ class AlbumDiscoveryViewModel @Inject constructor(
             .map { it.currentTrack?.youtubeId }
             .distinctUntilChanged()
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), null)
+
+    /** Online/Offline mode for the album-header chip. */
+    val streamingEnabled: StateFlow<Boolean> =
+        streamingPreference.enabled.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), false)
+
+    fun applyStreamingMode(enabled: Boolean) {
+        viewModelScope.launch { streamingPreference.setEnabled(enabled) }
+    }
 
     fun onPlayNext(item: TrackItem) = delegate.playNext(item)
 

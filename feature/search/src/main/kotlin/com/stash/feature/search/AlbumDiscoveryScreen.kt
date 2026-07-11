@@ -23,6 +23,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -68,6 +69,7 @@ import kotlinx.coroutines.flow.merge
  * (matching [ArtistProfileScreen]) — the screen does not hold its own
  * copies.
  */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 fun AlbumDiscoveryScreen(
     onBack: () -> Unit,
@@ -80,6 +82,9 @@ fun AlbumDiscoveryScreen(
     val previewLoadingId by vm.delegate.previewLoadingId.collectAsStateWithLifecycle()
     val previewState by vm.delegate.previewState.collectAsStateWithLifecycle()
     val currentPlayingYoutubeId by vm.currentPlayingYoutubeId.collectAsStateWithLifecycle()
+    val streamingEnabled by vm.streamingEnabled.collectAsStateWithLifecycle()
+    var showStreamingSheet by androidx.compose.runtime.saveable.rememberSaveable { androidx.compose.runtime.mutableStateOf(false) }
+    val streamingSheetState = androidx.compose.material3.rememberModalBottomSheetState()
     val playlistSheetItem by vm.playlistSheetItem.collectAsStateWithLifecycle()
     val userPlaylists by vm.userPlaylists.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
@@ -113,6 +118,8 @@ fun AlbumDiscoveryScreen(
                     onDownloadAll = vm::onDownloadAllClicked,
                     onPlayAlbum = { vm.playAlbum(startIndex = 0) },
                     onAddToQueue = vm::addAlbumToQueue,
+                    streamingEnabled = streamingEnabled,
+                    onStreamingClick = { showStreamingSheet = true },
                     downloadSupported = vm.downloadSupported,
                 )
             }
@@ -239,6 +246,18 @@ fun AlbumDiscoveryScreen(
                         TextButton(onClick = vm::onDownloadAllDismissed) { Text("Cancel") }
                     }
                 },
+            )
+        }
+
+        if (showStreamingSheet) {
+            com.stash.core.ui.components.streaming.StreamingModeSheet(
+                streamingEnabled = streamingEnabled,
+                onSelect = { requested ->
+                    vm.applyStreamingMode(requested)
+                    showStreamingSheet = false
+                },
+                onDismiss = { showStreamingSheet = false },
+                sheetState = streamingSheetState,
             )
         }
 

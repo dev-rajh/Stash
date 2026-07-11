@@ -65,6 +65,8 @@ fun ArtistHero(
     onBack: () -> Unit,
     onPlayArtist: () -> Unit,
     onStartRadio: () -> Unit,
+    streamingEnabled: Boolean,
+    onStreamingClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val primary = MaterialTheme.colorScheme.primary
@@ -167,6 +169,18 @@ fun ArtistHero(
                 imageVector = Icons.AutoMirrored.Filled.ArrowBack,
                 contentDescription = "Back",
                 tint = MaterialTheme.colorScheme.onBackground,
+            )
+        }
+
+        // Top-right Online/Offline chip — flip playback mode from the profile
+        // (mirrors the back arrow's placement).
+        if (com.stash.core.common.constants.StashConstants.STREAMING_ENGINE_ENABLED) {
+            com.stash.core.ui.components.streaming.StreamingModeChip(
+                streamingEnabled = streamingEnabled,
+                onClick = onStreamingClick,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(8.dp),
             )
         }
     }

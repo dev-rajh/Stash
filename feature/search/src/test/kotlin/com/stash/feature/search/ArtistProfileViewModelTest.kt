@@ -91,6 +91,7 @@ class ArtistProfileViewModelTest {
         prefetcher = prefetcher,
         playerRepository = playerRepository,
         musicRepository = musicRepository,
+        streamingPreference = mock(),
         delegate = delegate,
         losslessPrefetcher = mock(),
     )
