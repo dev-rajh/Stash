@@ -213,7 +213,7 @@ class ArtistProfileViewModelTest {
         )
         val cache = mock<ArtistCache>()
         whenever(cache.get(eq("UC1"))).thenReturn(flowOf(CachedProfile.Fresh(profile)))
-        val player = mock<PlayerRepository> { onBlocking { startRadio(any()) } doReturn true }
+        val player = mock<PlayerRepository> { onBlocking { startRadio(any(), any()) } doReturn true }
         val vm = vmWith(cache = cache, playerRepository = player)
         advanceUntilIdle()
 
@@ -221,7 +221,7 @@ class ArtistProfileViewModelTest {
         advanceUntilIdle()
 
         val seedCaptor = argumentCaptor<com.stash.core.data.radio.RadioSeed>()
-        verify(player).startRadio(seedCaptor.capture())
+        verify(player).startRadio(seedCaptor.capture(), any())
         val seed = seedCaptor.firstValue as com.stash.core.data.radio.RadioSeed.Artist
         assertEquals("UC1", seed.ytBrowseId)
         assertEquals("LocalName", seed.name)

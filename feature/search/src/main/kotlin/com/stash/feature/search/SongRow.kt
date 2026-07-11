@@ -16,6 +16,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.PlaylistAdd
@@ -45,6 +46,14 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
 import com.stash.core.ui.theme.StashTheme
+
+/**
+ * A row is the now-playing row iff it has a non-blank videoId equal to the player's
+ * current youtubeId. Blank-videoId (Qobuz-native) rows never match — their videoId
+ * is "", so they can't collide with a real playing id.
+ */
+fun isRowPlaying(rowVideoId: String, currentPlayingYoutubeId: String?): Boolean =
+    rowVideoId.isNotBlank() && rowVideoId == currentPlayingYoutubeId
 
 /**
  * Canonical tap-to-play song row for Search results, artist "Popular", and album
@@ -92,17 +101,26 @@ fun SongRow(
     onAddToQueue: () -> Unit = {},
     onAddToPlaylist: () -> Unit = {},
     onStartRadio: () -> Unit = {},
+    /** True when this row's track is the one currently playing — renders the
+     *  accent tint + equalizer glyph. See [isRowPlaying]. */
+    isPlaying: Boolean = false,
 ) {
     val extendedColors = StashTheme.extendedColors
     // Dim the art behind the loading spinner / stop glyph so it reads clearly.
     val scrim = MaterialTheme.colorScheme.scrim.copy(alpha = 0.55f)
+    // Now-playing rows get a subtle primary wash so the active track stands out.
+    val rowBackground = if (isPlaying) {
+        MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
+    } else {
+        extendedColors.glassBackground
+    }
 
     Row(
         modifier = modifier
             .fillMaxWidth()
             .testTag("SongRow")
             .clip(RoundedCornerShape(12.dp))
-            .background(extendedColors.glassBackground)
+            .background(rowBackground)
             // Whole row = play affordance. Tapping while a 30s preview plays stops it
             // (inherits the old ▶/⏹ button toggle) so a running preview is never
             // orphaned. The download button + ⋮ below consume their own taps.
@@ -165,13 +183,24 @@ fun SongRow(
         Column(
             modifier = Modifier.weight(1f),
         ) {
-            Text(
-                text = item.title,
-                style = MaterialTheme.typography.bodyLarge,
-                color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (isPlaying) {
+                    Icon(
+                        imageVector = Icons.Default.GraphicEq,
+                        contentDescription = "Now playing",
+                        modifier = Modifier.size(16.dp),
+                        tint = MaterialTheme.colorScheme.primary,
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                }
+                Text(
+                    text = item.title,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = if (isPlaying) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
             Spacer(modifier = Modifier.height(2.dp))
             Text(
                 text = item.artist,

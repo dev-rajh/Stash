@@ -23,6 +23,8 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -117,6 +119,13 @@ class AlbumDiscoveryViewModel @Inject constructor(
 
     val userPlaylists: StateFlow<List<Playlist>> =
         delegate.userPlaylists.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    /** youtubeId of the currently-playing track, for the SongRow now-playing indicator. */
+    val currentPlayingYoutubeId: StateFlow<String?> =
+        playerRepository.playerState
+            .map { it.currentTrack?.youtubeId }
+            .distinctUntilChanged()
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), null)
 
     fun onPlayNext(item: TrackItem) = delegate.playNext(item)
 

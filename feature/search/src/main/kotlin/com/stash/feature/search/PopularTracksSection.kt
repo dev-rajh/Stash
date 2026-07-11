@@ -41,6 +41,7 @@ fun PopularTracksSection(
     downloadingIds: Set<String>,
     downloadedIds: Set<String>,
     previewLoadingId: String?,
+    currentPlayingYoutubeId: String?,
     losslessPrefetcher: LosslessUrlPrefetcher,
     onPreview: (TrackItem) -> Unit,
     onStopPreview: () -> Unit,
@@ -70,6 +71,7 @@ fun PopularTracksSection(
                 isPreviewLoading = previewLoadingId == track.videoId,
                 isPreviewPlaying = previewState is PreviewState.Playing &&
                     previewState.videoId == track.videoId,
+                isPlaying = isRowPlaying(track.videoId, currentPlayingYoutubeId),
                 onPlay = { onPreview(trackItem) },
                 onStopPreview = onStopPreview,
                 onDownload = { onDownload(item) },

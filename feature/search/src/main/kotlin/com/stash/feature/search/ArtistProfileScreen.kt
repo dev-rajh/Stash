@@ -60,6 +60,7 @@ fun ArtistProfileScreen(
     val downloadingIds by vm.delegate.downloadingIds.collectAsStateWithLifecycle()
     val downloadedIds by vm.delegate.downloadedIds.collectAsStateWithLifecycle()
     val previewLoadingId by vm.delegate.previewLoadingId.collectAsStateWithLifecycle()
+    val currentPlayingYoutubeId by vm.currentPlayingYoutubeId.collectAsStateWithLifecycle()
     val playlistSheetItem by vm.playlistSheetItem.collectAsStateWithLifecycle()
     val userPlaylists by vm.userPlaylists.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
@@ -140,6 +141,7 @@ fun ArtistProfileScreen(
                         downloadingIds = downloadingIds,
                         downloadedIds = downloadedIds,
                         previewLoadingId = previewLoadingId,
+                    currentPlayingYoutubeId = currentPlayingYoutubeId,
                         losslessPrefetcher = vm.losslessPrefetcher,
                         onPreview = { track -> vm.delegate.previewTrack(track) },
                         onStopPreview = vm.delegate::stopPreview,
@@ -160,6 +162,7 @@ fun ArtistProfileScreen(
                     downloadingIds = downloadingIds,
                     downloadedIds = downloadedIds,
                     previewLoadingId = previewLoadingId,
+                    currentPlayingYoutubeId = currentPlayingYoutubeId,
                     losslessPrefetcher = vm.losslessPrefetcher,
                     onPreview = { track -> vm.delegate.previewTrack(track) },
                     onStopPreview = vm.delegate::stopPreview,
@@ -200,6 +203,7 @@ private fun androidx.compose.foundation.lazy.LazyListScope.contentSections(
     downloadingIds: Set<String>,
     downloadedIds: Set<String>,
     previewLoadingId: String?,
+    currentPlayingYoutubeId: String?,
     losslessPrefetcher: LosslessUrlPrefetcher,
     onPreview: (TrackItem) -> Unit,
     onStopPreview: () -> Unit,
@@ -221,6 +225,7 @@ private fun androidx.compose.foundation.lazy.LazyListScope.contentSections(
                 downloadingIds = downloadingIds,
                 downloadedIds = downloadedIds,
                 previewLoadingId = previewLoadingId,
+                currentPlayingYoutubeId = currentPlayingYoutubeId,
                 losslessPrefetcher = losslessPrefetcher,
                 onPreview = onPreview,
                 onStopPreview = onStopPreview,
