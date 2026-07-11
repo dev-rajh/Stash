@@ -166,8 +166,10 @@ class LosslessUrlPrefetcherTest {
         coEvery { registry.resolve(any(), any()) } returns null
         val p = LosslessUrlPrefetcher(registry)
         p.warmUp(item)
-        // allow the async warmUp to run
-        coVerify { registry.resolve(any(), bypassRateLimit = false) }
+        // warmUp dispatches onto the prefetcher's own Dispatchers.IO scope (NOT the
+        // runTest scheduler), so the verify must WAIT for the real IO coroutine — a
+        // bare coVerify would race and fail. `timeout` polls until the call lands.
+        coVerify(timeout = 1000) { registry.resolve(any(), bypassRateLimit = false) }
     }
 }
 ```
@@ -196,14 +198,20 @@ Expected: FAIL — `resolve` doesn't take a second arg yet / lookup doesn't bypa
     }
 
     /**
-     * Foreground (tap) resolve. A completed/fresh warm result is returned instantly.
-     * Otherwise we start a NEW resolve that BYPASSES the rate limiter (user action,
-     * mirrors streaming) and replace any in-flight rate-limited warmUp deferred for
-     * this track so the slow one is superseded — no redundant Qobuz call.
+     * Foreground (tap) resolve. If a warm result is already COMPLETE, return it
+     * instantly. Otherwise cancel any in-flight (rate-limited) warmUp for this
+     * track and start a NEW resolve that BYPASSES the rate limiter (user action,
+     * mirrors streaming) — no redundant Qobuz call, no token wait.
      */
     suspend fun lookup(track: TrackItem): SourceResult? {
         val key = track.videoId
-        cache[key]?.let { if (it.isFresh() && it.deferred.isCompleted) return it.deferred.getCompleted() }
+        // Already-completed warm result → instant. `await()` on a completed deferred
+        // returns immediately and is NOT experimental (unlike getCompleted()), so no
+        // @OptIn is needed. Only return here when it's actually done — never await a
+        // slow in-flight rate-limited warmUp.
+        cache[key]?.let { if (it.isFresh() && it.deferred.isCompleted) return it.deferred.await() }
+        // Supersede a slow in-flight warmUp so it doesn't spend a token in the background.
+        cache[key]?.deferred?.cancel()
         val fast = scope.async {
             runCatching { registry.resolve(track.toQuery(), bypassRateLimit = true) }
                 .onFailure { e -> Log.w(TAG, "foreground resolve failed for $key: ${e.message}") }
@@ -214,7 +222,7 @@ Expected: FAIL — `resolve` doesn't take a second arg yet / lookup doesn't bypa
     }
 ```
 
-> Note: `getCompleted()` is only called under `isCompleted` (safe). The old `lookup` awaited the in-flight deferred; the new one supersedes a slow rate-limited warmUp with the fast bypass resolve.
+> Notes: (1) `await()` under `isCompleted` is instant and non-experimental — no `@OptIn(ExperimentalCoroutinesApi)` needed (avoid `getCompleted()`, which is experimental and would fail the compile gate). (2) Cancelling the in-flight warmUp deferred before replacing is what actually delivers the "no redundant call" the spec §6 promises; cancellation inside `withPermit` safely releases the semaphore. (3) A rapid second tap on the *same* row can't double-resolve: `TrackActionsDelegate.previewTrack` already no-ops a second tap while `previewLoadingId == videoId`, so `lookup` isn't re-entered for the same track mid-flight.
 
 - [ ] **Step 4: Run to verify it passes**
 
@@ -239,11 +247,15 @@ git commit -m "fix(preview): foreground FLAC lookup bypasses the rate limiter (1
 
 - [ ] **Step 1: Rename the file + composable.** `git mv PreviewDownloadRow.kt SongRow.kt`; rename `fun PreviewDownloadRow(` → `fun SongRow(`. Add a KDoc line: the whole row is the play affordance.
 
-- [ ] **Step 2: Make the row body clickable → play, delete the ▶ button.** In `SongRow`, the root row `Modifier` gains `.clickable { onPlay() }` (rename the `onPreview` param → `onPlay` for clarity). Remove the standalone play/preview ▶ button composable. Keep the download button + `⋮` as inner clickables (they already consume their own taps). The `isPreviewLoading`/`isResolving` spinner now renders inline on the row (e.g., a small leading spinner overlay on the art) instead of on the deleted ▶.
+- [ ] **Step 2: Make the row body clickable → play/stop-toggle, delete the ▶ button.** In `SongRow`, the root row `Modifier` gains a clickable that **inherits the old ▶/⏹ toggle** the deleted button had (`PreviewDownloadRow.kt:167` is `onClick = if (isPreviewPlaying) onStopPreview else onPreview`):
 
-Rename `onPreview` → `onPlay` everywhere in the signature and body. Keep `onStopPreview` (used to stop a running preview — wire it to a long-press or leave callable; simplest: keep the param, call from the now-playing indicator tap if you add a stop affordance, else it stays available). Keep all other params (`isDownloading`, `isDownloaded`, `isWaitingForLossless`, `onDownload`, `onPlayNext`, `onAddToQueue`, `onAddToPlaylist`, `onStartRadio`).
+```kotlin
+.clickable { if (isPreviewPlaying) onStopPreview() else onPlay() }
+```
 
-- [ ] **Step 3: Update the 3 call sites** — rename `PreviewDownloadRow(` → `SongRow(`, `onPreview =` → `onPlay =`, delete any now-unused `onStopPreview` wiring if the stop affordance is dropped. `SearchScreen.kt:491`, `PopularTracksSection.kt:65`, `AlbumDiscoveryScreen.kt:204`.
+Rename the `onPreview` param → `onPlay`. **Keep `onStopPreview`** — this is exactly what preserves a stop affordance: while a 30s preview is playing on a row, tapping that same row stops it (no orphaned preview). Remove the standalone play/preview ▶ button composable. Keep the download button + `⋮` as inner clickables (they already consume their own taps). The `isPreviewLoading`/`isResolving` spinner renders inline on the row (a small leading spinner over the art) instead of on the deleted ▶. Keep all other params (`isDownloading`, `isDownloaded`, `isWaitingForLossless`, `onDownload`, `onPlayNext`, `onAddToQueue`, `onAddToPlaylist`, `onStartRadio`).
+
+- [ ] **Step 3: Update the 3 call sites** — rename `PreviewDownloadRow(` → `SongRow(`, `onPreview =` → `onPlay =`. **Keep the existing `onStopPreview =` wiring** at every call site (it's now the row-tap stop path). `SearchScreen.kt:491`, `PopularTracksSection.kt:65`, `AlbumDiscoveryScreen.kt:204`.
 
 - [ ] **Step 4: Compile**
 
@@ -459,6 +471,6 @@ git add -A && git commit -m "chore(discovery): integration wiring + smoke-test f
 - **TDD where logic lives** (bypass flag, prefetcher dedup, now-playing matcher, VM mode state); pure-Compose layout is structural (compile + device-verify).
 - **Interface fanout (Task A1 Step 5):** all 5 `LosslessSource.resolve` overrides MUST add the `bypassRateLimit: Boolean` param or the module won't compile. Don't repeat the `= false` default on overrides.
 - **Preview behavior unchanged, only faster:** offline tap still 30s-previews; the fix is the resolve speed, not what a tap does.
-- **`onStopPreview`:** the delegate still needs a way to stop a running preview. If you drop the ▶/stop toggle from the row, keep the delegate call reachable (e.g., tapping the now-playing indicator, or a stop in the ⋮) — do not orphan a running preview with no stop.
+- **`onStopPreview` (pinned):** the whole-row click IS the stop affordance — `if (isPreviewPlaying) onStopPreview() else onPlay()` (Task B1 Step 2). This inherits the old ▶/⏹ button toggle, so a running 30s preview is never orphaned. Keep `onStopPreview` wired at all call sites.
 - **Pre-existing test noise** in `:data:ytmusic`/`:feature:search` — always `--tests`-filter; don't gate on the flaky `:core:media` network test.
 - **Device streaming pref:** a `pm clear` resets streaming to Offline — flip it back before smoke-testing playback so an offline default isn't mistaken for a bug.
