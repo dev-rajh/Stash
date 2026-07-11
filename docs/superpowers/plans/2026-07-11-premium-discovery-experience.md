@@ -189,7 +189,11 @@ Expected: FAIL — `resolve` doesn't take a second arg yet / lookup doesn't bypa
             deferred = scope.async {
                 concurrency.withPermit {
                     runCatching { registry.resolve(track.toQuery(), bypassRateLimit = false) }
-                        .onFailure { e -> Log.w(TAG, "resolve failed for $key: ${e.message}") }
+                        // Re-throw cancellation so a lookup that supersedes this warmUp
+                        // doesn't log a spurious "resolve failed … cancelled" warning
+                        // (project convention: never swallow CancellationException).
+                        .onFailure { e -> if (e is CancellationException) throw e
+                            Log.w(TAG, "resolve failed for $key: ${e.message}") }
                         .getOrNull()
                 }
             },
@@ -222,7 +226,7 @@ Expected: FAIL — `resolve` doesn't take a second arg yet / lookup doesn't bypa
     }
 ```
 
-> Notes: (1) `await()` under `isCompleted` is instant and non-experimental — no `@OptIn(ExperimentalCoroutinesApi)` needed (avoid `getCompleted()`, which is experimental and would fail the compile gate). (2) Cancelling the in-flight warmUp deferred before replacing is what actually delivers the "no redundant call" the spec §6 promises; cancellation inside `withPermit` safely releases the semaphore. (3) A rapid second tap on the *same* row can't double-resolve: `TrackActionsDelegate.previewTrack` already no-ops a second tap while `previewLoadingId == videoId`, so `lookup` isn't re-entered for the same track mid-flight.
+> Notes: (1) `await()` under `isCompleted` is instant and non-experimental — no `@OptIn(ExperimentalCoroutinesApi)` needed (avoid `getCompleted()`, which is experimental and would fail the compile gate). (2) Cancelling the in-flight warmUp deferred before replacing is what actually delivers the "no redundant call" the spec §6 promises; cancellation inside `withPermit` safely releases the semaphore. (3) A rapid second tap on the *same* row can't double-resolve: `TrackActionsDelegate.previewTrack` already no-ops a second tap while `previewLoadingId == videoId`, so `lookup` isn't re-entered for the same track mid-flight. (4) Add `import kotlinx.coroutines.CancellationException` (for `warmUp`'s re-throw guard). (5) Optional hardening: the cancel/supersede dedup is correct-by-construction; a deterministic test for it would need the prefetcher's `Dispatchers.IO` scope made injectable — skip unless it regresses; the two tests above lock in the load-bearing bypass-vs-rate-limited split.
 
 - [ ] **Step 4: Run to verify it passes**
 
