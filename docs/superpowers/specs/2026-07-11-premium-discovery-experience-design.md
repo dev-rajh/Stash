@@ -63,11 +63,12 @@ role and a clearer name: **`SongRow`** (no more standalone preview button, so
 `⋮` are inner clickables that consume their own taps (same pattern the code already
 uses for the inline buttons), so tapping a control never also fires play.
 
-**Now-playing identity:** `SongRow` receives the currently-playing track id from the
-host screen, which reads `PlayerRepository.playerState.currentTrack`. For streaming
-rows this is the synthetic `videoId.hashCode()` id / the videoId — the row compares on
-the same key the player exposes (blank-videoId Qobuz rows simply never match, which is
-correct).
+**Now-playing identity (pinned):** the host screen reads
+`PlayerRepository.playerState.currentTrack` and passes `currentTrack.youtubeId` (a
+`String?`) to `SongRow`. The row is "active" iff
+`item.videoId.isNotBlank() && item.videoId == currentPlayingYoutubeId`. This is the one
+comparison — no hashCode arithmetic. Blank-videoId Qobuz-native rows never match (their
+`videoId` is `""`), which is correct.
 
 **Files:** rename `PreviewDownloadRow.kt` → `SongRow.kt` (composable + call sites in
 `SearchScreen.kt`, `PopularTracksSection.kt`, `AlbumDiscoveryScreen.kt`). The
@@ -114,11 +115,20 @@ Online"), with no way to switch mode without leaving for Home.
 **Fix (user's chosen "A"):** a persistent Online/Offline chip in the Search header,
 reusing Home's control.
 
-- **Extract** the stateless streaming-UI composables from `feature/home/streaming/`
-  (`StreamingModeChip`, `StreamingModeSheet`, `StreamingModePrompt`) into **`core:ui`**
+- **Extract** the two composables Search actually needs — `StreamingModeChip` and
+  `StreamingModeSheet` — from `feature/home/streaming/` into **`core:ui`**
   (`core/ui/.../components/streaming/`). They take a `mode` + callbacks; they hold no
   state. `feature:home` and `feature:search` both depend on `core:ui`, so this removes
   a would-be `feature:search → feature:home` dependency (which must not exist).
+  `StreamingModePrompt` is NOT used by Search — leave it in `feature:home` unless it
+  shares state/helpers with the moved two (in which case move it as a co-located unit);
+  do not extract an unconsumed composable.
+- **Extraction pre-check (plan step):** before moving, confirm the composables' inputs
+  are already `core:ui`-safe — the `mode` param resolves to a `core:model`/`core:common`
+  type (not a `feature:home`-local enum), and any string resources / theme extensions /
+  icons they reference are `core:ui`-resident or primitives. If a helper is
+  `feature:home`-local, either inline it or move it too. This de-risks the classic
+  module-extraction trap (a moved composable dragging hidden dependencies).
 - **Wire in Search:** `SearchViewModel` exposes the current mode from
   `StreamingPreference.enabled` and an action to open the mode sheet / toggle. The
   `SearchScreen` header renders the chip next to the search bar; tapping it opens the
