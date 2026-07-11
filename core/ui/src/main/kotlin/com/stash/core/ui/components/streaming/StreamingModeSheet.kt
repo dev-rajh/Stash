@@ -1,4 +1,4 @@
-package com.stash.feature.home.streaming
+package com.stash.core.ui.components.streaming
 
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer

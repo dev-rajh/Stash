@@ -1,4 +1,4 @@
-package com.stash.feature.home.streaming
+package com.stash.core.ui.components.streaming
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
