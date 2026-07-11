@@ -140,6 +140,15 @@ fun StashScaffold(
                     StashBottomBar(
                         currentRoute = currentRoute,
                         onNavigate = { dest ->
+                            // Now Playing is a full-screen route pushed on top of a
+                            // tab's stack while the bottom bar stays visible. If the
+                            // saveState tab-switch below captured it, restoreState
+                            // would bring it straight back on the next tab tap —
+                            // trapping the user on Now Playing. Pop it off first so a
+                            // tab tap always leaves it.
+                            if (currentRoute == NowPlayingRoute::class.qualifiedName) {
+                                navController.popBackStack()
+                            }
                             navController.navigate(dest.route) {
                                 // Save each tab's back stack + state when leaving it,
                                 // and restore it when returning — so tabbing to Settings
