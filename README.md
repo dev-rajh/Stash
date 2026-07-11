@@ -30,6 +30,7 @@ Stash has two modes. They decide what a sync actually does.
 
 ## The FLAC backbone
 
+- **[QBDLX](https://github.com/ImAiiR/QobuzDownloaderX)** — a program that downloads streams directly from Qobuz.
 - **[arcod](https://arcod.xyz)** — a third Qobuz source from yet another operator. Connect a free account once and it slots right into the chain.
 - **[amz.squid.wtf](https://amz.squid.wtf)** — Amazon Music lossless. Structurally independent of the Qobuz proxies, so it keeps your music in FLAC even when both of those are down instead of dropping you to a lossy YouTube rip.
 
