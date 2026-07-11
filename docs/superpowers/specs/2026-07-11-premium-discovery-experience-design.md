@@ -22,8 +22,8 @@ states — not a new information architecture.
   stream without backing out to Home.
 - Apply the new row consistently across Search results, artist "Popular", and album
   tracklists; polish spacing/typography/state feedback.
-- **Make the preview start fast** — resolve its FLAC via the immediate
-  (rate-limiter-bypassing) path, not the background rate-limited one (see §6).
+- **Make the preview start fast** — resolve its FLAC via the rate-limiter-bypass
+  path (not the background rate-limited one) on a user tap (see §6).
 
 **Non-goals (Phase 1)**
 - No artist-page restructure — keep hero → Popular → Albums row → Singles/EPs row →
@@ -174,10 +174,19 @@ interface.
   search+match+getFileUrl (~1–2 s) instead of waiting on tokens.
 - Warm taps stay instant (they await an already-completed deferred). The YouTube
   fallback on a genuine lossless miss/failure is unchanged.
+- **In-flight dedup:** when a cold `lookup` fires while a rate-limited `warmUp` for the
+  *same* track is still in flight (the exact diagnosed scenario), `lookup` should
+  **replace** that in-flight deferred with the bypassing resolve (cancel/supersede the
+  slow one) rather than launch a second, redundant Qobuz call.
 
-**Scope guard:** this touches the lossless resolve interface/registry (`data:download`)
-— a thin, additive flag, not a resolver rewrite. No change to matching, sources, or the
-download pipeline.
+**Scope guard:** this touches the lossless resolve interface/registry (the
+`data:download` *module*, not the download *pipeline*) — a thin, additive,
+default-`false` flag, not a resolver rewrite. No change to matching, sources, the
+streaming resolver, the player, or the download/save flow.
+- **Implementor fanout (plan must enumerate):** adding the flag to the `LosslessSource`
+  interface method forces **every** implementor's `override` to add the param (Kotlin
+  requires matching signatures). Each non-qbdlx source is a trivial accept-and-ignore
+  edit — the plan must list them all so none is missed and the module still compiles.
 
 ---
 
