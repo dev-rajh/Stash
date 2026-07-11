@@ -141,10 +141,16 @@ fun StashScaffold(
                         currentRoute = currentRoute,
                         onNavigate = { dest ->
                             navController.navigate(dest.route) {
+                                // Save each tab's back stack + state when leaving it,
+                                // and restore it when returning — so tabbing to Settings
+                                // and back to Search lands on your results, not the
+                                // landing screen (the canonical Compose bottom-nav pattern).
                                 popUpTo(navController.graph.findStartDestination().id) {
                                     inclusive = false
+                                    saveState = true
                                 }
                                 launchSingleTop = true
+                                restoreState = true
                             }
                         },
                     )
