@@ -4,9 +4,11 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.stash.core.auth.TokenManager
 import com.stash.core.auth.model.AuthState
+import com.stash.core.data.lossless.LosslessUpgrader
 import com.stash.core.data.repository.MusicRepository
 import com.stash.core.media.PlayerRepository
 import com.stash.core.model.MusicSource
+import com.stash.core.model.UpgradeResult
 import com.stash.data.download.files.LocalImportCoordinator
 import com.stash.data.download.files.LocalImportState
 import com.stash.core.model.Playlist
@@ -53,6 +55,7 @@ class LibraryViewModel @Inject constructor(
     private val tokenManager: TokenManager,
     private val playlistImageHelper: PlaylistImageHelper,
     private val localImportCoordinator: LocalImportCoordinator,
+    private val losslessUpgrader: LosslessUpgrader,
 ) : ViewModel() {
 
     /** Live progress for "Import from device". Observed by LibraryScreen. */
@@ -76,21 +79,8 @@ class LibraryViewModel @Inject constructor(
     /** Local UI controls: tab, search query, and sort order. */
     private val _controls = MutableStateFlow(ControlState())
 
-    init {
-        // Smart-default: if the user already has lossless tracks, open
-        // Library to TRACKS / RECENT / FLAC instead of TRACKS / RECENT
-        // / ALL. One-shot snapshot read at cold start; the user's
-        // mid-session filter changes are honoured (we never fight back).
-        viewModelScope.launch {
-            val firstSnapshot = musicRepository.getAllTracks().first()
-            val hasLossless = firstSnapshot.any {
-                it.fileFormat.lowercase() in LOSSLESS_CODECS
-            }
-            if (hasLossless && _controls.value.sourceFilter == SourceFilter.ALL) {
-                _controls.update { it.copy(sourceFilter = SourceFilter.FLAC) }
-            }
-        }
-    }
+    /** Progress for the bulk existing-download FLAC upgrade action. */
+    private val _flacUpgradeState = MutableStateFlow(FlacUpgradeUiState())
 
     /**
      * Derives a pair of (spotifyConnected, youTubeConnected) from TokenManager.
@@ -135,6 +125,7 @@ class LibraryViewModel @Inject constructor(
             // (and com.stash.data.download.lossless.AudioFormat.LOSSLESS_CODECS).
             // Worth duplicating — short list, short reach across modules.
             SourceFilter.FLAC -> allTracks.filter { it.fileFormat.lowercase() in LOSSLESS_CODECS }
+            SourceFilter.NON_FLAC -> allTracks.filter { it.fileFormat.lowercase() !in LOSSLESS_CODECS }
         }
 
         // -- Apply client-side search filter --
@@ -157,31 +148,49 @@ class LibraryViewModel @Inject constructor(
         // -- Apply sort order --
         val sortedTracks = when (controls.sortOrder) {
             SortOrder.RECENT -> filteredTracks.sortedByDescending { it.dateAdded }
+            SortOrder.OLDEST -> filteredTracks.sortedBy { it.dateAdded }
             SortOrder.ALPHABETICAL -> filteredTracks.sortedBy { it.title.lowercase() }
+            SortOrder.ALPHABETICAL_DESC -> filteredTracks.sortedByDescending { it.title.lowercase() }
+            SortOrder.ARTIST -> filteredTracks.sortedBy { it.artist.lowercase() }
             SortOrder.MOST_PLAYED -> filteredTracks.sortedByDescending { it.playCount }
+            SortOrder.LEAST_PLAYED -> filteredTracks.sortedBy { it.playCount }
+            SortOrder.LONGEST -> filteredTracks.sortedByDescending { it.durationMs }
+            SortOrder.SHORTEST -> filteredTracks.sortedBy { it.durationMs }
+            SortOrder.RECENTLY_PLAYED -> filteredTracks.sortedByDescending { it.lastPlayed ?: 0L }
         }
+        // Playlists don't carry play counts, durations, or per-track artists.
+        // RECENT uses date_added (stable across syncs) not last_synced — the
+        // latter reshuffles the list every sync (PlaylistEntity.dateAdded,
+        // migration v12→v13, issue #13). Track-centric sorts fall back to
+        // name (A–Z family) or trackCount (size family) so every option
+        // still produces a visible, sensible ordering.
         val sortedPlaylists = when (controls.sortOrder) {
-            // RECENT uses date_added (stable across syncs) not last_synced
-            // — the latter reshuffles the list every sync run. See
-            // PlaylistEntity.dateAdded + migration v12→v13 (issue #13).
             SortOrder.RECENT -> filteredPlaylists.sortedByDescending { it.dateAdded }
-            SortOrder.ALPHABETICAL -> filteredPlaylists.sortedBy { it.name.lowercase() }
-            // Playlists don't track a per-playlist play_count; use
-            // trackCount as the most-relevant "size" signal so this
-            // chip produces a visible ordering change instead of a
-            // silent no-op.
-            SortOrder.MOST_PLAYED -> filteredPlaylists.sortedByDescending { it.trackCount }
+            SortOrder.OLDEST -> filteredPlaylists.sortedBy { it.dateAdded }
+            SortOrder.ALPHABETICAL, SortOrder.ARTIST -> filteredPlaylists.sortedBy { it.name.lowercase() }
+            SortOrder.ALPHABETICAL_DESC -> filteredPlaylists.sortedByDescending { it.name.lowercase() }
+            SortOrder.MOST_PLAYED, SortOrder.LONGEST -> filteredPlaylists.sortedByDescending { it.trackCount }
+            SortOrder.LEAST_PLAYED, SortOrder.SHORTEST -> filteredPlaylists.sortedBy { it.trackCount }
+            SortOrder.RECENTLY_PLAYED -> filteredPlaylists.sortedByDescending { it.dateAdded }
         }
-        // Sort artists/albums — default by track count descending (most tracks first)
+        // Artists: name for the A–Z family, total duration for the
+        // duration family, track count for everything else.
         val sortedArtists = when (controls.sortOrder) {
-            SortOrder.RECENT -> filteredArtists.sortedByDescending { it.trackCount }
-            SortOrder.ALPHABETICAL -> filteredArtists.sortedBy { it.name.lowercase() }
-            SortOrder.MOST_PLAYED -> filteredArtists.sortedByDescending { it.trackCount }
+            SortOrder.ALPHABETICAL, SortOrder.ARTIST -> filteredArtists.sortedBy { it.name.lowercase() }
+            SortOrder.ALPHABETICAL_DESC -> filteredArtists.sortedByDescending { it.name.lowercase() }
+            SortOrder.LONGEST -> filteredArtists.sortedByDescending { it.totalDurationMs }
+            SortOrder.SHORTEST -> filteredArtists.sortedBy { it.totalDurationMs }
+            SortOrder.LEAST_PLAYED, SortOrder.OLDEST -> filteredArtists.sortedBy { it.trackCount }
+            else -> filteredArtists.sortedByDescending { it.trackCount }
         }
+        // Albums: title for the A–Z family, album artist for ARTIST,
+        // track count otherwise.
         val sortedAlbums = when (controls.sortOrder) {
-            SortOrder.RECENT -> filteredAlbums.sortedByDescending { it.trackCount }
             SortOrder.ALPHABETICAL -> filteredAlbums.sortedBy { it.name.lowercase() }
-            SortOrder.MOST_PLAYED -> filteredAlbums.sortedByDescending { it.trackCount }
+            SortOrder.ALPHABETICAL_DESC -> filteredAlbums.sortedByDescending { it.name.lowercase() }
+            SortOrder.ARTIST -> filteredAlbums.sortedBy { it.artist.lowercase() }
+            SortOrder.LEAST_PLAYED, SortOrder.SHORTEST, SortOrder.OLDEST -> filteredAlbums.sortedBy { it.trackCount }
+            else -> filteredAlbums.sortedByDescending { it.trackCount }
         }
 
         // Split into multi-track (primary) and single-track (collapsed)
@@ -195,6 +204,7 @@ class LibraryViewModel @Inject constructor(
             searchQuery = controls.searchQuery,
             sortOrder = controls.sortOrder,
             sourceFilter = controls.sourceFilter,
+            downloadedNonFlacCount = allTracks.count { it.isDownloaded && !it.isLosslessDownload() },
             tracks = sortedTracks,
             playlists = sortedPlaylists,
             artists = multiTrackArtists,
@@ -210,6 +220,8 @@ class LibraryViewModel @Inject constructor(
         libraryState.copy(
             currentlyPlayingTrackId = playerState.currentTrack?.id,
         )
+    }.combine(_flacUpgradeState) { libraryState, flacUpgrade ->
+        libraryState.copy(flacUpgrade = flacUpgrade)
     }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5_000),
@@ -236,6 +248,53 @@ class LibraryViewModel @Inject constructor(
     /** Filter tracks by source (All / YouTube / Spotify). */
     fun setSourceFilter(filter: SourceFilter) {
         _controls.update { it.copy(sourceFilter = filter) }
+    }
+
+    /**
+     * Upgrade every already-downloaded non-lossless track through the same
+     * forced lossless path used by Now Playing's "Find in FLAC" action.
+     */
+    fun upgradeDownloadedNonFlacToFlac() {
+        if (_flacUpgradeState.value.isRunning) return
+        viewModelScope.launch {
+            val targets = musicRepository.getAllTracks().first()
+                .filter { it.isDownloaded && !it.isLosslessDownload() }
+            if (targets.isEmpty()) {
+                _userMessages.tryEmit("No non-FLAC downloads to upgrade.")
+                return@launch
+            }
+
+            _flacUpgradeState.value = FlacUpgradeUiState(
+                isRunning = true,
+                completed = 0,
+                total = targets.size,
+            )
+            _userMessages.tryEmit("Looking for FLAC for ${targets.size} ${songs(targets.size)}.")
+
+            var upgraded = 0
+            var noMatch = 0
+            var failed = 0
+            targets.forEachIndexed { index, track ->
+                val result = runCatching { losslessUpgrader.upgradeToLossless(track) }
+                    .onFailure { e -> if (e is CancellationException) throw e }
+                    .getOrElse { UpgradeResult.Error }
+                when (result) {
+                    UpgradeResult.Upgraded -> upgraded++
+                    UpgradeResult.NoMatch -> noMatch++
+                    UpgradeResult.Error -> failed++
+                }
+                _flacUpgradeState.value = FlacUpgradeUiState(
+                    isRunning = true,
+                    completed = index + 1,
+                    total = targets.size,
+                )
+            }
+
+            _flacUpgradeState.value = FlacUpgradeUiState()
+            _userMessages.tryEmit(
+                "FLAC pass done: $upgraded upgraded, $noMatch no match, $failed failed.",
+            )
+        }
     }
 
     /**
@@ -402,6 +461,9 @@ class LibraryViewModel @Inject constructor(
     /** "song" / "songs" for [count]-aware roll-up messages. */
     private fun songs(count: Int): String = if (count == 1) "song" else "songs"
 
+    private fun Track.isLosslessDownload(): Boolean =
+        fileFormat.lowercase() in LOSSLESS_CODECS
+
     private val _userMessages = MutableSharedFlow<String>(
         extraBufferCapacity = 1,
         onBufferOverflow = BufferOverflow.DROP_OLDEST,
@@ -429,6 +491,18 @@ class LibraryViewModel @Inject constructor(
         viewModelScope.launch {
             playerRepository.shuffleLibrary()
         }
+    }
+
+    /**
+     * Play the currently-visible track list in order, starting at the top —
+     * the Spotify-style "play" button next to shuffle. Honours the active
+     * sort + source filter + search since it plays exactly what's on screen.
+     * No-op when nothing is downloaded in the current view.
+     */
+    fun playLibrary() {
+        val tracks = uiState.value.tracks
+        val first = tracks.firstOrNull { it.filePath != null } ?: return
+        playTrack(first, tracks)
     }
 
     /**
