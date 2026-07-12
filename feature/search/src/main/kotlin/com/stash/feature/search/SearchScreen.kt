@@ -112,6 +112,7 @@ fun SearchScreen(
     val playlistSheetItem by viewModel.playlistSheetItem.collectAsStateWithLifecycle()
     val userPlaylists by viewModel.userPlaylists.collectAsStateWithLifecycle()
     val recentSearches by viewModel.recentSearches.collectAsStateWithLifecycle()
+    val currentPlayingYoutubeId by viewModel.currentPlayingYoutubeId.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
 
     LaunchedEffect(viewModel) {
@@ -161,6 +162,7 @@ fun SearchScreen(
                     previewLoadingId = previewLoadingId,
                     previewState = previewState,
                     tappedTrackId = tappedTrackId,
+                    currentPlayingYoutubeId = currentPlayingYoutubeId,
                     losslessPrefetcher = viewModel.losslessPrefetcher,
                     onArtistClick = { a ->
                         // Opening a profile IS the committed search — record the
@@ -175,6 +177,7 @@ fun SearchScreen(
                     onDownload = { t -> viewModel.onDownload(t.toTrackItem()) },
                     onPlayNext = viewModel::onPlayNext,
                     onAddToQueue = viewModel::onAddToQueue,
+                    onStartRadio = viewModel::onStartRadio,
                     onRequestAddToPlaylist = viewModel::onRequestAddToPlaylist,
                     onVisibleSongIdsChanged = viewModel::prefetchVisible,
                 )
@@ -404,6 +407,7 @@ private fun SectionedResultsList(
     previewLoadingId: String?,
     previewState: PreviewState,
     tappedTrackId: Long?,
+    currentPlayingYoutubeId: String?,
     losslessPrefetcher: LosslessUrlPrefetcher,
     onArtistClick: (ArtistSummary) -> Unit,
     onAlbumClick: (AlbumSummary) -> Unit,
@@ -413,6 +417,7 @@ private fun SectionedResultsList(
     onDownload: (TrackSummary) -> Unit,
     onPlayNext: (TrackItem) -> Unit = {},
     onAddToQueue: (TrackItem) -> Unit = {},
+    onStartRadio: (TrackItem) -> Unit = {},
     onRequestAddToPlaylist: (TrackItem) -> Unit = {},
     onVisibleSongIdsChanged: (List<String>) -> Unit = {},
 ) {
@@ -486,7 +491,7 @@ private fun SectionedResultsList(
                         LaunchedEffect(t.videoId) {
                             losslessPrefetcher.warmUp(t.toTrackItem())
                         }
-                        PreviewDownloadRow(
+                        SongRow(
                             item = item,
                             isDownloading = t.videoId in downloadingIds,
                             isDownloaded = t.videoId in downloadedIds,
@@ -495,11 +500,13 @@ private fun SectionedResultsList(
                             isPreviewPlaying = previewState is PreviewState.Playing &&
                                 previewState.videoId == t.videoId,
                             isResolving = (t.videoId.hashCode().toLong() == tappedTrackId),
-                            onPreview = { onPreview(t.toTrackItem()) },
+                            isPlaying = isRowPlaying(t.videoId, currentPlayingYoutubeId),
+                            onPlay = { onPreview(t.toTrackItem()) },
                             onStopPreview = onStopPreview,
                             onDownload = { onDownload(t) },
                             onPlayNext = { onPlayNext(t.toTrackItem()) },
                             onAddToQueue = { onAddToQueue(t.toTrackItem()) },
+                            onStartRadio = { onStartRadio(t.toTrackItem()) },
                             onAddToPlaylist = { onRequestAddToPlaylist(t.toTrackItem()) },
                             modifier = Modifier.padding(horizontal = 16.dp),
                         )

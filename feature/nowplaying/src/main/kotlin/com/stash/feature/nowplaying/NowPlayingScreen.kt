@@ -23,6 +23,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Radio
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -103,6 +104,8 @@ fun NowPlayingScreen(
     val sleepTimerState by viewModel.sleepTimerState.collectAsStateWithLifecycle()
     val track = uiState.currentTrack
     val resolvingArtist by viewModel.resolvingArtist.collectAsStateWithLifecycle()
+    val isDownloadingCurrent by viewModel.isDownloadingCurrent.collectAsStateWithLifecycle()
+    val radioLabel by viewModel.radioSeedLabel.collectAsStateWithLifecycle()
     var showQueue by remember { mutableStateOf(false) }
     var showSaveSheet by remember { mutableStateOf(false) }
     // Overflow ("…") options sheet — holds the per-track actions that used to
@@ -311,6 +314,17 @@ fun NowPlayingScreen(
                     // make it scrollable
                     
 
+                    queueSize = uiState.queueSize,
+                    onDownloadTap = viewModel::toggleDownloadForCurrentTrack,
+                    isDownloaded = uiState.currentTrack?.isDownloaded == true,
+                    isDownloading = isDownloadingCurrent,
+                    // Radio toggle: start a station seeded from this song, or stop
+                    // the active one. Lives in the TopBar icon row (no vertical
+                    // footprint); accented while a station is running.
+                    radioActive = radioLabel != null,
+                    onStartRadio = viewModel::startRadioFromCurrent,
+                    onStopRadio = viewModel::stopRadio,
+                    accentColor = uiState.vibrantColor,
                 )
 
 
@@ -332,9 +346,14 @@ fun NowPlayingScreen(
                 // -- Track info -- (tap the title/artist to open the artist
                 // profile; the trailing chevron signals it's actionable, and
                 // swaps to a spinner while the artist name is being resolved).
+                // The like heart floats at the right edge (relocated out of the
+                // crowded top icon row); symmetric horizontal padding keeps the
+                // title/artist block optically centred under the album art.
+                Box(modifier = Modifier.fillMaxWidth()) {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .padding(horizontal = 40.dp)
                         .then(
                             if (track != null) {
                                 Modifier.clickable(enabled = !resolvingArtist) {
@@ -417,6 +436,19 @@ fun NowPlayingScreen(
 //                            tint = Color.White,
 //                        )
 //                    }
+                }
+                    // Like heart — relocated from the top icon row to a cleaner
+                    // primary spot, floated to the trailing edge and vertically
+                    // centred against the title/artist block.
+                    if (track != null) {
+                        com.stash.core.ui.components.LikeButton(
+                            isLiked = uiState.currentTrack?.stashLikedAt != null,
+                            onTap = viewModel::onLikeTap,
+                            unlikedTint = Color.White.copy(alpha = 0.7f),
+                            size = 26.dp,
+                            modifier = Modifier.align(Alignment.CenterEnd),
+                        )
+                    }
                 }
 
                 Spacer(modifier = Modifier.height(4.dp))
@@ -666,6 +698,14 @@ private fun TopBar(
     onOptionsClick: () -> Unit,
     hasTrack: Boolean,
     contextTitle: String?,
+    queueSize: Int,
+    onDownloadTap: () -> Unit,
+    isDownloaded: Boolean,
+    isDownloading: Boolean,
+    radioActive: Boolean,
+    onStartRadio: () -> Unit,
+    onStopRadio: () -> Unit,
+    accentColor: Color,
 ) {
     Row(
         modifier = Modifier
@@ -705,6 +745,62 @@ private fun TopBar(
                     overflow = TextOverflow.Ellipsis,
                     textAlign = TextAlign.Center,
                 )
+        Spacer(modifier = Modifier.weight(1f))
+
+        // Radio toggle — start a station from the current song, or stop the
+        // running one. Accent tint signals an active station.
+        if (hasTrack) {
+            IconButton(onClick = { if (radioActive) onStopRadio() else onStartRadio() }) {
+                Icon(
+                    imageVector = Icons.Default.Radio,
+                    contentDescription = if (radioActive) "Stop radio" else "Start radio",
+                    tint = if (radioActive) accentColor else Color.White,
+                    modifier = Modifier.size(24.dp),
+                )
+            }
+        }
+
+        // Flag as wrong match — only shown when a track is loaded. Lives
+        // here (not in the Playlist Detail row menu) because Now Playing
+        // is where the user actually realises "this isn't the right song"
+        // — their ears are the ground truth.
+        if (hasTrack) {
+            IconButton(onClick = onFlagWrongMatch) {
+                Icon(
+                    imageVector = Icons.Default.Flag,
+                    contentDescription = "Flag as wrong match",
+                    tint = Color.White,
+                    modifier = Modifier.size(24.dp),
+                )
+            }
+        }
+
+        // Download / Remove-download toggle — single button that flips
+        // based on the current track's on-disk state. Streaming-mode
+        // users use this to grab the song they're listening to right now
+        // without leaving Now Playing. While a download is in flight a
+        // spinner replaces the icon so it isn't a silent background job.
+        if (hasTrack) {
+            if (isDownloading) {
+                Box(
+                    modifier = Modifier.size(48.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(22.dp),
+                        strokeWidth = 2.5.dp,
+                        color = Color.White,
+                    )
+                }
+            } else {
+                IconButton(onClick = onDownloadTap) {
+                    Icon(
+                        imageVector = if (isDownloaded) Icons.Default.DownloadDone else Icons.Default.Download,
+                        contentDescription = if (isDownloaded) "Remove download" else "Download",
+                        tint = Color.White,
+                        modifier = Modifier.size(24.dp),
+                    )
+                }
             }
         }
 

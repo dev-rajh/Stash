@@ -13,10 +13,13 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.layout.Row
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Radio
 import androidx.compose.material3.Button
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -52,6 +55,8 @@ import com.stash.core.common.ArtUrlUpgrader
  * @param onBack Invoked when the top-left back arrow is tapped (spec §5.2).
  * @param onPlayArtist Invoked when the "Play" button is tapped. Hybrid-starts
  *   playback of the artist's catalog — see [ArtistProfileViewModel.playArtist].
+ * @param onStartRadio Invoked when the "Radio" button is tapped. Starts a
+ *   balanced artist radio — see [ArtistProfileViewModel.startRadio].
  */
 @Composable
 fun ArtistHero(
@@ -59,6 +64,9 @@ fun ArtistHero(
     @Suppress("UNUSED_PARAMETER") status: ArtistProfileStatus,
     onBack: () -> Unit,
     onPlayArtist: () -> Unit,
+    onStartRadio: () -> Unit,
+    streamingEnabled: Boolean,
+    onStreamingClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val primary = MaterialTheme.colorScheme.primary
@@ -109,24 +117,42 @@ fun ArtistHero(
 
             Spacer(Modifier.height(12.dp))
 
-            // Play Artist CTA — matches the AlbumHero "Play" button style
-            // (filled primary, rounded 12.dp, PlayArrow + label) so the
-            // two hero surfaces feel like siblings.
-            Button(
-                onClick = onPlayArtist,
-                contentPadding = PaddingValues(horizontal = 20.dp, vertical = 10.dp),
-                shape = RoundedCornerShape(12.dp),
-            ) {
-                Icon(
-                    imageVector = Icons.Default.PlayArrow,
-                    contentDescription = null,
-                    modifier = Modifier.size(18.dp),
-                )
-                Spacer(Modifier.width(6.dp))
-                Text(
-                    text = "Play",
-                    style = MaterialTheme.typography.labelLarge,
-                )
+            // Play + Radio CTAs. Play matches the AlbumHero "Play" style (filled
+            // primary); Radio is a tonal sibling that starts a balanced station.
+            Row(horizontalArrangement = Arrangement.Center) {
+                Button(
+                    onClick = onPlayArtist,
+                    contentPadding = PaddingValues(horizontal = 20.dp, vertical = 10.dp),
+                    shape = RoundedCornerShape(12.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.PlayArrow,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = "Play",
+                        style = MaterialTheme.typography.labelLarge,
+                    )
+                }
+                Spacer(Modifier.width(10.dp))
+                FilledTonalButton(
+                    onClick = onStartRadio,
+                    contentPadding = PaddingValues(horizontal = 20.dp, vertical = 10.dp),
+                    shape = RoundedCornerShape(12.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Radio,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = "Radio",
+                        style = MaterialTheme.typography.labelLarge,
+                    )
+                }
             }
         }
 
@@ -143,6 +169,18 @@ fun ArtistHero(
                 imageVector = Icons.AutoMirrored.Filled.ArrowBack,
                 contentDescription = "Back",
                 tint = MaterialTheme.colorScheme.onBackground,
+            )
+        }
+
+        // Top-right Online/Offline chip — flip playback mode from the profile
+        // (mirrors the back arrow's placement).
+        if (com.stash.core.common.constants.StashConstants.STREAMING_ENGINE_ENABLED) {
+            com.stash.core.ui.components.streaming.StreamingModeChip(
+                streamingEnabled = streamingEnabled,
+                onClick = onStreamingClick,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(8.dp),
             )
         }
     }

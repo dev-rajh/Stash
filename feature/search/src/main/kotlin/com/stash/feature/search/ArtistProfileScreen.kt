@@ -48,6 +48,7 @@ import kotlinx.coroutines.flow.merge
  * Snackbar host — refresh failures show a one-liner but the cached data
  * keeps rendering underneath, matching §3.4's stale-while-revalidate UX.
  */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 fun ArtistProfileScreen(
     onBack: () -> Unit,
@@ -60,6 +61,10 @@ fun ArtistProfileScreen(
     val downloadingIds by vm.delegate.downloadingIds.collectAsStateWithLifecycle()
     val downloadedIds by vm.delegate.downloadedIds.collectAsStateWithLifecycle()
     val previewLoadingId by vm.delegate.previewLoadingId.collectAsStateWithLifecycle()
+    val currentPlayingYoutubeId by vm.currentPlayingYoutubeId.collectAsStateWithLifecycle()
+    val streamingEnabled by vm.streamingEnabled.collectAsStateWithLifecycle()
+    var showStreamingSheet by rememberSaveable { mutableStateOf(false) }
+    val streamingSheetState = androidx.compose.material3.rememberModalBottomSheetState()
     val playlistSheetItem by vm.playlistSheetItem.collectAsStateWithLifecycle()
     val userPlaylists by vm.userPlaylists.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
@@ -118,6 +123,9 @@ fun ArtistProfileScreen(
                     status = state.status,
                     onBack = onBack,
                     onPlayArtist = vm::playArtist,
+                    onStartRadio = vm::startRadio,
+                    streamingEnabled = streamingEnabled,
+                    onStreamingClick = { showStreamingSheet = true },
                 )
             }
 
@@ -139,12 +147,14 @@ fun ArtistProfileScreen(
                         downloadingIds = downloadingIds,
                         downloadedIds = downloadedIds,
                         previewLoadingId = previewLoadingId,
+                    currentPlayingYoutubeId = currentPlayingYoutubeId,
                         losslessPrefetcher = vm.losslessPrefetcher,
                         onPreview = { track -> vm.delegate.previewTrack(track) },
                         onStopPreview = vm.delegate::stopPreview,
                         onDownload = { vm.delegate.downloadTrack(it.toTrackItem()) },
                         onPlayNext = vm::onPlayNext,
                         onAddToQueue = vm::onAddToQueue,
+                        onStartRadio = vm::onStartRadio,
                         onRequestAddToPlaylist = vm::onRequestAddToPlaylist,
                         onNavigateToAlbum = onNavigateToAlbum,
                         onNavigateToArtist = onNavigateToArtist,
@@ -158,18 +168,32 @@ fun ArtistProfileScreen(
                     downloadingIds = downloadingIds,
                     downloadedIds = downloadedIds,
                     previewLoadingId = previewLoadingId,
+                    currentPlayingYoutubeId = currentPlayingYoutubeId,
                     losslessPrefetcher = vm.losslessPrefetcher,
                     onPreview = { track -> vm.delegate.previewTrack(track) },
                     onStopPreview = vm.delegate::stopPreview,
                     onDownload = { vm.delegate.downloadTrack(it.toTrackItem()) },
                     onPlayNext = vm::onPlayNext,
                     onAddToQueue = vm::onAddToQueue,
+                    onStartRadio = vm::onStartRadio,
                     onRequestAddToPlaylist = vm::onRequestAddToPlaylist,
                     onNavigateToAlbum = onNavigateToAlbum,
                     onNavigateToArtist = onNavigateToArtist,
                     focus = focus,
                 )
             }
+        }
+
+        if (showStreamingSheet) {
+            com.stash.core.ui.components.streaming.StreamingModeSheet(
+                streamingEnabled = streamingEnabled,
+                onSelect = { requested ->
+                    vm.applyStreamingMode(requested)
+                    showStreamingSheet = false
+                },
+                onDismiss = { showStreamingSheet = false },
+                sheetState = streamingSheetState,
+            )
         }
 
         if (playlistSheetItem != null) {
@@ -197,12 +221,14 @@ private fun androidx.compose.foundation.lazy.LazyListScope.contentSections(
     downloadingIds: Set<String>,
     downloadedIds: Set<String>,
     previewLoadingId: String?,
+    currentPlayingYoutubeId: String?,
     losslessPrefetcher: LosslessUrlPrefetcher,
     onPreview: (TrackItem) -> Unit,
     onStopPreview: () -> Unit,
     onDownload: (SearchResultItem) -> Unit,
     onPlayNext: (TrackItem) -> Unit,
     onAddToQueue: (TrackItem) -> Unit,
+    onStartRadio: (TrackItem) -> Unit,
     onRequestAddToPlaylist: (TrackItem) -> Unit,
     onNavigateToAlbum: (album: AlbumSummary) -> Unit,
     onNavigateToArtist: (artistId: String, name: String, avatarUrl: String?) -> Unit,
@@ -217,12 +243,14 @@ private fun androidx.compose.foundation.lazy.LazyListScope.contentSections(
                 downloadingIds = downloadingIds,
                 downloadedIds = downloadedIds,
                 previewLoadingId = previewLoadingId,
+                currentPlayingYoutubeId = currentPlayingYoutubeId,
                 losslessPrefetcher = losslessPrefetcher,
                 onPreview = onPreview,
                 onStopPreview = onStopPreview,
                 onDownload = onDownload,
                 onPlayNext = onPlayNext,
                 onAddToQueue = onAddToQueue,
+                onStartRadio = onStartRadio,
                 onRequestAddToPlaylist = onRequestAddToPlaylist,
             )
         }
