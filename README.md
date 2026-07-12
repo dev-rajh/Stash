@@ -31,7 +31,7 @@ Stash has two modes. They decide what a sync actually does.
 ## The FLAC backbone
 
 - **[QBDLX](https://github.com/ImAiiR/QobuzDownloaderX)** — a program that downloads streams directly from Qobuz.
-- **[arcod](https://arcod.xyz)** —
+- **[arcod](https://arcod.xyz)** 
 
 These are run by people doing it for the love of it — mostly solo, mostly free. They're the whole reason Stash can hand you a real lossless file instead of a re-encode. If Stash earns a spot on your phone, send a little of that their way: a thank-you, a tip, whatever you've got. We stand on their shoulders. 🙏
 
