@@ -362,14 +362,14 @@ fun NowPlayingScreen(
                             modifier = Modifier.weight(1f, fill = false),
                         )
                         if (track != null) {
-                            Spacer(modifier = Modifier.width(8.dp))
-                            com.stash.core.ui.components.FlacBadge(
-                                fileFormat = track.fileFormat,
-                                bitsPerSample = track.bitsPerSample,
-                                sampleRateHz = track.sampleRateHz,
-                                size = 18.dp,
-                                tint = Color.White,
-                            )
+//                            Spacer(modifier = Modifier.width(8.dp))
+//                            com.stash.core.ui.components.FlacBadge(
+//                                fileFormat = track.fileFormat,
+//                                bitsPerSample = track.bitsPerSample,
+//                                sampleRateHz = track.sampleRateHz,
+//                                size = 18.dp,
+//                                tint = Color.White,
+//                            )
                             Spacer(modifier = Modifier.width(6.dp))
                             if (resolvingArtist) {
                                 CircularProgressIndicator(
