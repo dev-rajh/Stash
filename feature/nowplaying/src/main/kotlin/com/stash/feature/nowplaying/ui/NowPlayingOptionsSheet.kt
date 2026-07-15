@@ -26,6 +26,7 @@ import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.Flag
 import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.Radio
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -77,11 +78,14 @@ fun NowPlayingOptionsSheet(
     isDownloaded: Boolean,
     accentColor: Color,
     sleepTimerState: SleepTimerState,
+    radioActive: Boolean,
     onToggleLike: () -> Unit,
     onAddToPlaylist: () -> Unit,
     onSetSleepTimer: (SleepTimerOption) -> Unit,
     onCancelSleepTimer: () -> Unit,
     onToggleDownload: () -> Unit,
+    onStartRadio: () -> Unit,
+    onStopRadio: () -> Unit,
     onFlag: () -> Unit,
     onDismiss: () -> Unit,
     onViewAlbum: (() -> Unit)? = null,
@@ -194,6 +198,16 @@ fun NowPlayingOptionsSheet(
                 iconTint = if (isDownloaded) accentColor else null,
             ) {
                 onToggleDownload()
+                onDismiss()
+            }
+
+            // -- Radio (toggle) --
+            OptionRow(
+                icon = Icons.Default.Radio,
+                label = if (radioActive) "Stop radio" else "Start radio",
+                iconTint = if (radioActive) accentColor else null,
+            ) {
+                if (radioActive) onStopRadio() else onStartRadio()
                 onDismiss()
             }
 

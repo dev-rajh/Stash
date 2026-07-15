@@ -22,8 +22,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Radio
-import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material.icons.filled.Album
@@ -269,11 +267,14 @@ fun NowPlayingScreen(
             isDownloaded = track.isDownloaded,
             accentColor = uiState.vibrantColor,
             sleepTimerState = sleepTimerState,
+            radioActive = radioLabel != null,
             onToggleLike = viewModel::onLikeTap,
             onAddToPlaylist = { showSaveSheet = true },
             onSetSleepTimer = viewModel::setSleepTimer,
             onCancelSleepTimer = viewModel::cancelSleepTimer,
             onToggleDownload = viewModel::toggleDownloadForCurrentTrack,
+            onStartRadio = viewModel::startRadioFromCurrent,
+            onStopRadio = viewModel::stopRadio,
             onFlag = { showWrongMatchDialog = true },
             onDismiss = { showOptions = false },
             onViewAlbum = viewModel::onViewAlbumTapped,
@@ -423,20 +424,12 @@ fun NowPlayingScreen(
                     .padding(horizontal = 24.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                // -- Top bar: dismiss, radio, "NOW PLAYING" + album context, overflow "..." --
+                // -- Top bar: dismiss, "NOW PLAYING" + album context, overflow "..." --
                 TopBar(
                     onDismiss = onDismiss,
                     onOptionsClick = { showOptions = true },
                     hasTrack = uiState.hasTrack,
                     contextTitle = track?.album?.takeIf { it.isNotBlank() },
-                    // Radio toggle: start a station seeded from this song, or stop
-                    // the active one. Accented while a station is running.
-                    radioActive = radioLabel != null,
-                    radioTuning = radioTuning,
-                    radioLock = radioLock,
-                    onStartRadio = viewModel::startRadioFromCurrent,
-                    onStopRadio = viewModel::stopRadio,
-                    accentColor = npAccent(uiState.vibrantColor),
                 )
 
                 Spacer(modifier = Modifier.height(8.dp))
@@ -478,6 +471,17 @@ fun NowPlayingScreen(
                         horizontalArrangement = Arrangement.Center,
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
+                        // Download progress spinner — shown in front of the title
+                        // while a download is in flight, so the user sees progress
+                        // right next to the song name.
+                        if (track != null && isDownloadingCurrent) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                strokeWidth = 2.dp,
+                                color = npInk(),
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                        }
                         Text(
                             text = track?.title ?: "Not Playing",
                             fontSize = 22.sp,
@@ -490,6 +494,13 @@ fun NowPlayingScreen(
                                 .basicMarquee(),
                         )
                         if (track != null) {
+                            Spacer(modifier = Modifier.width(6.dp))
+                            com.stash.core.ui.components.LikeButton(
+                                isLiked = track.stashLikedAt != null,
+                                onTap = viewModel::onLikeTap,
+                                unlikedTint = npInk().copy(alpha = 0.7f),
+                                size = 24.dp,
+                            )
                             Spacer(modifier = Modifier.width(6.dp))
                             if (resolvingArtist) {
                                 CircularProgressIndicator(
@@ -731,24 +742,17 @@ private fun playlistSubtitle(playlist: com.stash.core.model.Playlist): String {
 
 /**
  * Top bar: dismiss arrow on the left, a centered "NOW PLAYING" label with the
- * album/context title beneath it, a radio toggle, and an overflow ("...")
- * button on the right that opens the [NowPlayingOptionsSheet].
+ * album/context title beneath it, and an overflow ("...") button on the
+ * right that opens the [NowPlayingOptionsSheet].
  *
  * The per-track actions that used to live here as inline icons (like, save,
- * download, flag, lyrics, queue) moved into the options sheet and the
- * quick-actions row as part of the redesign. The radio toggle stays here —
- * it's the one control users reach for constantly while a song is playing.
+ * download, flag, lyrics, queue, radio) moved into the options sheet and the
+ * quick-actions row as part of the redesign.
  *
  * @param onDismiss      Callback when the down-arrow is tapped.
  * @param onOptionsClick Callback when the overflow "..." button is tapped.
- * @param hasTrack       Whether a track is loaded (overflow/radio hidden otherwise).
+ * @param hasTrack       Whether a track is loaded (overflow hidden otherwise).
  * @param contextTitle   Secondary line under "NOW PLAYING" — the album, when known.
- * @param radioActive    Whether a radio station seeded from this song is currently running.
- * @param radioTuning    Whether the station is being built (taps are ignored while tuning).
- * @param radioLock      One-shot pulse fired on the tuning-to-active transition.
- * @param onStartRadio   Callback to start a station seeded from the current song.
- * @param onStopRadio    Callback to stop the currently-running station.
- * @param accentColor    Album-art accent, used for the active/tuning radio tint.
  */
 @Composable
 private fun TopBar(
@@ -756,12 +760,6 @@ private fun TopBar(
     onOptionsClick: () -> Unit,
     hasTrack: Boolean,
     contextTitle: String?,
-    radioActive: Boolean,
-    radioTuning: Boolean,
-    radioLock: Boolean,
-    onStartRadio: () -> Unit,
-    onStopRadio: () -> Unit,
-    accentColor: Color,
 ) {
     Row(
         modifier = Modifier
@@ -804,40 +802,6 @@ private fun TopBar(
             }
         }
 
-        // Radio toggle — start a station from the current song, or stop the
-        // running one. Accent tint signals an active station; the radar sweep
-        // spins around the icon while the station is being built.
-        if (hasTrack) {
-            Box(contentAlignment = Alignment.Center) {
-                com.stash.feature.nowplaying.ui.RadarSweep(
-                    tuning = radioTuning,
-                    lock = radioLock,
-                    color = accentColor,
-                    modifier = Modifier.matchParentSize(),
-                )
-                IconButton(
-                    onClick = {
-                        when {
-                            radioTuning -> Unit // ignore taps while tuning
-                            radioActive -> onStopRadio()
-                            else -> onStartRadio()
-                        }
-                    },
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Radio,
-                        contentDescription = when {
-                            radioTuning -> "Tuning radio"
-                            radioActive -> "Stop radio"
-                            else -> "Start radio"
-                        },
-                        tint = if (radioActive || radioTuning) accentColor else npInk(),
-                        modifier = Modifier.size(24.dp),
-                    )
-                }
-            }
-        }
-
         // Overflow "..." — opens the per-track options sheet. Hidden when no
         // track is loaded (an empty options sheet would have nothing to act
         // on). A spacer keeps the title centred when the button is absent.
@@ -856,37 +820,37 @@ private fun TopBar(
     }
 }
 
-/**
- * The Queue / Lyrics quick-action chips shown beneath the transport controls.
- * Both open a "playback context" surface — what's coming up next, and what
- * the singer is saying right now.
- */
-@Composable
-private fun QuickActionsRow(
-    queueSize: Int,
-    onQueueClick: () -> Unit,
-    onLyricsClick: () -> Unit,
-) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        QuickActionChip(
-            icon = Icons.AutoMirrored.Filled.QueueMusic,
-            label = "Queue",
-            contentDescription = "Queue ($queueSize tracks)",
-            onClick = onQueueClick,
-            modifier = Modifier.weight(1f),
-        )
-        QuickActionChip(
-            icon = Icons.Outlined.Lyrics,
-            label = "Lyrics",
-            contentDescription = "Lyrics",
-            onClick = onLyricsClick,
-            modifier = Modifier.weight(1f),
-        )
-    }
-}
+        /**
+         * The Queue / Lyrics quick-action chips shown beneath the transport controls.
+         * Both open a "playback context" surface — what's coming up next, and what
+         * the singer is saying right now.
+         */
+        @Composable
+        private fun QuickActionsRow(
+            queueSize: Int,
+            onQueueClick: () -> Unit,
+            onLyricsClick: () -> Unit,
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                QuickActionChip(
+                    icon = Icons.AutoMirrored.Filled.QueueMusic,
+                    label = "Queue",
+                    contentDescription = "Queue ($queueSize tracks)",
+                    onClick = onQueueClick,
+                    modifier = Modifier.weight(1f),
+                )
+                QuickActionChip(
+                    icon = Icons.Outlined.Lyrics,
+                    label = "Lyrics",
+                    contentDescription = "Lyrics",
+                    onClick = onLyricsClick,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+        }
 
 /** A single filled quick-action chip (icon + label). */
 @Composable
