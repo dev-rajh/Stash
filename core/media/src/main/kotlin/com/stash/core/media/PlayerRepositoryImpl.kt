@@ -71,6 +71,7 @@ import javax.inject.Inject
 import javax.inject.Singleton
 import androidx.core.net.toUri
 import androidx.documentfile.provider.DocumentFile
+import kotlinx.coroutines.isActive
 
 /**
  * [PlayerRepository] implementation backed by a [MediaController] that connects
@@ -413,6 +414,13 @@ class PlayerRepositoryImpl @Inject constructor(
         val controller = ensureController() ?: return
         if (tracks.isEmpty()) return
 
+        // Cap queue at [MAX_QUEUE_ITEMS] to keep playback startup fast for
+        // large libraries — building MediaItems is O(n) with per-track disk I/O.
+        // The window is centered on the requested start index so the tapped song
+        // plays immediately; additional items load in the background for
+        // shuffle / skip via [enrichQueueInBackground].
+        val maxQueueItems = 200
+
         val streamingOn = streamingPreference.current()
         val safeStart = startIndex.coerceIn(0, tracks.size - 1)
 
@@ -425,27 +433,78 @@ class PlayerRepositoryImpl @Inject constructor(
         val playable = tracks.filter { track ->
             track.isDownloaded || (streamingOn && !track.isUnavailableForDisplay)
         }
+
+        // Cap the timeline while preserving center-on-tapped-song layout.
+        var startInPlayable = playable.indexOfFirst { it.id == tracks[safeStart].id }.coerceAtLeast(0)
+        val windowHalf = maxQueueItems / 2
+        var windowStart = (startInPlayable - windowHalf).coerceAtLeast(0)
+        var windowEnd = (windowStart + maxQueueItems).coerceAtMost(playable.size)
+        if (windowEnd - windowStart < maxQueueItems) {
+            windowStart = (windowEnd - maxQueueItems).coerceAtLeast(0)
+        }
+        val limitedPlayable = playable.subList(windowStart, windowEnd)
+
         val items = withContext(Dispatchers.IO) {
-            playable.map { it.toQueueMediaItem() }
+            limitedPlayable.map { it.toQueueMediaItem() }
         }
         if (items.isEmpty()) {
             _userMessages.tryEmit("Nothing in this queue is playable right now.")
             return
         }
-        // startIndex maps through the playable filter by track id.
-        val startId = tracks[safeStart].id
-        val startInPlayable = playable.indexOfFirst { it.id == startId }.coerceAtLeast(0)
+
+        // Enrich the timeline with remaining tracks in background so shuffle / skip
+        // still work across the full library without blocking playback startup.
+        if (limitedPlayable.size < playable.size) {
+            scope.launch { enrichQueueInBackground(limitedPlayable, playable, startInPlayable, startPositionMs) }
+        }
 
         currentQueueTracks = playable
         controller.setMediaItems(items, startInPlayable, startPositionMs)
         controller.prepare()
         controller.play()
 
-        Log.i(TAG, "setQueue: full timeline, ${items.size} items, start=$startInPlayable")
+        Log.i(TAG, "setQueue: timeline ${items.size} items (capped from ${playable.size}), start=$startInPlayable")
 
         // Warm the next-up URL so auto-advance never waits on a cold resolve
         // (the placeholder path is the cold-jump fallback, not the happy path).
         scope.launch { prefetchNextTrack(controller.currentMediaItemIndex) }
+    }
+
+    /**
+     * Builds MediaItems for the remaining tracks not yet in the timeline and
+     * adds them incrementally so shuffle / skip cover the full library without
+     * blocking playback startup.
+     */
+    private suspend fun enrichQueueInBackground(
+        initialPlayable: List<Track>,
+        allPlayable: List<Track>,
+        startIndex: Int,
+        startPositionMs: Long,
+    ) {
+        val remaining = allPlayable.drop(initialPlayable.size)
+        if (remaining.isEmpty()) return
+
+        val controller = controllerDeferred ?: return
+        try {
+            withContext(Dispatchers.IO) {
+                // Load remaining items in chunks to bound peak memory.
+                val chunkSize = 50
+                remaining.chunked(chunkSize).forEachIndexed { chunkIdx, chunk ->
+                    if (!this@PlayerRepositoryImpl.scope.isActive) return@forEachIndexed// cancelled
+                    val startIndexInChunk = chunkIdx * chunkSize
+                    for (i in chunk.indices) {
+                        val globalIndex = startIndexInChunk + i
+                        // Skip tracks that overlap with the initial timeline.
+                        if (globalIndex < initialPlayable.size) continue
+                        val mediaItem = allPlayable[globalIndex].toQueueMediaItem()
+                        controller.addMediaItem(globalIndex, mediaItem)
+                    }
+                }
+            }
+            Log.i(TAG, "enrichQueue: added ${remaining.size} items")
+        } catch (e: Exception) {
+            Log.w(TAG, "enrichQueue failed", e)
+        }
     }
 
     override fun resumeLastQueue() {

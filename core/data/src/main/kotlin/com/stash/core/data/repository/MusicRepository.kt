@@ -302,6 +302,14 @@ interface MusicRepository {
      */
     fun getPickablePlaylists(): Flow<List<Playlist>>
 
+    /**
+     * Active playlists the given track currently belongs to — drives the
+     * Now Playing "Appears in" section. Includes imported Spotify / YT Music
+     * playlists, Stash Mixes, custom and liked playlists; excludes the
+     * internal Downloads bucket and soft-deleted memberships.
+     */
+    fun getPlaylistsContainingTrack(trackId: Long): Flow<List<Playlist>>
+
     // ── Unmatched tracks ────────────────────────────────────────────────
 
     /** Unmatched tracks (matching failures, not dismissed). */

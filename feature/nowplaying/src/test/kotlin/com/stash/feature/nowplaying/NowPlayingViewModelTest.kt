@@ -8,6 +8,7 @@ import com.stash.core.data.lossless.LosslessUpgrader
 import com.stash.core.data.repository.MusicRepository
 import com.stash.core.data.social.LikeCoordinator
 import com.stash.core.media.PlayerRepository
+import com.stash.core.media.sleep.SleepTimerManager
 import com.stash.core.model.PlayerState
 import com.stash.core.model.Track
 import com.stash.core.model.UpgradeResult
@@ -210,6 +211,7 @@ class NowPlayingViewModelFindInFlacTest {
         likeCoordinator = likeCoordinator,
         losslessUpgrader = upgrader,
         lyricsRepository = lyricsRepository,
+        sleepTimerManager = mockk(relaxed = true),
         appContext = appContext,
         ytMusicApiClient = mockk(relaxed = true),
     )
@@ -335,6 +337,7 @@ class NowPlayingViewModelLikeRoutingTest {
         likeCoordinator = likeCoordinator,
         losslessUpgrader = upgrader,
         lyricsRepository = lyricsRepository,
+        sleepTimerManager = mockk(relaxed = true),
         appContext = appContext,
         ytMusicApiClient = mockk(relaxed = true),
     )
