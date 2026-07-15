@@ -23,7 +23,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Radio
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -169,11 +168,14 @@ fun NowPlayingScreen(
             isDownloaded = track.isDownloaded,
             accentColor = uiState.vibrantColor,
             sleepTimerState = sleepTimerState,
+            radioActive = radioLabel != null,
             onToggleLike = viewModel::onLikeTap,
             onAddToPlaylist = { showSaveSheet = true },
             onSetSleepTimer = viewModel::setSleepTimer,
             onCancelSleepTimer = viewModel::cancelSleepTimer,
             onToggleDownload = viewModel::toggleDownloadForCurrentTrack,
+            onStartRadio = viewModel::startRadioFromCurrent,
+            onStopRadio = viewModel::stopRadio,
             onFlag = { showWrongMatchDialog = true },
             onDismiss = { showOptions = false },
         )
@@ -311,20 +313,6 @@ fun NowPlayingScreen(
                     onOptionsClick = { showOptions = true },
                     hasTrack = uiState.hasTrack,
                     contextTitle = track?.album?.takeIf { it.isNotBlank() },
-                    // make it scrollable
-                    
-
-                    queueSize = uiState.queueSize,
-                    onDownloadTap = viewModel::toggleDownloadForCurrentTrack,
-                    isDownloaded = uiState.currentTrack?.isDownloaded == true,
-                    isDownloading = isDownloadingCurrent,
-                    // Radio toggle: start a station seeded from this song, or stop
-                    // the active one. Lives in the TopBar icon row (no vertical
-                    // footprint); accented while a station is running.
-                    radioActive = radioLabel != null,
-                    onStartRadio = viewModel::startRadioFromCurrent,
-                    onStopRadio = viewModel::stopRadio,
-                    accentColor = uiState.vibrantColor,
                 )
 
 
@@ -350,82 +338,92 @@ fun NowPlayingScreen(
                 // crowded top icon row); symmetric horizontal padding keeps the
                 // title/artist block optically centred under the album art.
                 Box(modifier = Modifier.fillMaxWidth()) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 40.dp)
-                        .then(
-                            if (track != null) {
-                                Modifier.clickable(enabled = !resolvingArtist) {
-                                    viewModel.onTrackInfoTapped()
-                                }
-                            } else {
-                                Modifier
-                            },
-                        ),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.Center,
-                        verticalAlignment = Alignment.CenterVertically,
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 40.dp)
+                            .then(
+                                if (track != null) {
+                                    Modifier.clickable(enabled = !resolvingArtist) {
+                                        viewModel.onTrackInfoTapped()
+                                    }
+                                } else {
+                                    Modifier
+                                },
+                            ),
+                        horizontalAlignment = Alignment.CenterHorizontally,
                     ) {
-                        Text(
-                            text = track?.title ?: "Not Playing",
-                            fontSize = 22.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color.White,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            textAlign = TextAlign.Center,
-                            modifier = Modifier.weight(1f, fill = false),
-                        )
-                        if (track != null) {
-//                            Spacer(modifier = Modifier.width(8.dp))
-//                            com.stash.core.ui.components.FlacBadge(
-//                                fileFormat = track.fileFormat,
-//                                bitsPerSample = track.bitsPerSample,
-//                                sampleRateHz = track.sampleRateHz,
-//                                size = 18.dp,
-//                                tint = Color.White,
-//                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            if (resolvingArtist) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            // Download progress spinner — shown in front of the title
+                            // while a download is in flight, replacing the old top-bar
+                            // spinner so the user sees progress right next to the song name.
+                            if (track != null && isDownloadingCurrent) {
                                 CircularProgressIndicator(
                                     modifier = Modifier.size(16.dp),
                                     strokeWidth = 2.dp,
                                     color = Color.White,
                                 )
-                            } else {
-                                Icon(
-                                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                                    contentDescription = "Open artist",
-                                    tint = Color.White.copy(alpha = 0.6f),
-                                    modifier = Modifier.size(18.dp),
-                                )
+                                Spacer(modifier = Modifier.width(8.dp))
                             }
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(4.dp))
-
-                    Text(
-                        text = buildString {
+                            Text(
+                                text = track?.title ?: "Not Playing",
+                                fontSize = 22.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier.weight(1f, fill = false),
+                            )
                             if (track != null) {
-                                append(track.artist)
-                                if (track.album.isNotBlank()) {
-                                    append(" \u2022 ")
-                                    append(track.album)
+                                Spacer(modifier = Modifier.width(6.dp))
+                                com.stash.core.ui.components.LikeButton(
+                                    isLiked = track.stashLikedAt != null,
+                                    onTap = viewModel::onLikeTap,
+                                    unlikedTint = Color.White.copy(alpha = 0.7f),
+                                    size = 24.dp,
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                if (resolvingArtist) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(16.dp),
+                                        strokeWidth = 2.dp,
+                                        color = Color.White,
+                                    )
+                                } else {
+                                    Icon(
+                                        imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                                        contentDescription = "Open artist",
+                                        tint = Color.White.copy(alpha = 0.6f),
+                                        modifier = Modifier.size(18.dp),
+                                    )
                                 }
                             }
-                        },
-                        fontSize = 14.sp,
-                        color = Color.White.copy(alpha = 0.7f),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier.weight(1f, fill = false).basicMarquee(),
-                    )
+                        }
+
+                        Spacer(modifier = Modifier.height(4.dp))
+
+                        Text(
+                            text = buildString {
+                                if (track != null) {
+                                    append(track.artist)
+                                    if (track.album.isNotBlank()) {
+                                        append(" \u2022 ")
+                                        append(track.album)
+                                    }
+                                }
+                            },
+                            fontSize = 14.sp,
+                            color = Color.White.copy(alpha = 0.7f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.weight(1f, fill = false).basicMarquee(),
+                        )
 //                    if (track != null) {
 //                        Spacer(modifier = Modifier.width(8.dp))
 //                        com.stash.core.ui.components.FlacBadge(
@@ -436,18 +434,6 @@ fun NowPlayingScreen(
 //                            tint = Color.White,
 //                        )
 //                    }
-                }
-                    // Like heart — relocated from the top icon row to a cleaner
-                    // primary spot, floated to the trailing edge and vertically
-                    // centred against the title/artist block.
-                    if (track != null) {
-                        com.stash.core.ui.components.LikeButton(
-                            isLiked = uiState.currentTrack?.stashLikedAt != null,
-                            onTap = viewModel::onLikeTap,
-                            unlikedTint = Color.White.copy(alpha = 0.7f),
-                            size = 26.dp,
-                            modifier = Modifier.align(Alignment.CenterEnd),
-                        )
                     }
                 }
 
@@ -698,14 +684,6 @@ private fun TopBar(
     onOptionsClick: () -> Unit,
     hasTrack: Boolean,
     contextTitle: String?,
-    queueSize: Int,
-    onDownloadTap: () -> Unit,
-    isDownloaded: Boolean,
-    isDownloading: Boolean,
-    radioActive: Boolean,
-    onStartRadio: () -> Unit,
-    onStopRadio: () -> Unit,
-    accentColor: Color,
 ) {
     Row(
         modifier = Modifier
@@ -745,62 +723,6 @@ private fun TopBar(
                     overflow = TextOverflow.Ellipsis,
                     textAlign = TextAlign.Center,
                 )
-        Spacer(modifier = Modifier.weight(1f))
-
-        // Radio toggle — start a station from the current song, or stop the
-        // running one. Accent tint signals an active station.
-        if (hasTrack) {
-            IconButton(onClick = { if (radioActive) onStopRadio() else onStartRadio() }) {
-                Icon(
-                    imageVector = Icons.Default.Radio,
-                    contentDescription = if (radioActive) "Stop radio" else "Start radio",
-                    tint = if (radioActive) accentColor else Color.White,
-                    modifier = Modifier.size(24.dp),
-                )
-            }
-        }
-
-        // Flag as wrong match — only shown when a track is loaded. Lives
-        // here (not in the Playlist Detail row menu) because Now Playing
-        // is where the user actually realises "this isn't the right song"
-        // — their ears are the ground truth.
-        if (hasTrack) {
-            IconButton(onClick = onFlagWrongMatch) {
-                Icon(
-                    imageVector = Icons.Default.Flag,
-                    contentDescription = "Flag as wrong match",
-                    tint = Color.White,
-                    modifier = Modifier.size(24.dp),
-                )
-            }
-        }
-
-        // Download / Remove-download toggle — single button that flips
-        // based on the current track's on-disk state. Streaming-mode
-        // users use this to grab the song they're listening to right now
-        // without leaving Now Playing. While a download is in flight a
-        // spinner replaces the icon so it isn't a silent background job.
-        if (hasTrack) {
-            if (isDownloading) {
-                Box(
-                    modifier = Modifier.size(48.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(22.dp),
-                        strokeWidth = 2.5.dp,
-                        color = Color.White,
-                    )
-                }
-            } else {
-                IconButton(onClick = onDownloadTap) {
-                    Icon(
-                        imageVector = if (isDownloaded) Icons.Default.DownloadDone else Icons.Default.Download,
-                        contentDescription = if (isDownloaded) "Remove download" else "Download",
-                        tint = Color.White,
-                        modifier = Modifier.size(24.dp),
-                    )
-                }
             }
         }
 
@@ -822,71 +744,71 @@ private fun TopBar(
     }
 }
 
-/**
- * The Queue / Lyrics quick-action chips shown beneath the transport controls.
- * Both open a "playback context" surface — what's coming up next, and what
- * the singer is saying right now.
- */
-@Composable
-private fun QuickActionsRow(
-    queueSize: Int,
-    onQueueClick: () -> Unit,
-    onLyricsClick: () -> Unit,
-) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        QuickActionChip(
-            icon = Icons.AutoMirrored.Filled.QueueMusic,
-            label = "Queue",
-            contentDescription = "Queue ($queueSize tracks)",
-            onClick = onQueueClick,
-            modifier = Modifier.weight(1f),
-        )
-        QuickActionChip(
-            icon = Icons.Outlined.Lyrics,
-            label = "Lyrics",
-            contentDescription = "Lyrics",
-            onClick = onLyricsClick,
-            modifier = Modifier.weight(1f),
-        )
-    }
-}
+        /**
+         * The Queue / Lyrics quick-action chips shown beneath the transport controls.
+         * Both open a "playback context" surface — what's coming up next, and what
+         * the singer is saying right now.
+         */
+        @Composable
+        private fun QuickActionsRow(
+            queueSize: Int,
+            onQueueClick: () -> Unit,
+            onLyricsClick: () -> Unit,
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                QuickActionChip(
+                    icon = Icons.AutoMirrored.Filled.QueueMusic,
+                    label = "Queue",
+                    contentDescription = "Queue ($queueSize tracks)",
+                    onClick = onQueueClick,
+                    modifier = Modifier.weight(1f),
+                )
+                QuickActionChip(
+                    icon = Icons.Outlined.Lyrics,
+                    label = "Lyrics",
+                    contentDescription = "Lyrics",
+                    onClick = onLyricsClick,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+        }
 
-/** A single filled quick-action chip (icon + label). */
-@Composable
-private fun QuickActionChip(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    label: String,
-    contentDescription: String,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Row(
-        modifier = modifier
-            .clip(RoundedCornerShape(12.dp))
-            .clickable(onClick = onClick)
-            .background(Color.White.copy(alpha = 0.08f))
-            .padding(vertical = 14.dp),
-        horizontalArrangement = Arrangement.Center,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = contentDescription,
-            tint = Color.White,
-            modifier = Modifier.size(20.dp),
-        )
-        Spacer(modifier = Modifier.width(8.dp))
-        Text(
-            text = label,
-            fontSize = 14.sp,
-            fontWeight = FontWeight.SemiBold,
-            color = Color.White,
-        )
-    }
-}
+        /** A single filled quick-action chip (icon + label). */
+        @Composable
+        private fun QuickActionChip(
+            icon: androidx.compose.ui.graphics.vector.ImageVector,
+            label: String,
+            contentDescription: String,
+            onClick: () -> Unit,
+            modifier: Modifier = Modifier,
+        ) {
+            Row(
+                modifier = modifier
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable(onClick = onClick)
+                    .background(Color.White.copy(alpha = 0.08f))
+                    .padding(vertical = 14.dp),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = contentDescription,
+                    tint = Color.White,
+                    modifier = Modifier.size(20.dp),
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = label,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Color.White,
+                )
+            }
+        }
 
 /**
  * Album art with a colored glow shadow behind it.
