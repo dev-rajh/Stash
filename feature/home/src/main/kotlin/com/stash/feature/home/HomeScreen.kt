@@ -80,6 +80,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.animation.Crossfade
 import androidx.compose.ui.Alignment
@@ -106,6 +107,7 @@ import com.stash.core.model.Playlist
 import com.stash.core.model.PlaylistType
 import com.stash.core.model.Track
 import com.stash.core.ui.components.AlbumSquareCard
+import com.stash.core.ui.components.CardRail
 import com.stash.core.ui.components.CrispChipRow
 import com.stash.core.ui.components.DiscoverHeroCard
 import com.stash.core.ui.components.GlassCard
@@ -134,8 +136,19 @@ fun HomeScreen(
     onNavigateToPlaylist: (Long) -> Unit = {},
     onNavigateToAlbum: (AlbumSummary) -> Unit = {},
     onSeeAllPlaylists: (String) -> Unit = {},
+    onNavigateToMixBuilder: (Long?) -> Unit = {},
+    // Task 7 wires the actual mix-browse destination; today a no-op from the host.
+    onSeeAllMixes: (MixRail) -> Unit = {},
     viewModel: HomeViewModel = hiltViewModel(),
 ) {
+    // Long-pressed Stash mix whose action sheet is open (null = closed).
+    var actionSheetMixId by remember { mutableStateOf<Long?>(null) }
+    // Opening a mix = open its materialized playlist + freshen it if stale.
+    // A HomeMix's id IS its playlist id, so this reuses the existing playlist nav.
+    val openMix: (Long) -> Unit = { id ->
+        viewModel.refreshMixIfStale(id)
+        onNavigateToPlaylist(id)
+    }
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     // Master streaming-mode flag. Both the top-bar StreamingModeChip and
     // the sheet (StreamingModeSheet) render from this single source of
@@ -306,13 +319,16 @@ fun HomeScreen(
             )
         }
 
-        // ── Discover hero (or cold-start personalize card) ───────────
-        // Premium Crisp discovery surface. The materialized Daily Discover
-        // mix is the hero; a brand-new / thin-library user gets the
-        // personalize card instead — Home never renders blank.
+        // ── Discover hero pager (Daily Discover + your Stash mixes) ──
+        // A mix created from the hero's ＋ ring lands right here as an
+        // identical sibling card — swipe between Daily Discover and your
+        // own mixes (dots below signal the pages). Long-press a Your-mix
+        // page for the action sheet (refresh / edit / delete / hide).
+        // Replaces the old "Your mixes" rail.
         item {
             Spacer(Modifier.height(6.dp))
             val hero = uiState.hero
+            val mixPages = uiState.yourMixes
             when {
                 uiState.isLoading -> DiscoverHeroCard(
                     label = "Daily discovery",
@@ -324,25 +340,83 @@ fun HomeScreen(
                     loading = true,
                     modifier = Modifier.padding(horizontal = 16.dp),
                 )
-                hero != null -> DiscoverHeroCard(
-                    label = "Daily discovery",
-                    title = hero.title,
-                    subtitle = hero.subtitle,
-                    artUrl = hero.artUrl,
-                    onPlay = viewModel::playHero,
-                    onOpen = { onNavigateToPlaylist(hero.playlistId) },
-                    modifier = Modifier.padding(horizontal = 16.dp),
-                )
-                else -> PersonalizeCard(
+                hero == null && mixPages.isEmpty() -> PersonalizeCard(
                     onConnect = onNavigateToSettings,
                     modifier = Modifier.padding(horizontal = 16.dp),
                 )
+                else -> {
+                    val heroPages = if (hero != null) 1 else 0
+                    val pageCount = heroPages + mixPages.size
+                    val pagerState = androidx.compose.foundation.pager.rememberPagerState(
+                        pageCount = { pageCount },
+                    )
+                    Column {
+                        androidx.compose.foundation.pager.HorizontalPager(
+                            state = pagerState,
+                            contentPadding = PaddingValues(horizontal = 16.dp),
+                            pageSpacing = 10.dp,
+                        ) { page ->
+                            if (page < heroPages && hero != null) {
+                                DiscoverHeroCard(
+                                    label = "Daily discovery",
+                                    title = hero.title,
+                                    subtitle = hero.subtitle,
+                                    artUrl = hero.artUrl,
+                                    onPlay = viewModel::playHero,
+                                    onOpen = { onNavigateToPlaylist(hero.playlistId) },
+                                    onCreateMix = { onNavigateToMixBuilder(null) },
+                                )
+                            } else {
+                                val m = mixPages[page - heroPages]
+                                DiscoverHeroCard(
+                                    label = "Your mix",
+                                    title = m.title,
+                                    subtitle = when (m.buildState) {
+                                        MixBuildState.BUILDING -> "building…"
+                                        MixBuildState.EMPTY -> "empty — edit to fill"
+                                        else -> "${m.trackCount} tracks"
+                                    },
+                                    artUrl = m.artUrl,
+                                    onPlay = { viewModel.playMix(m.id) },
+                                    onOpen = { openMix(m.id) },
+                                    onLongPress = { actionSheetMixId = m.id },
+                                )
+                            }
+                        }
+                        if (pageCount > 1) {
+                            Spacer(Modifier.height(8.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.Center,
+                            ) {
+                                repeat(pageCount) { i ->
+                                    val active = pagerState.currentPage == i
+                                    Box(
+                                        modifier = Modifier
+                                            .padding(horizontal = 3.dp)
+                                            .size(6.dp)
+                                            .clip(CircleShape)
+                                            .background(
+                                                if (active) {
+                                                    MaterialTheme.colorScheme.primary
+                                                } else {
+                                                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f)
+                                                },
+                                            ),
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 
         // ── Qobuz discovery rows (genre-filtered) ─────────────────────
-        // Each row renders only when it has content — a failed/empty row
-        // (fail-soft repository) is simply omitted; Home never blocks on it.
+        // These are what the genre chips at the top actually control, so
+        // they sit directly under the hero; the imported/auto mix rails
+        // follow. Each row renders only when it has content — a failed or
+        // empty row (fail-soft repository) is simply omitted.
         if (uiState.newReleases.isNotEmpty()) {
             item {
                 DiscoveryAlbumRow(
@@ -364,11 +438,25 @@ fun HomeScreen(
         }
         if (uiState.topAlbums.isNotEmpty()) {
             item {
+                // Collapsed to the top 5 by default; "Show all N" expands the
+                // full best-sellers chart in place. Saveable so the choice
+                // survives the item scrolling out of composition.
+                var topAlbumsExpanded by rememberSaveable { mutableStateOf(false) }
+                val visibleTop =
+                    if (topAlbumsExpanded) uiState.topAlbums else uiState.topAlbums.take(5)
                 Column {
                     Spacer(Modifier.height(16.dp))
-                    SectionHeader(title = "Top Albums")
+                    SectionHeader(
+                        title = "Top Albums",
+                        actionText = when {
+                            uiState.topAlbums.size <= 5 -> null
+                            topAlbumsExpanded -> "Show less"
+                            else -> "Show all ${uiState.topAlbums.size}"
+                        },
+                        onActionClick = { topAlbumsExpanded = !topAlbumsExpanded },
+                    )
                     RankedAlbumList(
-                        items = uiState.topAlbums.mapIndexed { i, a ->
+                        items = visibleTop.mapIndexed { i, a ->
                             RankedAlbumUi(
                                 rank = i + 1,
                                 title = a.title,
@@ -382,6 +470,57 @@ fun HomeScreen(
                 }
             }
         }
+
+        // ── Mix rails (Made for you · Radios · Mood & decades · Your mixes) ──
+        // Derived from the user's playlists + recipes (HomeViewModel.mixRail).
+        // Each rail renders only when non-empty. "Your mixes" (Stash mixes)
+        // additionally long-press → the action sheet below.
+        if (uiState.madeForYou.isNotEmpty()) item {
+            CardRail(
+                title = "Made for you",
+                actionText = "See all",
+                onActionClick = { onSeeAllMixes(MixRail.MADE_FOR_YOU) },
+            ) {
+                items(uiState.madeForYou, key = { it.id }) { m ->
+                    MixRailCard(
+                        title = m.title, artUrl = m.artUrl, source = m.source,
+                        buildState = m.buildState, onClick = { openMix(m.id) },
+                        onLongPress = { actionSheetMixId = m.id },
+                    )
+                }
+            }
+        }
+        if (uiState.radios.isNotEmpty()) item {
+            CardRail(
+                title = "Radios",
+                actionText = "See all",
+                onActionClick = { onSeeAllMixes(MixRail.RADIOS) },
+            ) {
+                items(uiState.radios, key = { it.id }) { m ->
+                    MixRailCard(
+                        title = m.title, artUrl = m.artUrl, source = m.source,
+                        buildState = m.buildState, onClick = { openMix(m.id) },
+                        onLongPress = { actionSheetMixId = m.id },
+                    )
+                }
+            }
+        }
+        if (uiState.moodDecades.isNotEmpty()) item {
+            CardRail(
+                title = "Mood & decades",
+                actionText = "See all",
+                onActionClick = { onSeeAllMixes(MixRail.MOOD_DECADES) },
+            ) {
+                items(uiState.moodDecades, key = { it.id }) { m ->
+                    MixRailCard(
+                        title = m.title, artUrl = m.artUrl, source = m.source,
+                        buildState = m.buildState, onClick = { openMix(m.id) },
+                        onLongPress = { actionSheetMixId = m.id },
+                    )
+                }
+            }
+        }
+
     }
 
     // ── Streaming privacy disclosure (first-use only) ────────────────────
@@ -406,6 +545,124 @@ fun HomeScreen(
             },
             onDismiss = { showStreamingSheet = false },
             sheetState = streamingSheetState,
+        )
+    }
+
+    // ── Stash-mix action sheet (long-press a "Your mixes" card) ──────────
+    // Moved from LibraryMixesSection (Library keeps its own copy until Task 8).
+    // Gating mirrors Library: Refresh for every Stash mix, Edit/Delete for
+    // custom mixes only, Open always. "Your mixes" == the STASH_MIX rail, so
+    // membership there stands in for the type == STASH_MIX check.
+    actionSheetMixId?.let { id ->
+        // Guard render only — a stale id (mix vanished from every rail after a
+        // delete/refresh re-emit) simply renders nothing; the next long-press
+        // overwrites it. No state write during composition.
+        val mix = (uiState.madeForYou + uiState.radios + uiState.moodDecades + uiState.yourMixes)
+            .firstOrNull { it.id == id }
+        if (mix != null) {
+            val sheetState = rememberModalBottomSheetState()
+            val isStashMix = uiState.yourMixes.any { it.id == id }
+            val isCustom = id in uiState.customMixPlaylistIds
+            ModalBottomSheet(
+                onDismissRequest = { actionSheetMixId = null },
+                sheetState = sheetState,
+                containerColor = MaterialTheme.colorScheme.surface,
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp)
+                        .padding(bottom = 8.dp),
+                ) {
+                    Text(
+                        text = mix.title,
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                if (isStashMix) {
+                    MixActionRow(
+                        icon = Icons.Default.Refresh,
+                        label = "Refresh this mix",
+                        onClick = {
+                            viewModel.refreshMix(id)
+                            actionSheetMixId = null
+                        },
+                    )
+                }
+                if (isCustom) {
+                    MixActionRow(
+                        icon = Icons.Default.Edit,
+                        label = "Edit mix",
+                        onClick = {
+                            viewModel.editRecipeId(id) { recipeId -> onNavigateToMixBuilder(recipeId) }
+                            actionSheetMixId = null
+                        },
+                    )
+                    MixActionRow(
+                        icon = Icons.Default.Delete,
+                        label = "Delete mix",
+                        tint = MaterialTheme.colorScheme.error,
+                        onClick = {
+                            viewModel.deleteCustomMix(id)
+                            actionSheetMixId = null
+                        },
+                    )
+                }
+                MixActionRow(
+                    icon = Icons.Filled.RemoveCircleOutline,
+                    label = "Hide from Home",
+                    onClick = {
+                        viewModel.setHideFromHome(id, true)
+                        actionSheetMixId = null
+                    },
+                )
+                MixActionRow(
+                    icon = Icons.Default.PlayArrow,
+                    label = "Open",
+                    onClick = {
+                        openMix(id)
+                        actionSheetMixId = null
+                    },
+                )
+                Spacer(Modifier.height(12.dp))
+            }
+        }
+    }
+}
+
+// ── Mix action-sheet row ──────────────────────────────────────────────────
+
+/** A single action row inside the Stash-mix action sheet. */
+@Composable
+private fun MixActionRow(
+    icon: ImageVector,
+    label: String,
+    onClick: () -> Unit,
+    tint: Color = MaterialTheme.colorScheme.onSurface,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 20.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = label,
+            tint = tint,
+            modifier = Modifier.size(24.dp),
+        )
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodyLarge,
+            color = tint,
         )
     }
 }

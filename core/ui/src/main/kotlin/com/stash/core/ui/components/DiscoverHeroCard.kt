@@ -1,7 +1,9 @@
 package com.stash.core.ui.components
 
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -14,6 +16,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -54,8 +57,13 @@ import com.stash.core.ui.theme.StashPurpleDark
  *   for text legibility). Falls back to the brand gradient when null.
  * @param onPlay   Invoked when the round play button is tapped.
  * @param onOpen   Invoked when the card body is tapped (open the playlist).
+ * @param onCreateMix Optional — when non-null a small "＋ ring" renders beneath the
+ *   play button; tapping it starts a new mix. Omitted callers show no ＋.
+ * @param onLongPress Optional — long-press on the card body (the hero pager's
+ *   Your-mix pages use it to open the mix action sheet).
  * @param loading  When true, render a shimmer skeleton instead of the hero body.
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun DiscoverHeroCard(
     label: String,
@@ -64,6 +72,8 @@ fun DiscoverHeroCard(
     artUrl: String?,
     onPlay: () -> Unit,
     onOpen: () -> Unit,
+    onCreateMix: (() -> Unit)? = null,
+    onLongPress: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
     loading: Boolean = false,
 ) {
@@ -74,7 +84,13 @@ fun DiscoverHeroCard(
             .height(150.dp)
             .shadow(StashElevation.Hero, shape, clip = false)
             .clip(shape)
-            .then(if (!loading) Modifier.clickable(onClick = onOpen) else Modifier),
+            .then(
+                if (!loading) {
+                    Modifier.combinedClickable(onClick = onOpen, onLongClick = onLongPress)
+                } else {
+                    Modifier
+                }
+            ),
     ) {
         if (loading) {
             ShimmerPlaceholder(modifier = Modifier.fillMaxSize(), shape = shape)
@@ -145,18 +161,39 @@ fun DiscoverHeroCard(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            Surface(
-                onClick = onPlay,
-                shape = CircleShape,
-                color = Color.White,
-                modifier = Modifier.size(44.dp),
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(11.dp),
             ) {
-                Icon(
-                    imageVector = Icons.Default.PlayArrow,
-                    contentDescription = "Play $title",
-                    tint = Color.Black,
-                    modifier = Modifier.padding(10.dp),
-                )
+                Surface(
+                    onClick = onPlay,
+                    shape = CircleShape,
+                    color = Color.White,
+                    modifier = Modifier.size(52.dp).shadow(6.dp, CircleShape),
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.PlayArrow,
+                        contentDescription = "Play $title",
+                        tint = Color.Black,
+                        modifier = Modifier.padding(12.dp),
+                    )
+                }
+                if (onCreateMix != null) {
+                    Surface(
+                        onClick = onCreateMix,
+                        shape = CircleShape,
+                        color = Color.White.copy(alpha = 0.04f),
+                        border = BorderStroke(1.5.dp, Color.White.copy(alpha = 0.30f)),
+                        modifier = Modifier.size(38.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Add,
+                            contentDescription = "Create a mix",
+                            tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.9f),
+                            modifier = Modifier.padding(8.dp),
+                        )
+                    }
+                }
             }
         }
     }

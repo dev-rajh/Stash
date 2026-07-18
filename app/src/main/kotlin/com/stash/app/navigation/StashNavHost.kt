@@ -8,7 +8,10 @@ import androidx.compose.ui.Modifier
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
+import androidx.navigation.toRoute
 import com.stash.feature.home.HomeScreen
+import com.stash.feature.home.MixBrowseScreen
+import com.stash.feature.home.MixRail
 import com.stash.feature.home.PlaylistBrowseScreen
 import com.stash.feature.library.AlbumDetailScreen
 import com.stash.feature.library.ArtistDetailScreen
@@ -26,6 +29,7 @@ import com.stash.feature.settings.equalizer.EqualizerScreen
 import com.stash.feature.settings.libraryhealth.LibraryHealthScreen
 import com.stash.feature.sync.FailedDownloadsScreen
 import com.stash.feature.sync.FailedMatchesScreen
+import com.stash.feature.sync.ManagePlaylistsScreen
 import com.stash.feature.sync.SyncScreen
 
 /** Transition duration for the Now Playing slide animation in milliseconds. */
@@ -80,6 +84,12 @@ fun StashNavHost(
                 onSeeAllPlaylists = { genre ->
                     navController.navigate(PlaylistBrowseRoute(genre))
                 },
+                onNavigateToMixBuilder = { recipeId ->
+                    navController.navigate(MixBuilderRoute(recipeId))
+                },
+                onSeeAllMixes = { rail ->
+                    navController.navigate(MixBrowseRoute(rail.name))
+                },
             )
         }
         composable<PlaylistBrowseRoute> {
@@ -99,6 +109,13 @@ fun StashNavHost(
                 },
             )
         }
+        composable<MixBrowseRoute> {
+            MixBrowseScreen(
+                rail = MixRail.valueOf(it.toRoute<MixBrowseRoute>().rail),
+                onBack = { navController.popBackStack() },
+                onOpenMix = { id -> navController.navigate(PlaylistDetailRoute(id)) },
+            )
+        }
         composable<MixBuilderRoute> {
             MixBuilderScreen(onBack = { navController.popBackStack() })
         }
@@ -112,12 +129,6 @@ fun StashNavHost(
                 },
                 onNavigateToAlbum = { albumName, artistName ->
                     navController.navigate(AlbumDetailRoute(albumName, artistName))
-                },
-                onNavigateToLikedSongs = { source ->
-                    navController.navigate(LikedSongsDetailRoute(source))
-                },
-                onNavigateToMixBuilder = { recipeId ->
-                    navController.navigate(MixBuilderRoute(recipeId))
                 },
                 onSelectionModeChanged = onSelectionModeChanged,
             )
@@ -157,6 +168,13 @@ fun StashNavHost(
                         launchSingleTop = true
                     }
                 },
+                onManageSource = { source -> navController.navigate(ManagePlaylistsRoute(source.name)) },
+            )
+        }
+        composable<ManagePlaylistsRoute> {
+            ManagePlaylistsScreen(
+                source = com.stash.feature.sync.SyncSource.valueOf(it.toRoute<ManagePlaylistsRoute>().source),
+                onBack = { navController.popBackStack() },
             )
         }
         composable<SettingsRoute> {
