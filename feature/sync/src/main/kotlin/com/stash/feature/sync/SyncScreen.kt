@@ -49,14 +49,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.stash.core.model.SyncDisplayStatus
 import com.stash.core.model.SyncMode
 import com.stash.core.ui.components.GlassCard
 import com.stash.core.ui.theme.StashTheme
 import com.stash.feature.sync.components.AuthExpiredBanner
-import com.stash.feature.sync.components.RecentSyncRow
 import com.stash.feature.sync.components.RecentSyncsCard
-import com.stash.feature.sync.components.SyncRowStatus
 import com.stash.feature.sync.components.SyncHeroCard
 import com.stash.feature.sync.components.SyncActionProgress
 import com.stash.feature.sync.components.SyncStatusCard
@@ -286,27 +283,7 @@ fun SyncScreen(
         if (uiState.recentSyncs.isNotEmpty()) {
             item { SyncSectionLabel("Recent syncs") }
             item {
-                val rows = uiState.recentSyncs.map { sync ->
-                    RecentSyncRow(
-                        id = sync.id,
-                        timestamp = formatRelativeTime(sync.startedAt),
-                        summary = buildString {
-                            append("Found ${sync.newTracksFound}")
-                            append(" / ${sync.tracksDownloaded} downloaded")
-                            if (sync.tracksFailed > 0) append(" / ${sync.tracksFailed} failed")
-                        },
-                        status = when (sync.displayStatus) {
-                            SyncDisplayStatus.Success -> SyncRowStatus.HEALTHY
-                            is SyncDisplayStatus.PartialSuccess -> SyncRowStatus.PARTIAL
-                            is SyncDisplayStatus.Interrupted -> SyncRowStatus.PARTIAL
-                            is SyncDisplayStatus.Failed -> SyncRowStatus.FAILED
-                            SyncDisplayStatus.Running -> SyncRowStatus.PARTIAL
-                            SyncDisplayStatus.Idle -> SyncRowStatus.PARTIAL
-                        },
-                        errorMessage = sync.errorMessage,
-                        diagnostics = sync.diagnostics,
-                    )
-                }
+                val rows = uiState.recentSyncs.map { it.toRecentSyncRow(formatRelativeTime(it.startedAt)) }
                 RecentSyncsCard(rows)
             }
         }

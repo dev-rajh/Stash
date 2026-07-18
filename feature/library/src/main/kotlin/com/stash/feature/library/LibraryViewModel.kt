@@ -32,7 +32,11 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -260,6 +264,7 @@ class LibraryViewModel @Inject constructor(
             SortOrder.RECENT -> filteredTracks.sortedByDescending { it.dateAdded }
             SortOrder.ALPHABETICAL -> filteredTracks.sortedBy { it.title.lowercase() }
             SortOrder.MOST_PLAYED -> filteredTracks.sortedByDescending { it.playCount }
+            SortOrder.DURATION -> filteredTracks.sortedByDescending { it.durationMs }
         }
         val sortedPlaylists = when (controls.sortOrder) {
             // RECENT uses date_added (stable across syncs) not last_synced
@@ -272,17 +277,22 @@ class LibraryViewModel @Inject constructor(
             // chip produces a visible ordering change instead of a
             // silent no-op.
             SortOrder.MOST_PLAYED -> filteredPlaylists.sortedByDescending { it.trackCount }
+            // Playlists have no duration — fall back to the RECENT ordering.
+            SortOrder.DURATION -> filteredPlaylists.sortedByDescending { it.dateAdded }
         }
         // Sort artists/albums — default by track count descending (most tracks first)
         val sortedArtists = when (controls.sortOrder) {
             SortOrder.RECENT -> filteredArtists.sortedByDescending { it.trackCount }
             SortOrder.ALPHABETICAL -> filteredArtists.sortedBy { it.name.lowercase() }
             SortOrder.MOST_PLAYED -> filteredArtists.sortedByDescending { it.trackCount }
+            SortOrder.DURATION -> filteredArtists.sortedByDescending { it.totalDurationMs }
         }
         val sortedAlbums = when (controls.sortOrder) {
             SortOrder.RECENT -> filteredAlbums.sortedByDescending { it.trackCount }
             SortOrder.ALPHABETICAL -> filteredAlbums.sortedBy { it.name.lowercase() }
             SortOrder.MOST_PLAYED -> filteredAlbums.sortedByDescending { it.trackCount }
+            // Albums carry no duration projection — fall back to track count.
+            SortOrder.DURATION -> filteredAlbums.sortedByDescending { it.trackCount }
         }
 
         // Split into multi-track (primary) and single-track (collapsed)
@@ -313,6 +323,9 @@ class LibraryViewModel @Inject constructor(
             isLoading = false,
             spotifyConnected = authPair.first,
             youTubeConnected = authPair.second,
+            // Unfiltered library size for the Shuffle hero (independent of the
+            // active source/search filter, which only narrows the visible list).
+            librarySongCount = allTracks.size,
         )
     }.combine(playerRepository.playerState) { libraryState, playerState ->
         // Overlay the currently-playing track ID so the UI can highlight it.
@@ -324,6 +337,58 @@ class LibraryViewModel @Inject constructor(
         started = SharingStarted.WhileSubscribed(5_000),
         initialValue = LibraryUiState(),
     )
+
+    // ── Liked subcategory (browse + sift likes by origin) ────────────────
+
+    private val _likedFilter = MutableStateFlow(LikedFilter.ALL)
+    val likedFilter: StateFlow<LikedFilter> = _likedFilter.asStateFlow()
+    fun setLikedFilter(filter: LikedFilter) { _likedFilter.update { filter } }
+
+    private val stashLikedFlow = musicRepository.getPlaylistsByType(PlaylistType.STASH_LIKED)
+    private val externalLikedFlow = musicRepository.getPlaylistsByType(PlaylistType.LIKED_SONGS)
+
+    /** Which like-origins actually have songs — drives the sift chips' visibility. */
+    val likedSources: StateFlow<Set<LikedFilter>> =
+        combine(stashLikedFlow, externalLikedFlow) { stash, external ->
+            buildSet {
+                if (stash.any { it.trackCount > 0 }) add(LikedFilter.STASH)
+                if (external.any { (it.source == MusicSource.SPOTIFY || it.source == MusicSource.BOTH) && it.trackCount > 0 }) {
+                    add(LikedFilter.SPOTIFY)
+                }
+                if (external.any { it.source == MusicSource.YOUTUBE && it.trackCount > 0 }) add(LikedFilter.YOUTUBE)
+            }
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptySet())
+
+    /** Liked tracks for the current [likedFilter], de-duped across the liked playlists. */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val likedTracks: StateFlow<List<Track>> =
+        combine(stashLikedFlow, externalLikedFlow, _likedFilter) { stash, external, filter ->
+            when (filter) {
+                LikedFilter.ALL -> stash + external
+                LikedFilter.STASH -> stash
+                LikedFilter.SPOTIFY -> external.filter { it.source == MusicSource.SPOTIFY || it.source == MusicSource.BOTH }
+                LikedFilter.YOUTUBE -> external.filter { it.source == MusicSource.YOUTUBE }
+            }
+        }.flatMapLatest { playlists ->
+            if (playlists.isEmpty()) {
+                flowOf(emptyList())
+            } else {
+                combine(playlists.map { musicRepository.getTracksByPlaylist(it.id) }) { arrays ->
+                    arrays.flatMap { it.toList() }.distinctBy { it.id }
+                }
+            }
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /** Play the liked list starting at [track] (offline-aware, like the detail screen). */
+    fun playLiked(track: Track) {
+        viewModelScope.launch {
+            val all = likedTracks.value
+            val playable = if (streamingPreference.current()) all else all.filter { it.filePath != null }
+            if (playable.isEmpty()) return@launch
+            val index = playable.indexOfFirst { it.id == track.id }.coerceAtLeast(0)
+            playerRepository.setQueue(playable, index)
+        }
+    }
 
     // ── Public actions ───────────────────────────────────────────────────
 

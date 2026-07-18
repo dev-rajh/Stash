@@ -33,6 +33,27 @@ import dagger.assisted.AssistedInject
 import kotlinx.coroutines.flow.first
 
 /**
+ * A newly-discovered playlist's initial [PlaylistEntity.syncEnabled].
+ * Algorithmic mixes (DAILY_MIX) auto-enable in Online mode so they surface
+ * immediately with no download. Everything else — and every playlist in
+ * Offline mode — stays opt-in: the first Sync Now is a discovery pass that
+ * downloads nothing unasked. [online] is the streaming-mode flag (on = stream,
+ * don't download).
+ */
+internal fun defaultSyncEnabled(type: PlaylistType, online: Boolean): Boolean =
+    type == PlaylistType.DAILY_MIX && online
+
+/**
+ * Whether a playlist's tracks should be enqueued for download during this sync.
+ * Online/streaming mode never downloads (tracks stream on tap). In Offline mode
+ * everything downloads EXCEPT algorithmic mixes (DAILY_MIX) — those are
+ * surface-only (stream-on-tap), so an auto-enabled mix never pulls bytes even
+ * after the user switches to Offline and re-syncs.
+ */
+internal fun shouldEnqueueForDownload(type: PlaylistType, streamingMode: Boolean): Boolean =
+    !streamingMode && type != PlaylistType.DAILY_MIX
+
+/**
  * Second worker in the sync chain. Compares remote playlist/track snapshots
  * against the local database to find new tracks that need downloading.
  *
@@ -107,7 +128,7 @@ class DiffWorker @AssistedInject constructor(
                 // Find or create the local playlist (writes, but outside
                 // the per-playlist transaction — it owns its own atomicity
                 // and needs its id to drive the block below).
-                val localPlaylist = findOrCreatePlaylist(playlistSnapshot)
+                val localPlaylist = findOrCreatePlaylist(playlistSnapshot, streamingMode)
 
                 // Skip playlists the user has disabled in Sync Preferences.
                 if (!localPlaylist.syncEnabled) {
@@ -214,6 +235,7 @@ class DiffWorker @AssistedInject constructor(
      */
     private suspend fun findOrCreatePlaylist(
         snapshot: RemotePlaylistSnapshotEntity,
+        streamingMode: Boolean,
     ): PlaylistEntity {
         val existing = playlistDao.findBySourceId(snapshot.sourcePlaylistId)
         if (existing != null) {
@@ -255,13 +277,16 @@ class DiffWorker @AssistedInject constructor(
             mixNumber = snapshot.mixNumber,
             artUrl = snapshot.artUrl,
             trackCount = snapshot.trackCount,
-            // Opt-in by default for every source. The first Sync Now is
-            // effectively a discovery pass — it populates playlist rows
-            // but queues nothing for download until the user picks what
-            // they actually want in the Sync Preferences card. Fixes
-            // issue #10 (unchecked playlists downloading anyway) and
-            // brings YouTube in line with Spotify's existing behavior.
-            syncEnabled = false,
+            // Opt-in by default — EXCEPT algorithmic mixes in Online mode.
+            // A DAILY_MIX discovered while streaming auto-enables so it
+            // surfaces immediately with no download (Online skips the
+            // download_queue enqueue anyway). Every other type, and every
+            // playlist in Offline mode, stays opt-in: the first Sync Now is
+            // a discovery pass that populates playlist rows but queues
+            // nothing until the user picks what they want in the Sync
+            // Preferences card. Fixes issue #10 (unchecked playlists
+            // downloading anyway) and keeps YouTube in line with Spotify.
+            syncEnabled = defaultSyncEnabled(snapshot.playlistType, streamingMode),
         )
         val id = playlistDao.insert(newPlaylist)
         return newPlaylist.copy(id = id)
@@ -433,9 +458,11 @@ class DiffWorker @AssistedInject constructor(
                 // normally so the playlist surfaces on Home and the playlist
                 // detail screen can stream the track via Kennyy on tap. We
                 // skip the download_queue enqueue so no bytes hit disk.
-                // Offline mode: enqueue the download as usual.
+                // Offline mode: enqueue the download — EXCEPT algorithmic mixes
+                // (DAILY_MIX), which stay surface-only (stream-on-tap) so an
+                // auto-enabled mix never pulls bytes after switching to Offline.
                 val searchQuery = "${trackSnapshot.artist} - ${trackSnapshot.title}"
-                if (!streamingMode) {
+                if (shouldEnqueueForDownload(localPlaylist.type, streamingMode)) {
                     Log.i(TAG, "QueueTrace: DiffWorker.insert track_id=$trackId playlist=${localPlaylist.id} '${trackSnapshot.artist} - ${trackSnapshot.title}'")
                     downloadQueueDao.insert(
                         DownloadQueueEntity(
@@ -448,7 +475,7 @@ class DiffWorker @AssistedInject constructor(
                         )
                     )
                 } else {
-                    Log.i(TAG, "QueueTrace: DiffWorker streaming-mode insert track_id=$trackId playlist=${localPlaylist.id} (download skipped)")
+                    Log.i(TAG, "QueueTrace: DiffWorker surface-only insert track_id=$trackId playlist=${localPlaylist.id} (download skipped)")
                 }
                 newTrackCount++
             }
