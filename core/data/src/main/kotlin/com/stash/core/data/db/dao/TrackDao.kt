@@ -371,6 +371,34 @@ interface TrackDao {
         canonicalArtist: String,
     ): TrackEntity?
 
+    /**
+     * Batched counterpart to [findByAnyIdentity] used by DiffWorker's bulk
+     * sync-diff pass. Returns every track matching ANY of the given
+     * identifiers in one round-trip instead of one SELECT per remote
+     * snapshot (a 9,000-track sync previously issued 9,000 individual
+     * lookups here). Callers reconstruct the per-snapshot priority match
+     * (spotifyUri > youtubeId > canonical identity) in memory from the
+     * returned candidate set.
+     *
+     * Callers MUST NOT pass an empty list for any parameter — an empty
+     * SQLite `IN ()` clause is a syntax error. Pass a sentinel value
+     * (e.g. a value guaranteed not to appear in real data) instead of an
+     * empty list when a caller has no identifiers of that kind.
+     */
+    @Query(
+        """
+        SELECT * FROM tracks
+        WHERE spotify_uri IN (:spotifyUris)
+           OR youtube_id IN (:youtubeIds)
+           OR (canonical_title || '|' || canonical_artist) IN (:canonicalKeys)
+        """
+    )
+    suspend fun findExistingForBatch(
+        spotifyUris: List<String>,
+        youtubeIds: List<String>,
+        canonicalKeys: List<String>,
+    ): List<TrackEntity>
+
     /** Find a track by primary key. */
     @Query("SELECT * FROM tracks WHERE id = :trackId LIMIT 1")
     suspend fun getById(trackId: Long): TrackEntity?
@@ -1319,6 +1347,23 @@ interface TrackDao {
     suspend fun dismissMatch(trackId: Long)
 
     /** Set the YouTube video ID for a track so future syncs don't re-queue it. */
+    /**
+     * youtube_id backfill that silently no-ops when ANOTHER track already
+     * owns the id (tracks.youtube_id is UNIQUE — an unguarded UPDATE throws
+     * SQLiteConstraintException and, in DiffWorker, failed the whole sync
+     * diff). Returns 1 when the backfill applied, 0 when skipped.
+     */
+    @Query(
+        """
+        UPDATE tracks SET youtube_id = :youtubeId
+        WHERE id = :trackId
+          AND NOT EXISTS (
+              SELECT 1 FROM tracks WHERE youtube_id = :youtubeId AND id != :trackId
+          )
+        """
+    )
+    suspend fun updateYoutubeIdIfUnclaimed(trackId: Long, youtubeId: String): Int
+
     @Query("UPDATE tracks SET youtube_id = :youtubeId WHERE id = :trackId")
     suspend fun updateYoutubeId(trackId: Long, youtubeId: String)
 
