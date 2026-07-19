@@ -19,6 +19,12 @@ jobs:
     if: ${{ github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip test]') }}
     name: core:media unit tests
     runs-on: ubuntu-latest
+    # The :core:media suite contains a known flaky network test that can
+    # HANG (no test-level timeout). Without a job cap each hung run squats
+    # on a concurrency slot for the 6h default — 20 pushes in a day froze
+    # the entire account's Actions queue (observed 2026-07-19, blocked the
+    # v0.9.78 release build). Bound the damage.
+    timeout-minutes: 20
 
     steps:
       - name: Check out repository
