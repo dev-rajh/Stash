@@ -4,6 +4,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.util.Log
 import androidx.core.app.NotificationCompat
@@ -214,9 +215,49 @@ class UpdateCheckWorker(
             return false
         }
 
+        val packageManager = applicationContext.packageManager
+
+        // Discover installed apps that are actually browsers by querying for
+        // handlers of a GENERIC http:// URL — this is the same signal Android
+        // itself uses to populate "Open with…" browser pickers. Avoids
+        // hardcoding a package allowlist (which excludes Vivaldi, Edge, Opera,
+        // Samsung Internet, Kiwi, DuckDuckGo, etc.) while still preferring a
+        // genuine browser over some unrelated app that happens to register an
+        // intent-filter for github.com links (e.g. a GitHub client).
+        val genericBrowserIntent = Intent(Intent.ACTION_VIEW, Uri.parse("http://")).apply {
+            addCategory(Intent.CATEGORY_BROWSABLE)
+        }
+        val browserPackages = packageManager.queryIntentActivities(
+            genericBrowserIntent,
+            PackageManager.MATCH_ALL,
+        ).mapNotNull { it.activityInfo?.packageName }.toSet()
+
+        val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse(DOWNLOAD_URL))
+        val resolved = packageManager.queryIntentActivities(
+            browserIntent,
+            PackageManager.MATCH_DEFAULT_ONLY,
+        )
+
+        // Prefer a resolver that's a genuine browser; otherwise fall back to
+        // whatever the system resolved. Then make the launch explicit by
+        // binding to the chosen activity component.
+        val preferredActivity = resolved
+            .firstOrNull { info -> info.activityInfo?.packageName in browserPackages }
+            ?: resolved.firstOrNull()
+
+        if (preferredActivity?.activityInfo == null) {
+            Log.w(TAG, "No browser activity resolved for update URL; skipping notification")
+            return false
+        }
+
         val intent = Intent(Intent.ACTION_VIEW, Uri.parse(DOWNLOAD_URL)).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            setClassName(
+                preferredActivity.activityInfo.packageName,
+                preferredActivity.activityInfo.name,
+            )
         }
+
         val pendingIntent = PendingIntent.getActivity(
             applicationContext,
             0,
