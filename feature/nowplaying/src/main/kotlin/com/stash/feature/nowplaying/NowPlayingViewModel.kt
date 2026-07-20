@@ -7,6 +7,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.palette.graphics.Palette
 import com.stash.core.data.lossless.LosslessUpgrader
+import com.stash.core.data.prefs.NowPlayingPreference
 import com.stash.core.data.repository.MusicRepository
 import com.stash.core.media.PlayerRepository
 import com.stash.core.model.UpgradeResult
@@ -75,6 +76,7 @@ class NowPlayingViewModel @Inject constructor(
     // codebase (it's not Hilt-injectable in this project).
     private val lyricsRepository: LyricsRepository,
     private val lyricsPreference: com.stash.core.data.prefs.LyricsPreference,
+    private val nowPlayingPreference: NowPlayingPreference,
     private val lyricsSidecarWriter: LyricsSidecarWriter,
     @ApplicationContext private val appContext: Context,
     // Tap-to-artist: resolves the playing track's artist NAME to a YT
@@ -115,6 +117,11 @@ class NowPlayingViewModel @Inject constructor(
     fun setLiveLyricsBarEnabled(enabled: Boolean) {
         viewModelScope.launch { lyricsPreference.setLiveBarEnabled(enabled) }
     }
+
+    val ambientAnimationEnabled: StateFlow<Boolean?> = nowPlayingPreference.ambientAnimationEnabled
+        .map<Boolean, Boolean?> { it }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
 
     private val _userMessages = MutableSharedFlow<String>(
         // v0.9.18: bumped from 1 → 8. The Find-in-FLAC action emits TWO
@@ -1097,4 +1104,3 @@ internal fun overlayDisplayTrack(
         )
     } else baseTrack
 }
-

@@ -129,6 +129,7 @@ fun NowPlayingScreen(
     val isDownloadingCurrent by viewModel.isDownloadingCurrent.collectAsStateWithLifecycle()
     val exportingLyricsTrackId by viewModel.exportingLyricsTrackId.collectAsStateWithLifecycle()
     val radioLabel by viewModel.radioSeedLabel.collectAsStateWithLifecycle()
+    val ambientAnimationEnabled = viewModel.ambientAnimationEnabled.collectAsStateWithLifecycle().value ?: return
     var showQueue by remember { mutableStateOf(false) }
     var showSaveSheet by remember { mutableStateOf(false) }
     val shareTrack by viewModel.shareTrack.collectAsStateWithLifecycle()
@@ -309,11 +310,11 @@ fun NowPlayingScreen(
         )
     }
 
-    Box(modifier = Modifier.fillMaxSize()) {
+    Box(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         // Ambient animated background behind everything — dark canvas, the
         // light pastel wash, or a dead-black AMOLED ground, following the
         // resolved app theme.
-        AmbientBackground(
+        if (ambientAnimationEnabled) AmbientBackground(
             dominantColor = uiState.dominantColor,
             vibrantColor = uiState.vibrantColor,
             mutedColor = uiState.mutedColor,
