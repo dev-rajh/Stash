@@ -201,12 +201,12 @@ fun GlowingProgressBar(
                     formatTime(displayMs)
                 },
                 style = MaterialTheme.typography.labelSmall,
-                color = Color.White.copy(alpha = 0.7f),
+                color = ink.copy(alpha = 0.7f),
                 modifier = Modifier.clickable(
                     interactionSource = interactionSource,
                     indication = null,
                 ) { showRemaining = !showRemaining },
-                color = ink.copy(alpha = 0.7f),
+                
             )
             Text(
                 text = formatTime(totalMs),

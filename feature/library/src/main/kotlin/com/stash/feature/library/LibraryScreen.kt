@@ -385,8 +385,6 @@ private fun LibraryContent(
         ) { uris: List<Uri>? ->
             if (!uris.isNullOrEmpty()) onStartImport(uris)
         }
-        var searchOpen by remember { mutableStateOf(false) }
-        var sortFilterOpen by remember { mutableStateOf(false) }
 
         // Recent-downloads rail — the scrolling leading content of the Songs
         // landing (scrolls away while the compact header + category chips stay
@@ -395,17 +393,7 @@ private fun LibraryContent(
         // Songs landing only — noise above the other grids. Handed ONLY to
         // TracksTab: with the pager, neighbor pages compose mid-swipe, so
         // gating on activeTab here would flash the rail onto other pages.
-        val libraryHeader: @Composable () -> Unit = {
-            Column {
-                if (state.recentlyAdded.isNotEmpty()) {
-                    RecentlyDownloadedRail(
-                        tracks = state.recentlyAdded.take(12),
-                        onTrackClick = onTrackClick,
-                    )
-                }
-                Spacer(Modifier.height(4.dp))
-            }
-        }
+        val libraryHeader: @Composable () -> Unit = {}
 
         // Compact header: title + Import (+), search, and sort/filter icons —
         // replaces the old heading row + the six stacked control bars.
@@ -421,20 +409,31 @@ private fun LibraryContent(
                 color = MaterialTheme.colorScheme.onBackground,
                 modifier = Modifier.weight(1f),
             )
-            // Shuffle stays in the always-visible header so it's reachable even
-            // once the hero has scrolled away.
-            IconButton(onClick = onShuffleLibrary) {
-                Icon(Icons.Filled.Shuffle, contentDescription = "Shuffle library", tint = MaterialTheme.colorScheme.primary)
+
+            // Filled-tonal button (icon + label) instead of a ghost
+            // IconButton — users were missing the plain '+' too easily. The
+            // tonal background + "Import" word makes the affordance obvious
+            // without dominating the heading row.
+            androidx.compose.material3.FilledTonalButton(
+                onClick = { importPicker.launch(arrayOf("audio/*")) },
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                    horizontal = 14.dp,
+                    vertical = 8.dp,
+                ),
+            ) {
+                Icon(
+                    imageVector = androidx.compose.material.icons.Icons.Filled.Add,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = "Import",
+                    style = MaterialTheme.typography.labelLarge,
+                )
             }
-            IconButton(onClick = { importPicker.launch(arrayOf("audio/*")) }) {
-                Icon(Icons.Filled.Add, contentDescription = "Import tracks")
-            }
-            IconButton(onClick = { searchOpen = !searchOpen }) {
-                Icon(Icons.Filled.Search, contentDescription = "Search library")
-            }
-            IconButton(onClick = { sortFilterOpen = true }) {
-                Icon(Icons.Filled.Tune, contentDescription = "Sort and filter")
-            }
+
+
         }
 
         // -- Import progress strip (only when Running / Done / Error) --
@@ -478,22 +477,7 @@ private fun LibraryContent(
 
         Spacer(modifier = Modifier.height(12.dp))
 
-        // -- Tab chips (horizontal scroll) — kept as-is --
-        TabChipRow(
-            activeTab = state.activeTab,
-            onTabSelected = onTabSelected,
-        )
 
-        Spacer(modifier = Modifier.height(8.dp))
-
-        // -- Inline search (toggled by the header 🔍) — no permanent bar --
-        if (searchOpen) {
-            GlassSearchBar(
-                query = state.searchQuery,
-                onQueryChange = onSearchQueryChanged,
-                modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
-            )
-        }
 
         // -- Category chips (pinned): Songs / Playlists / Artists / Albums --
         val chipTabs = listOf(
@@ -513,16 +497,7 @@ private fun LibraryContent(
         Spacer(modifier = Modifier.height(4.dp))
 
         // -- Sort & filter sheet (toggled by the header ⇅) --
-        if (sortFilterOpen) {
-            LibrarySortFilterSheet(
-                sortOrder = state.sortOrder,
-                sourceFilter = state.sourceFilter,
-                showDuration = state.activeTab == LibraryTab.TRACKS,
-                onSortSelected = onSortOrderChanged,
-                onFilterSelected = onSourceFilterChanged,
-                onDismiss = { sortFilterOpen = false },
-            )
-        }
+        
 
         // -- Content area --
         val anyServiceConnected = state.spotifyConnected || state.youTubeConnected
@@ -682,35 +657,7 @@ private fun BulkFlacUpgradeStrip(
 // ── Compact controls bar ─────────────────────────────────────────────────────
 // ── Recently downloaded rail ─────────────────────────────────────────────────
 
-@Composable
-private fun RecentlyDownloadedRail(
-    tracks: List<Track>,
-    onTrackClick: (Track) -> Unit,
-) {
-    Column {
-        Text(
-            text = "RECENTLY DOWNLOADED",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.secondary,
-            modifier = Modifier.padding(start = 20.dp, top = 12.dp, bottom = 8.dp),
-        )
-        LazyRow(
-            contentPadding = PaddingValues(horizontal = 20.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            items(tracks, key = { it.id }) { track ->
-                com.stash.core.ui.components.AlbumSquareCard(
-                    title = track.title,
-                    artist = track.artist,
-                    thumbnailUrl = track.albumArtUrl,
-                    year = null,
-                    isLossless = track.fileFormat.equals("flac", ignoreCase = true),
-                    onClick = { onTrackClick(track) },
-                )
-            }
-        }
-    }
-}
+
 
 // ── Liked subcategory (browse + sift likes by origin) ───────────────────────
 
@@ -932,55 +879,8 @@ private fun LibraryControlsBar(
     }
 }
 
-// ── Tab chips ────────────────────────────────────────────────────────────────
 
-@Composable
-private fun TabChipRow(
-    activeTab: LibraryTab,
-    onTabSelected: (LibraryTab) -> Unit,
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .horizontalScroll(rememberScrollState())
-            .padding(horizontal = 20.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        LibraryTab.entries.forEach { tab ->
-            val isSelected = tab == activeTab
-            FilterChip(
-                selected = isSelected,
-                onClick = { onTabSelected(tab) },
-                label = {
-                    Text(
-                        text = tab.displayName(),
-                        style = MaterialTheme.typography.labelLarge,
-                    )
-                },
-                colors = FilterChipDefaults.filterChipColors(
-                    selectedContainerColor = MaterialTheme.colorScheme.primary,
-                    selectedLabelColor = Color.White,
-                    containerColor = StashTheme.extendedColors.glassBackground,
-                    labelColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                ),
-                border = FilterChipDefaults.filterChipBorder(
-                    borderColor = StashTheme.extendedColors.glassBorder,
-                    selectedBorderColor = MaterialTheme.colorScheme.primary,
-                    enabled = true,
-                    selected = isSelected,
-                ),
-            )
-        }
-    }
-}
 
-/** Human-readable label for each tab. */
-private fun LibraryTab.displayName(): String = when (this) {
-    LibraryTab.PLAYLISTS -> "Playlists"
-    LibraryTab.TRACKS -> "Tracks"
-    LibraryTab.ARTISTS -> "Artists"
-    LibraryTab.ALBUMS -> "Albums"
-}
 
 // ── Sort + filter menu labels ────────────────────────────────────────────────
 

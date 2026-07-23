@@ -1,0 +1,476 @@
+--- /Users/raj/AndroidStudioProjects/Stash_Var/feature/library/src/main/kotlin/com/stash/feature/library/LibraryScreen old.kt	2026-07-23 09:38:40
++++ /Users/raj/AndroidStudioProjects/Stash_Var/feature/library/src/main/kotlin/com/stash/feature/library/LibraryScreen new.kt	2026-07-23 09:38:32
+@@ -36,17 +36,9 @@
+ import androidx.compose.foundation.shape.CircleShape
+ import androidx.compose.foundation.shape.RoundedCornerShape
+ import androidx.compose.material.icons.Icons
+-import androidx.compose.material.icons.automirrored.filled.Sort
+-import androidx.compose.material3.DropdownMenu
+-import androidx.compose.material3.DropdownMenuItem
+-import androidx.compose.material3.FilledIconButton
+ import androidx.compose.material3.IconButton
+-import androidx.compose.material3.IconButtonDefaults
+ import androidx.compose.material.icons.filled.Add
+ import androidx.compose.material.icons.filled.Album
+-import androidx.compose.material.icons.filled.Check
+-import androidx.compose.material.icons.filled.Close
+-import androidx.compose.material.icons.filled.FilterList
+ import androidx.compose.material.icons.filled.Delete
+ import androidx.compose.material.icons.filled.Download
+ import androidx.compose.material.icons.filled.DownloadDone
+@@ -92,8 +84,6 @@
+ import androidx.compose.ui.Alignment
+ import androidx.compose.ui.Modifier
+ import androidx.compose.ui.draw.clip
+-import androidx.compose.ui.focus.FocusRequester
+-import androidx.compose.ui.focus.focusRequester
+ import androidx.compose.ui.graphics.Brush
+ import androidx.compose.ui.graphics.Color
+ import androidx.compose.ui.graphics.vector.ImageVector
+@@ -167,7 +157,6 @@
+             state = state,
+             importState = importState,
+             onShuffleLibrary = viewModel::shuffleLibrary,
+-            onPlayLibrary = viewModel::playLibrary,
+             onTabSelected = viewModel::selectTab,
+             onSearchQueryChanged = viewModel::setSearchQuery,
+             onSortOrderChanged = viewModel::setSortOrder,
+@@ -190,7 +179,6 @@
+             onStartImport = viewModel::startLocalImport,
+             onCancelImport = viewModel::cancelLocalImport,
+             onDismissImport = viewModel::dismissLocalImport,
+-            onUpgradeDownloadedNonFlac = viewModel::upgradeDownloadedNonFlacToFlac,
+             selection = selection,
+             likedTracks = likedTracks,
+             likedFilter = likedFilter,
+@@ -337,7 +325,6 @@
+     state: LibraryUiState,
+     importState: com.stash.data.download.files.LocalImportState,
+     onShuffleLibrary: () -> Unit,
+-    onPlayLibrary: () -> Unit,
+     onTabSelected: (LibraryTab) -> Unit,
+     onSearchQueryChanged: (String) -> Unit,
+     onSortOrderChanged: (SortOrder) -> Unit,
+@@ -360,7 +347,6 @@
+     onStartImport: (List<Uri>) -> Unit,
+     onCancelImport: () -> Unit,
+     onDismissImport: () -> Unit,
+-    onUpgradeDownloadedNonFlac: () -> Unit,
+     selection: SelectionState,
+     likedTracks: List<Track>,
+     likedFilter: LikedFilter,
+@@ -442,50 +428,8 @@
+             state = importState,
+             onCancel = onCancelImport,
+             onDismiss = onDismissImport,
+-        )
+-
+-        Spacer(modifier = Modifier.height(12.dp))
+-
+-        // -- Compact controls row: play + shuffle on the left, expanding
+-        // search + sort menu + filter menu on the right. Replaces the old
+-        // stack (shuffle card → search bar → sort chips → filter chips) that
+-        // ate roughly half the screen before any content showed.
+-        LibraryControlsBar(
+-            searchQuery = state.searchQuery,
+-            activeSort = state.sortOrder,
+-            activeFilter = state.sourceFilter,
+-            onPlayLibrary = onPlayLibrary,
+-            onShuffleLibrary = onShuffleLibrary,
+-            onSearchQueryChanged = onSearchQueryChanged,
+-            onSortSelected = onSortOrderChanged,
+-            onFilterSelected = onSourceFilterChanged,
+-            modifier = Modifier.padding(horizontal = 20.dp),
+-        )
+-
+-        if (
+-            state.activeTab == LibraryTab.TRACKS &&
+-            state.sourceFilter == SourceFilter.NON_FLAC &&
+-            (state.downloadedNonFlacCount > 0 || state.flacUpgrade.isRunning)
+-        ) {
+-            Spacer(modifier = Modifier.height(10.dp))
+-            BulkFlacUpgradeStrip(
+-                count = state.downloadedNonFlacCount,
+-                progress = state.flacUpgrade,
+-                onUpgrade = onUpgradeDownloadedNonFlac,
+-                modifier = Modifier.padding(horizontal = 20.dp),
+-            )
+-        }
+-
+-        Spacer(modifier = Modifier.height(12.dp))
+-
+-        // -- Tab chips (horizontal scroll) — kept as-is --
+-        TabChipRow(
+-            activeTab = state.activeTab,
+-            onTabSelected = onTabSelected,
+         )
+ 
+-        Spacer(modifier = Modifier.height(8.dp))
+-
+         // -- Inline search (toggled by the header 🔍) — no permanent bar --
+         if (searchOpen) {
+             GlassSearchBar(
+@@ -603,83 +547,13 @@
+                         onPlayAlbum = onPlayAlbum,
+                         onAddAlbumToQueue = onAddAlbumToQueue,
+                         header = {},
+-                    )
+-                }
+-            }
+-        }
+-    }
+-}
+-
+-@Composable
+-private fun BulkFlacUpgradeStrip(
+-    count: Int,
+-    progress: FlacUpgradeUiState,
+-    onUpgrade: () -> Unit,
+-    modifier: Modifier = Modifier,
+-) {
+-    val extendedColors = StashTheme.extendedColors
+-    Surface(
+-        modifier = modifier.fillMaxWidth(),
+-        color = extendedColors.glassBackground,
+-        shape = RoundedCornerShape(12.dp),
+-        border = BorderStroke(1.dp, extendedColors.glassBorder),
+-    ) {
+-        Row(
+-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+-            verticalAlignment = Alignment.CenterVertically,
+-            horizontalArrangement = Arrangement.spacedBy(12.dp),
+-        ) {
+-            Column(modifier = Modifier.weight(1f)) {
+-                Text(
+-                    text = if (progress.isRunning) {
+-                        "Finding FLAC ${progress.progressText}"
+-                    } else {
+-                        "$count downloaded non-FLAC ${if (count == 1) "song" else "songs"}"
+-                    },
+-                    style = MaterialTheme.typography.bodyMedium,
+-                    fontWeight = FontWeight.SemiBold,
+-                    color = MaterialTheme.colorScheme.onSurface,
+-                    maxLines = 1,
+-                    overflow = TextOverflow.Ellipsis,
+-                )
+-                Text(
+-                    text = if (progress.isRunning) {
+-                        "Existing files are replaced as matches finish."
+-                    } else {
+-                        "Redownload all existing lossy downloads through Find in FLAC."
+-                    },
+-                    style = MaterialTheme.typography.bodySmall,
+-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+-                    maxLines = 2,
+-                    overflow = TextOverflow.Ellipsis,
+-                )
+-            }
+-
+-            androidx.compose.material3.FilledTonalButton(
+-                onClick = onUpgrade,
+-                enabled = !progress.isRunning && count > 0,
+-                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+-            ) {
+-                if (progress.isRunning) {
+-                    CircularProgressIndicator(
+-                        modifier = Modifier.size(18.dp),
+-                        strokeWidth = 2.dp,
+                     )
+-                } else {
+-                    Icon(
+-                        imageVector = Icons.Default.Download,
+-                        contentDescription = null,
+-                        modifier = Modifier.size(18.dp),
+-                    )
+                 }
+-                Spacer(modifier = Modifier.width(6.dp))
+-                Text("Find FLAC")
+             }
+         }
+     }
+ }
+ 
+-// ── Compact controls bar ─────────────────────────────────────────────────────
+ // ── Recently downloaded rail ─────────────────────────────────────────────────
+ 
+ @Composable
+@@ -765,244 +639,51 @@
+ 
+ // ── Search bar ───────────────────────────────────────────────────────────────
+ 
+-/**
+- * Single-row control strip for the Library: a Spotify-style filled Play
+- * button and a shuffle icon on the left; a search icon (which expands into
+- * a full-width field), a sort menu, and a source-filter menu on the right.
+- *
+- * Replaces the previous four stacked full-width controls so the track list
+- * starts near the top of the screen. The tab chips (Playlists / Tracks /
+- * Artists / Albums) stay as their own row below this.
+- */
+-@OptIn(ExperimentalMaterial3Api::class)
+ @Composable
+-private fun LibraryControlsBar(
+-    searchQuery: String,
+-    activeSort: SortOrder,
+-    activeFilter: SourceFilter,
+-    onPlayLibrary: () -> Unit,
+-    onShuffleLibrary: () -> Unit,
+-    onSearchQueryChanged: (String) -> Unit,
+-    onSortSelected: (SortOrder) -> Unit,
+-    onFilterSelected: (SourceFilter) -> Unit,
++private fun GlassSearchBar(
++    query: String,
++    onQueryChange: (String) -> Unit,
+     modifier: Modifier = Modifier,
+ ) {
+     val extendedColors = StashTheme.extendedColors
+-    var searchExpanded by remember { mutableStateOf(false) }
+-    var sortMenuOpen by remember { mutableStateOf(false) }
+-    var filterMenuOpen by remember { mutableStateOf(false) }
+ 
+-    if (searchExpanded) {
+-        // -- Expanded search field (full width, auto-focused) --
+-        val focusRequester = remember { FocusRequester() }
+-        LaunchedEffect(Unit) { focusRequester.requestFocus() }
+-        Surface(
+-            modifier = modifier
+-                .fillMaxWidth()
+-                .clip(RoundedCornerShape(16.dp)),
+-            color = extendedColors.glassBackground,
+-            shape = RoundedCornerShape(16.dp),
+-            border = BorderStroke(1.dp, extendedColors.glassBorder),
+-        ) {
+-            TextField(
+-                value = searchQuery,
+-                onValueChange = onSearchQueryChanged,
+-                placeholder = { Text("Search library...", color = extendedColors.textTertiary) },
+-                leadingIcon = {
+-                    Icon(Icons.Default.Search, contentDescription = "Search", tint = extendedColors.textTertiary)
+-                },
+-                trailingIcon = {
+-                    IconButton(onClick = {
+-                        onSearchQueryChanged("")
+-                        searchExpanded = false
+-                    }) {
+-                        Icon(Icons.Default.Close, contentDescription = "Close search", tint = extendedColors.textTertiary)
+-                    }
+-                },
+-                singleLine = true,
+-                colors = TextFieldDefaults.colors(
+-                    focusedContainerColor = Color.Transparent,
+-                    unfocusedContainerColor = Color.Transparent,
+-                    cursorColor = MaterialTheme.colorScheme.primary,
+-                    focusedIndicatorColor = Color.Transparent,
+-                    unfocusedIndicatorColor = Color.Transparent,
+-                    focusedTextColor = MaterialTheme.colorScheme.onBackground,
+-                    unfocusedTextColor = MaterialTheme.colorScheme.onBackground,
+-                ),
+-                modifier = Modifier
+-                    .fillMaxWidth()
+-                    .focusRequester(focusRequester),
+-            )
+-        }
+-        return
+-    }
+-
+-    Row(
+-        modifier = modifier.fillMaxWidth(),
+-        verticalAlignment = Alignment.CenterVertically,
+-        horizontalArrangement = Arrangement.spacedBy(4.dp),
++    Surface(
++        modifier = modifier
++            .fillMaxWidth()
++            .clip(RoundedCornerShape(16.dp)),
++        color = extendedColors.glassBackground,
++        shape = RoundedCornerShape(16.dp),
++        border = BorderStroke(1.dp, extendedColors.glassBorder),
+     ) {
+-        // -- Play (filled circular, primary) --
+-        FilledIconButton(
+-            onClick = onPlayLibrary,
+-            modifier = Modifier.size(48.dp),
+-            colors = IconButtonDefaults.filledIconButtonColors(
+-                containerColor = MaterialTheme.colorScheme.primary,
+-                contentColor = Color.White,
+-            ),
+-        ) {
+-            Icon(Icons.Filled.PlayArrow, contentDescription = "Play library", modifier = Modifier.size(26.dp))
+-        }
+-
+-        // -- Shuffle (icon only) --
+-        IconButton(onClick = onShuffleLibrary) {
+-            Icon(
+-                Icons.Filled.Shuffle,
+-                contentDescription = "Shuffle library",
+-                tint = MaterialTheme.colorScheme.onBackground,
+-            )
+-        }
+-
+-        Spacer(modifier = Modifier.weight(1f))
+-
+-        // -- Search (collapses to icon, expands on tap) --
+-        IconButton(onClick = { searchExpanded = true }) {
+-            Icon(
+-                Icons.Default.Search,
+-                contentDescription = "Search",
+-                tint = if (searchQuery.isNotEmpty()) MaterialTheme.colorScheme.primary
+-                else MaterialTheme.colorScheme.onBackground,
+-            )
+-        }
+-
+-        // -- Sort menu --
+-        Box {
+-            IconButton(onClick = { sortMenuOpen = true }) {
+-                Icon(
+-                    Icons.AutoMirrored.Filled.Sort,
+-                    contentDescription = "Sort",
+-                    tint = MaterialTheme.colorScheme.onBackground,
++        TextField(
++            value = query,
++            onValueChange = onQueryChange,
++            placeholder = {
++                Text(
++                    "Search library...",
++                    color = extendedColors.textTertiary,
+                 )
+-            }
+-            DropdownMenu(expanded = sortMenuOpen, onDismissRequest = { sortMenuOpen = false }) {
+-                SortOrder.entries.forEach { order ->
+-                    DropdownMenuItem(
+-                        text = { Text(order.displayName()) },
+-                        onClick = {
+-                            onSortSelected(order)
+-                            sortMenuOpen = false
+-                        },
+-                        leadingIcon = {
+-                            if (order == activeSort) {
+-                                Icon(Icons.Default.Check, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+-                            }
+-                        },
+-                    )
+-                }
+-            }
+-        }
+-
+-        // -- Source filter menu (All / YouTube / Spotify / FLAC / Non-FLAC) --
+-        Box {
+-            IconButton(onClick = { filterMenuOpen = true }) {
++            },
++            leadingIcon = {
+                 Icon(
+-                    Icons.Default.FilterList,
+-                    contentDescription = "Filter",
+-                    tint = if (activeFilter != SourceFilter.ALL) MaterialTheme.colorScheme.primary
+-                    else MaterialTheme.colorScheme.onBackground,
++                    imageVector = Icons.Default.Search,
++                    contentDescription = "Search",
++                    tint = extendedColors.textTertiary,
+                 )
+-            }
+-            DropdownMenu(expanded = filterMenuOpen, onDismissRequest = { filterMenuOpen = false }) {
+-                SourceFilter.entries.forEach { filter ->
+-                    DropdownMenuItem(
+-                        text = { Text(filter.displayName()) },
+-                        onClick = {
+-                            onFilterSelected(filter)
+-                            filterMenuOpen = false
+-                        },
+-                        leadingIcon = {
+-                            if (filter == activeFilter) {
+-                                Icon(Icons.Default.Check, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+-                            }
+-                        },
+-                    )
+-                }
+-            }
+-        }
+-    }
+-}
+-
+-// ── Tab chips ────────────────────────────────────────────────────────────────
+-
+-@Composable
+-private fun TabChipRow(
+-    activeTab: LibraryTab,
+-    onTabSelected: (LibraryTab) -> Unit,
+-) {
+-    Row(
+-        modifier = Modifier
+-            .fillMaxWidth()
+-            .horizontalScroll(rememberScrollState())
+-            .padding(horizontal = 20.dp),
+-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+-    ) {
+-        LibraryTab.entries.forEach { tab ->
+-            val isSelected = tab == activeTab
+-            FilterChip(
+-                selected = isSelected,
+-                onClick = { onTabSelected(tab) },
+-                label = {
+-                    Text(
+-                        text = tab.displayName(),
+-                        style = MaterialTheme.typography.labelLarge,
+-                    )
+-                },
+-                colors = FilterChipDefaults.filterChipColors(
+-                    selectedContainerColor = MaterialTheme.colorScheme.primary,
+-                    selectedLabelColor = Color.White,
+-                    containerColor = StashTheme.extendedColors.glassBackground,
+-                    labelColor = MaterialTheme.colorScheme.onSurfaceVariant,
+-                ),
+-                border = FilterChipDefaults.filterChipBorder(
+-                    borderColor = StashTheme.extendedColors.glassBorder,
+-                    selectedBorderColor = MaterialTheme.colorScheme.primary,
+-                    enabled = true,
+-                    selected = isSelected,
+-                ),
+-            )
+-        }
++            },
++            singleLine = true,
++            colors = TextFieldDefaults.colors(
++                focusedContainerColor = Color.Transparent,
++                unfocusedContainerColor = Color.Transparent,
++                cursorColor = MaterialTheme.colorScheme.primary,
++                focusedIndicatorColor = Color.Transparent,
++                unfocusedIndicatorColor = Color.Transparent,
++                focusedTextColor = MaterialTheme.colorScheme.onBackground,
++                unfocusedTextColor = MaterialTheme.colorScheme.onBackground,
++            ),
++            modifier = Modifier.fillMaxWidth(),
++        )
+     }
+-}
+-
+-/** Human-readable label for each tab. */
+-private fun LibraryTab.displayName(): String = when (this) {
+-    LibraryTab.PLAYLISTS -> "Playlists"
+-    LibraryTab.TRACKS -> "Tracks"
+-    LibraryTab.ARTISTS -> "Artists"
+-    LibraryTab.ALBUMS -> "Albums"
+-}
+-
+-// ── Sort + filter menu labels ────────────────────────────────────────────────
+-
+-private fun SortOrder.displayName(): String = when (this) {
+-    SortOrder.RECENT -> "Recently Added"
+-    SortOrder.OLDEST -> "Oldest First"
+-    SortOrder.ALPHABETICAL -> "Title A–Z"
+-    SortOrder.ALPHABETICAL_DESC -> "Title Z–A"
+-    SortOrder.ARTIST -> "Artist"
+-    SortOrder.MOST_PLAYED -> "Most Played"
+-    SortOrder.LEAST_PLAYED -> "Least Played"
+-    SortOrder.LONGEST -> "Longest"
+-    SortOrder.SHORTEST -> "Shortest"
+-    SortOrder.RECENTLY_PLAYED -> "Recently Played"
+-}
+-
+-private fun SourceFilter.displayName(): String = when (this) {
+-    SourceFilter.ALL -> "All"
+-    SourceFilter.YOUTUBE -> "YouTube"
+-    SourceFilter.SPOTIFY -> "Spotify"
+-    SourceFilter.FLAC -> "FLAC"
+-    SourceFilter.NON_FLAC -> "Non-FLAC"
+ }
+ 
+ // ── Local import progress strip ─────────────────────────────────────────────
