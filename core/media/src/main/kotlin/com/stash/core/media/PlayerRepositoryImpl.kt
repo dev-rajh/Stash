@@ -666,11 +666,28 @@ class PlayerRepositoryImpl @Inject constructor(
                     resolved.bitrateKbps?.let { putInt(EXTRA_STREAM_BITRATE, it) }
                     resolved.origin?.let { putString(EXTRA_STREAM_ORIGIN, it) }
                 }
+                // #336 follow-up: upgrade the artwork here too. This refresh
+                // stamps EXTRA_STREAM_CODEC into the session item, which makes
+                // maybeStampCurrentItemQuality's already-stamped guard exit
+                // early when the track starts playing — so a prefetched track
+                // skipped-to from Now Playing kept its video thumbnail
+                // (session AND row) even though the resolve carried the real
+                // cover. Fix it at the source: swap the art on the refreshed
+                // item and persist the row while the cover is in hand.
+                val currentArt = item.mediaMetadata.artworkUri?.toString()
+                val artUpgrade = resolved.coverArtUrl?.takeIf {
+                    it != currentArt &&
+                        (currentArt.isNullOrBlank() ||
+                            com.stash.core.common.ArtUrlUpgrader.isYouTubeVideoThumbnail(currentArt))
+                }
+                val refreshedMeta = item.mediaMetadata.buildUpon().setExtras(newExtras)
+                artUpgrade?.let { art ->
+                    refreshedMeta.setArtworkUri(Uri.parse(art))
+                    persistArtUpgradeAsync(next.id, art)
+                }
                 val refreshed = item.buildUpon()
                     .setUri(resolved.url)
-                    .setMediaMetadata(
-                        item.mediaMetadata.buildUpon().setExtras(newExtras).build(),
-                    )
+                    .setMediaMetadata(refreshedMeta.build())
                     .build()
                 controller.replaceMediaItem(i, refreshed)
                 return true
@@ -679,33 +696,50 @@ class PlayerRepositoryImpl @Inject constructor(
         return false
     }
 
-    override suspend fun shuffleLibrary() {
-        val controller = ensureController() ?: return
-        val all = musicRepository.getAllDownloadedTracks()
-        if (all.isEmpty()) return
+    /**
+     * Guarded, fire-and-forget write of an upgraded album-art URL to the
+     * track row (#336). The row is re-checked inside the write — only
+     * blank or YouTube-video-thumbnail art is replaced — so a stale
+     * session item can never clobber an already-good cover. Shared by the
+     * prefetch refresh above and [maybeStampCurrentItemQuality].
+     */
+    private fun persistArtUpgradeAsync(trackId: Long, art: String) {
+        scope.launch {
+            runCatching {
+                val rowArt = trackDao.getById(trackId)?.albumArtUrl
+                val rowNeedsUpgrade = rowArt.isNullOrBlank() ||
+                    com.stash.core.common.ArtUrlUpgrader.isYouTubeVideoThumbnail(rowArt)
+                if (rowNeedsUpgrade && rowArt != art) {
+                    trackDao.updateAlbumArtUrl(trackId, art)
+                }
+            }
+        }
+    }
 
-        val shuffled = all.shuffled()
+    override suspend fun shuffleLibrary(): Boolean {
+        ensureController() ?: return false
+        // #332: Library is downloaded-only BY DESIGN, and so is its shuffle.
+        // The fix here is the failure mode: the old silent return on an
+        // empty pool read as a dead/stuck button — the caller now gets a
+        // Boolean so the Library screen can say why nothing happened.
+        // Routing through setQueueInternal (instead of the old hand-rolled
+        // toMediaItem+setMediaItems) keeps the logical-queue bookkeeping in
+        // one place.
+        val pool = musicRepository.getAllDownloadedTracks()
+        if (pool.isEmpty()) return false
+
+        val shuffled = pool.shuffled()
         librarySnapshot = shuffled
         libraryShuffleActive = true
         // Mutually exclusive with radio: shuffling the library ends any station.
         radioActive = false
         radioSession = null
         _radioSeedLabel.value = null
-        // Keep the logical queue in lockstep: all-downloaded tracks resolve
-        // 1:1 into the timeline, but a stale logical list from an earlier
-        // setQueue would otherwise hijack the queue display whenever the
-        // playing track happened to be in it.
-        currentQueueTracks = shuffled
-
-        val mediaItems = shuffled.map { it.toMediaItem() }
-        controller.setMediaItems(mediaItems, /* startIndex = */ 0, /* startPositionMs = */ 0L)
-        // Match user expectation: pressing "Shuffle Library" implies shuffle
-        // is on, regardless of the previous toggle state. The Media3 shuffle
-        // mode toggles randomized advance order; we already pre-shuffled the
-        // queue ourselves, so we leave shuffleModeEnabled alone — the queue
-        // we hand to the controller IS the playback order.
-        controller.prepare()
-        controller.play()
+        // setQueueInternal owns the logical-queue bookkeeping and playback
+        // start; the pre-shuffled list IS the playback order, so Media3's
+        // shuffleModeEnabled stays untouched as before.
+        setQueueInternal(shuffled, startIndex = 0, startPositionMs = 0L)
+        return true
     }
 
     override suspend fun startRadio(
@@ -1621,7 +1655,15 @@ class PlayerRepositoryImpl @Inject constructor(
                     com.stash.core.common.ArtUrlUpgrader.isYouTubeVideoThumbnail(currentArt))
         }
         val metaBuilder = item.mediaMetadata.buildUpon().setExtras(newExtras)
-        betterArt?.let { metaBuilder.setArtworkUri(Uri.parse(it)) }
+        betterArt?.let { art ->
+            metaBuilder.setArtworkUri(Uri.parse(art))
+            // #336: persist the upgrade — this stamp used to die with the
+            // session, so Library/queue/playlist rows kept the video
+            // thumbnail forever on queue-driven playback (mixes resolve via
+            // prefetch/LazyResolvingDataSource, which never hit routeStream's
+            // on-stream art swap).
+            persistArtUpgradeAsync(trackId, art)
+        }
         val stamped = item.buildUpon()
             .setMediaMetadata(metaBuilder.build())
             .build()

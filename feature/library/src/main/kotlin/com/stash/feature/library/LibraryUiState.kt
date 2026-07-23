@@ -20,6 +20,9 @@ data class LibraryUiState(
     val tracks: List<Track> = emptyList(),
     val playlists: List<Playlist> = emptyList(),
 
+    /** Recently downloaded tracks — feeds the Songs recently-downloaded rail. */
+    val recentlyAdded: List<Track> = emptyList(),
+
     /** Artists with 2+ tracks, sorted by track count descending. */
     val artists: List<ArtistInfo> = emptyList(),
     /** Artists with exactly 1 track, collapsed by default. */
@@ -34,10 +37,16 @@ data class LibraryUiState(
     val spotifyConnected: Boolean = false,
     val youTubeConnected: Boolean = false,
     val currentlyPlayingTrackId: Long? = null,
+
+    /** Total downloaded songs in the library (unfiltered) — drives the Shuffle hero count. */
+    val librarySongCount: Int = 0,
 )
 
-/** Tabs available in the library browser. */
-enum class LibraryTab { PLAYLISTS, TRACKS, ARTISTS, ALBUMS }
+/** Tabs available in the library browser. LIKED sits between Songs and Playlists. */
+enum class LibraryTab { PLAYLISTS, TRACKS, LIKED, ARTISTS, ALBUMS }
+
+/** Source sift for the Liked subcategory: all likes, or one origin. */
+enum class LikedFilter { ALL, STASH, SPOTIFY, YOUTUBE }
 
 /**
  * Sort options applicable to every content tab. Track-centric fields

@@ -9,6 +9,11 @@ import com.stash.core.data.repository.MusicRepository
 import com.stash.core.media.PlayerRepository
 import com.stash.core.model.MusicSource
 import com.stash.core.model.UpgradeResult
+import com.stash.core.data.prefs.StreamingPreference
+import com.stash.core.data.repository.MusicRepository
+import com.stash.core.media.PlayerRepository
+import com.stash.core.model.MusicSource
+import com.stash.core.model.PlaylistType
 import com.stash.data.download.files.LocalImportCoordinator
 import com.stash.data.download.files.LocalImportState
 import com.stash.core.model.Playlist
@@ -17,7 +22,11 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -38,6 +47,12 @@ import javax.inject.Inject
  */
 private val LOSSLESS_CODECS = setOf("flac", "alac", "wav", "ape", "tta", "wv", "aiff")
 
+/** Shared track search predicate — every Library list matches title/artist/album. */
+private fun Track.matchesQuery(query: String): Boolean =
+    title.lowercase().contains(query) ||
+        artist.lowercase().contains(query) ||
+        album.lowercase().contains(query)
+
 /**
  * ViewModel for the Library screen.
  *
@@ -56,6 +71,7 @@ class LibraryViewModel @Inject constructor(
     private val playlistImageHelper: PlaylistImageHelper,
     private val localImportCoordinator: LocalImportCoordinator,
     private val losslessUpgrader: LosslessUpgrader,
+    private val streamingPreference: StreamingPreference,
 ) : ViewModel() {
 
     /** Live progress for "Import from device". Observed by LibraryScreen. */
@@ -93,20 +109,35 @@ class LibraryViewModel @Inject constructor(
     }
 
     /**
+     * Playlists + recently-downloaded folded into ONE holder so the base
+     * `uiState` combine stays within Kotlin's 5-arg typed limit and observes
+     * `getAllPlaylists()` exactly once (it's read back out of this holder).
+     */
+    private val libraryDataFlow = combine(
+        musicRepository.getAllPlaylists(),
+        musicRepository.getRecentlyAdded(20),
+    ) { playlists, recentlyAdded ->
+        LibraryData(playlists = playlists, recentlyAdded = recentlyAdded)
+    }
+
+    /**
      * Combined UI state that reacts to both data changes and user interactions.
      */
     val uiState: StateFlow<LibraryUiState> = combine(
         _controls,
         musicRepository.getAllTracks(),
-        musicRepository.getAllPlaylists(),
+        libraryDataFlow,
         musicRepository.getAllArtists(),
         musicRepository.getAllAlbums(),
-    ) { controls, allTracks, allPlaylists, allArtists, allAlbums ->
-        DataSnapshot(controls, allTracks, allPlaylists, allArtists, allAlbums)
+    ) { controls, allTracks, libraryData, allArtists, allAlbums ->
+        DataSnapshot(controls, allTracks, libraryData, allArtists, allAlbums)
     }.combine(authStateFlow) { snapshot, authPair ->
         val controls = snapshot.controls
         val allTracks = snapshot.allTracks
-        val allPlaylists = snapshot.allPlaylists
+        val libraryData = snapshot.libraryData
+        // Playlists tab shows user (CUSTOM) playlists only — mixes and Liked
+        // Songs live on Home now, so surfacing them here would double them up.
+        val allPlaylists = libraryData.playlists.filter { it.type == PlaylistType.CUSTOM }
         val allArtists = snapshot.allArtists
         val allAlbums = snapshot.allAlbums
 
@@ -130,9 +161,7 @@ class LibraryViewModel @Inject constructor(
 
         // -- Apply client-side search filter --
         val filteredTracks = if (query.isEmpty()) sourceFiltered else sourceFiltered.filter {
-            it.title.lowercase().contains(query)
-                    || it.artist.lowercase().contains(query)
-                    || it.album.lowercase().contains(query)
+            it.matchesQuery(query)
         }
         val filteredPlaylists = if (query.isEmpty()) allPlaylists else allPlaylists.filter {
             it.name.lowercase().contains(query)
@@ -207,6 +236,7 @@ class LibraryViewModel @Inject constructor(
             downloadedNonFlacCount = allTracks.count { it.isDownloaded && !it.isLosslessDownload() },
             tracks = sortedTracks,
             playlists = sortedPlaylists,
+            recentlyAdded = libraryData.recentlyAdded,
             artists = multiTrackArtists,
             singleTrackArtists = singleTrackArtists,
             albums = multiTrackAlbums,
@@ -214,6 +244,9 @@ class LibraryViewModel @Inject constructor(
             isLoading = false,
             spotifyConnected = authPair.first,
             youTubeConnected = authPair.second,
+            // Unfiltered library size for the Shuffle hero (independent of the
+            // active source/search filter, which only narrows the visible list).
+            librarySongCount = allTracks.size,
         )
     }.combine(playerRepository.playerState) { libraryState, playerState ->
         // Overlay the currently-playing track ID so the UI can highlight it.
@@ -227,6 +260,68 @@ class LibraryViewModel @Inject constructor(
         started = SharingStarted.WhileSubscribed(5_000),
         initialValue = LibraryUiState(),
     )
+
+    // ── Liked subcategory (browse + sift likes by origin) ────────────────
+
+    private val _likedFilter = MutableStateFlow(LikedFilter.ALL)
+    val likedFilter: StateFlow<LikedFilter> = _likedFilter.asStateFlow()
+    fun setLikedFilter(filter: LikedFilter) { _likedFilter.update { filter } }
+
+    private val stashLikedFlow = musicRepository.getPlaylistsByType(PlaylistType.STASH_LIKED)
+    private val externalLikedFlow = musicRepository.getPlaylistsByType(PlaylistType.LIKED_SONGS)
+
+    /** Which like-origins actually have songs — drives the sift chips' visibility. */
+    val likedSources: StateFlow<Set<LikedFilter>> =
+        combine(stashLikedFlow, externalLikedFlow) { stash, external ->
+            buildSet {
+                if (stash.any { it.trackCount > 0 }) add(LikedFilter.STASH)
+                if (external.any { (it.source == MusicSource.SPOTIFY || it.source == MusicSource.BOTH) && it.trackCount > 0 }) {
+                    add(LikedFilter.SPOTIFY)
+                }
+                if (external.any { it.source == MusicSource.YOUTUBE && it.trackCount > 0 }) add(LikedFilter.YOUTUBE)
+            }
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptySet())
+
+    /**
+     * Liked tracks for the current [likedFilter], de-duped across the liked
+     * playlists, then narrowed by the header search query — the Liked tab
+     * used to be the one list [ControlState.searchQuery] never reached
+     * (issue #293: searching on Liked kept showing the full list).
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val likedTracks: StateFlow<List<Track>> =
+        combine(stashLikedFlow, externalLikedFlow, _likedFilter) { stash, external, filter ->
+            when (filter) {
+                LikedFilter.ALL -> stash + external
+                LikedFilter.STASH -> stash
+                LikedFilter.SPOTIFY -> external.filter { it.source == MusicSource.SPOTIFY || it.source == MusicSource.BOTH }
+                LikedFilter.YOUTUBE -> external.filter { it.source == MusicSource.YOUTUBE }
+            }
+        }.flatMapLatest { playlists ->
+            if (playlists.isEmpty()) {
+                flowOf(emptyList())
+            } else {
+                combine(playlists.map { musicRepository.getTracksByPlaylist(it.id) }) { arrays ->
+                    arrays.flatMap { it.toList() }.distinctBy { it.id }
+                }
+            }
+        }.let { likedFlow ->
+            combine(likedFlow, _controls) { tracks, controls ->
+                val query = controls.searchQuery.trim().lowercase()
+                if (query.isEmpty()) tracks else tracks.filter { it.matchesQuery(query) }
+            }
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /** Play the liked list starting at [track] (offline-aware, like the detail screen). */
+    fun playLiked(track: Track) {
+        viewModelScope.launch {
+            val all = likedTracks.value
+            val playable = if (streamingPreference.current()) all else all.filter { it.filePath != null }
+            if (playable.isEmpty()) return@launch
+            val index = playable.indexOfFirst { it.id == track.id }.coerceAtLeast(0)
+            playerRepository.setQueue(playable, index)
+        }
+    }
 
     // ── Public actions ───────────────────────────────────────────────────
 
@@ -489,7 +584,9 @@ class LibraryViewModel @Inject constructor(
      */
     fun shuffleLibrary() {
         viewModelScope.launch {
-            playerRepository.shuffleLibrary()
+            if (!playerRepository.shuffleLibrary()) {
+                _userMessages.tryEmit("Nothing downloaded to shuffle yet — download some songs first.")
+            }
         }
     }
 
@@ -577,6 +674,63 @@ class LibraryViewModel @Inject constructor(
         viewModelScope.launch {
             playlistImageHelper.deletePlaylistCoverFile(playlistId)
             musicRepository.updatePlaylistArtUrl(playlistId, null)
+        }
+    }
+
+    // ── Playlist create / delete-preview ─────────────────────────────────
+
+    /**
+     * Preview counts the UI uses in the delete-confirmation dialog:
+     * how many tracks would actually be removed vs. kept due to
+     * protected-playlist membership.
+     */
+    suspend fun previewPlaylistDelete(playlist: Playlist): DeletePreview {
+        val tracks = musicRepository.getTracksByPlaylist(playlist.id).first()
+        var protected = 0
+        for (track in tracks) {
+            // isTrackInProtectedPlaylist returns true if the track is in
+            // Liked Songs / custom playlists OTHER than [playlist]. We
+            // have to do the "other than" filtering here because the DAO
+            // query doesn't exclude the source playlist.
+            val inProtectedElsewhere = musicRepository.isTrackProtectedExcluding(
+                trackId = track.id,
+                excludePlaylistId = playlist.id,
+            )
+            if (inProtectedElsewhere) protected++
+        }
+        return DeletePreview(
+            totalTracks = tracks.size,
+            protectedCount = protected,
+        )
+    }
+
+    private val _lastCascadeSummary =
+        kotlinx.coroutines.flow.MutableSharedFlow<com.stash.core.data.repository.MusicRepository.CascadeRemovalSummary>(
+            extraBufferCapacity = 1,
+            onBufferOverflow = kotlinx.coroutines.channels.BufferOverflow.DROP_OLDEST,
+        )
+    /** One-shot cascade summaries for the delete Snackbar. */
+    val lastCascadeSummary: kotlinx.coroutines.flow.SharedFlow<com.stash.core.data.repository.MusicRepository.CascadeRemovalSummary> =
+        _lastCascadeSummary.asSharedFlow()
+
+    /** Preview counts shown in the playlist-delete confirmation dialog. */
+    data class DeletePreview(
+        val totalTracks: Int,
+        val protectedCount: Int,
+    ) {
+        val willDelete: Int get() = totalTracks - protectedCount
+    }
+
+    /**
+     * Creates a new empty custom playlist with the given [name]. Trims input
+     * and no-ops if the trimmed name is blank. The new playlist will appear
+     * in the Library Playlists section automatically (Room Flow).
+     */
+    fun createPlaylist(name: String) {
+        val trimmed = name.trim()
+        if (trimmed.isBlank()) return
+        viewModelScope.launch {
+            musicRepository.createPlaylist(trimmed)
         }
     }
 
@@ -669,7 +823,17 @@ private data class ControlState(
 private data class DataSnapshot(
     val controls: ControlState,
     val allTracks: List<Track>,
-    val allPlaylists: List<com.stash.core.model.Playlist>,
+    val libraryData: LibraryData,
     val allArtists: List<com.stash.core.data.db.dao.ArtistSummary>,
     val allAlbums: List<com.stash.core.data.db.dao.AlbumSummary>,
+)
+
+/**
+ * Internal holder bundling the playlists with the recently-downloaded tracks
+ * so the base [combine] treats them as one positional arg (and observes
+ * `getAllPlaylists()` exactly once).
+ */
+private data class LibraryData(
+    val playlists: List<Playlist>,
+    val recentlyAdded: List<Track>,
 )

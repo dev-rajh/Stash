@@ -24,9 +24,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -57,9 +60,11 @@ import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.PlaylistAddCheck
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.PlaylistPlay
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Shuffle
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -75,12 +80,15 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -103,6 +111,7 @@ import com.stash.core.model.Track
 import com.stash.core.ui.components.GlassCard
 import com.stash.core.ui.components.SourceIndicator
 import com.stash.core.ui.components.TrackListItem
+import com.stash.core.ui.components.VerticalScrollbar
 import com.stash.core.ui.selection.SelectionAction
 import com.stash.core.ui.selection.SelectionScaffoldOverlay
 import com.stash.core.ui.selection.SelectionState
@@ -131,6 +140,9 @@ fun LibraryScreen(
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val importState by viewModel.localImportState.collectAsStateWithLifecycle()
     val userPlaylists by viewModel.userPlaylists.collectAsStateWithLifecycle(initialValue = emptyList())
+    val likedTracks by viewModel.likedTracks.collectAsStateWithLifecycle()
+    val likedFilter by viewModel.likedFilter.collectAsStateWithLifecycle()
+    val likedSources by viewModel.likedSources.collectAsStateWithLifecycle()
 
     // Multi-select state — Tracks tab only. `isActive` signals out so the host
     // can hide the mini-player (Task 7), and the selection is force-cleared on
@@ -180,6 +192,11 @@ fun LibraryScreen(
             onDismissImport = viewModel::dismissLocalImport,
             onUpgradeDownloadedNonFlac = viewModel::upgradeDownloadedNonFlacToFlac,
             selection = selection,
+            likedTracks = likedTracks,
+            likedFilter = likedFilter,
+            likedSources = likedSources,
+            onSelectLikedSource = viewModel::setLikedFilter,
+            onPlayLikedTrack = viewModel::playLiked,
         )
 
         // ── Selection chrome — only meaningful on the Tracks tab. Selection
@@ -314,6 +331,7 @@ fun LibraryScreen(
 
 // ── Stateless content composable ─────────────────────────────────────────────
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun LibraryContent(
     state: LibraryUiState,
@@ -344,6 +362,11 @@ private fun LibraryContent(
     onDismissImport: () -> Unit,
     onUpgradeDownloadedNonFlac: () -> Unit,
     selection: SelectionState,
+    likedTracks: List<Track>,
+    likedFilter: LikedFilter,
+    likedSources: Set<LikedFilter>,
+    onSelectLikedSource: (LikedFilter) -> Unit,
+    onPlayLikedTrack: (Track) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -362,10 +385,34 @@ private fun LibraryContent(
         ) { uris: List<Uri>? ->
             if (!uris.isNullOrEmpty()) onStartImport(uris)
         }
+        var searchOpen by remember { mutableStateOf(false) }
+        var sortFilterOpen by remember { mutableStateOf(false) }
+
+        // Recent-downloads rail — the scrolling leading content of the Songs
+        // landing (scrolls away while the compact header + category chips stay
+        // pinned). The old purple shuffle hero is gone — it duplicated the
+        // header's shuffle action.
+        // Songs landing only — noise above the other grids. Handed ONLY to
+        // TracksTab: with the pager, neighbor pages compose mid-swipe, so
+        // gating on activeTab here would flash the rail onto other pages.
+        val libraryHeader: @Composable () -> Unit = {
+            Column {
+                if (state.recentlyAdded.isNotEmpty()) {
+                    RecentlyDownloadedRail(
+                        tracks = state.recentlyAdded.take(12),
+                        onTrackClick = onTrackClick,
+                    )
+                }
+                Spacer(Modifier.height(4.dp))
+            }
+        }
+
+        // Compact header: title + Import (+), search, and sort/filter icons —
+        // replaces the old heading row + the six stacked control bars.
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 20.dp),
+                .padding(start = 20.dp, end = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
@@ -374,27 +421,19 @@ private fun LibraryContent(
                 color = MaterialTheme.colorScheme.onBackground,
                 modifier = Modifier.weight(1f),
             )
-            // Filled-tonal button (icon + label) instead of a ghost
-            // IconButton — users were missing the plain '+' too easily. The
-            // tonal background + "Import" word makes the affordance obvious
-            // without dominating the heading row.
-            androidx.compose.material3.FilledTonalButton(
-                onClick = { importPicker.launch(arrayOf("audio/*")) },
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(
-                    horizontal = 14.dp,
-                    vertical = 8.dp,
-                ),
-            ) {
-                Icon(
-                    imageVector = androidx.compose.material.icons.Icons.Filled.Add,
-                    contentDescription = null,
-                    modifier = Modifier.size(18.dp),
-                )
-                Spacer(modifier = Modifier.width(6.dp))
-                Text(
-                    text = "Import",
-                    style = MaterialTheme.typography.labelLarge,
-                )
+            // Shuffle stays in the always-visible header so it's reachable even
+            // once the hero has scrolled away.
+            IconButton(onClick = onShuffleLibrary) {
+                Icon(Icons.Filled.Shuffle, contentDescription = "Shuffle library", tint = MaterialTheme.colorScheme.primary)
+            }
+            IconButton(onClick = { importPicker.launch(arrayOf("audio/*")) }) {
+                Icon(Icons.Filled.Add, contentDescription = "Import tracks")
+            }
+            IconButton(onClick = { searchOpen = !searchOpen }) {
+                Icon(Icons.Filled.Search, contentDescription = "Search library")
+            }
+            IconButton(onClick = { sortFilterOpen = true }) {
+                Icon(Icons.Filled.Tune, contentDescription = "Sort and filter")
             }
         }
 
@@ -447,6 +486,44 @@ private fun LibraryContent(
 
         Spacer(modifier = Modifier.height(8.dp))
 
+        // -- Inline search (toggled by the header 🔍) — no permanent bar --
+        if (searchOpen) {
+            GlassSearchBar(
+                query = state.searchQuery,
+                onQueryChange = onSearchQueryChanged,
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
+            )
+        }
+
+        // -- Category chips (pinned): Songs / Playlists / Artists / Albums --
+        val chipTabs = listOf(
+            "Songs" to LibraryTab.TRACKS,
+            "Liked" to LibraryTab.LIKED,
+            "Playlists" to LibraryTab.PLAYLISTS,
+            "Artists" to LibraryTab.ARTISTS,
+            "Albums" to LibraryTab.ALBUMS,
+        )
+        com.stash.core.ui.components.CrispChipRow(
+            chips = chipTabs.map { it.first },
+            selected = chipTabs.first { it.second == state.activeTab }.first,
+            onSelect = { label -> onTabSelected(chipTabs.first { it.first == label }.second) },
+            modifier = Modifier.padding(vertical = 4.dp),
+        )
+
+        Spacer(modifier = Modifier.height(4.dp))
+
+        // -- Sort & filter sheet (toggled by the header ⇅) --
+        if (sortFilterOpen) {
+            LibrarySortFilterSheet(
+                sortOrder = state.sortOrder,
+                sourceFilter = state.sourceFilter,
+                showDuration = state.activeTab == LibraryTab.TRACKS,
+                onSortSelected = onSortOrderChanged,
+                onFilterSelected = onSourceFilterChanged,
+                onDismiss = { sortFilterOpen = false },
+            )
+        }
+
         // -- Content area --
         val anyServiceConnected = state.spotifyConnected || state.youTubeConnected
         if (state.isLoading) {
@@ -459,42 +536,75 @@ private fun LibraryContent(
                 CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
             }
         } else {
-            when (state.activeTab) {
-                LibraryTab.PLAYLISTS -> PlaylistsGrid(
-                    playlists = state.playlists,
-                    anyServiceConnected = anyServiceConnected,
-                    onPlayPlaylist = onPlayPlaylist,
-                    onAddPlaylistToQueue = onAddPlaylistToQueue,
-                    onRemovePlaylist = onRemovePlaylist,
-                    onDeletePlaylist = onDeletePlaylist,
-                    onSetPlaylistImage = onSetPlaylistImage,
-                    onRemovePlaylistImage = onRemovePlaylistImage,
-                )
-                LibraryTab.TRACKS -> TracksTab(
-                    tracks = state.tracks,
-                    currentlyPlayingTrackId = state.currentlyPlayingTrackId,
-                    onTrackClick = onTrackClick,
-                    onPlayNext = onPlayNext,
-                    onAddToQueue = onAddToQueue,
-                    onDeleteTrack = onDeleteTrack,
-                    anyServiceConnected = anyServiceConnected,
-                    selection = selection,
-                )
-                LibraryTab.ARTISTS -> ArtistsGrid(
-                    artists = state.artists,
-                    singleTrackArtists = state.singleTrackArtists,
-                    anyServiceConnected = anyServiceConnected,
-                    onPlayArtist = onPlayArtist,
-                    onAddArtistToQueue = onAddArtistToQueue,
-                    onDeleteArtist = onDeleteArtist,
-                )
-                LibraryTab.ALBUMS -> AlbumsGrid(
-                    albums = state.albums,
-                    singleTrackAlbums = state.singleTrackAlbums,
-                    anyServiceConnected = anyServiceConnected,
-                    onPlayAlbum = onPlayAlbum,
-                    onAddAlbumToQueue = onAddAlbumToQueue,
-                )
+            // Swiping left/right moves between the category pages too — the
+            // pager and the chip row drive the same activeTab state: a chip
+            // tap animates the pager here; a settled swipe pushes the tab
+            // back to the ViewModel (both sync no-ops when already aligned).
+            val pagerState = rememberPagerState(
+                initialPage = chipTabs.indexOfFirst { it.second == state.activeTab }.coerceAtLeast(0),
+            ) { chipTabs.size }
+            LaunchedEffect(state.activeTab) {
+                val idx = chipTabs.indexOfFirst { it.second == state.activeTab }
+                if (idx >= 0 && idx != pagerState.currentPage) pagerState.animateScrollToPage(idx)
+            }
+            LaunchedEffect(pagerState) {
+                snapshotFlow { pagerState.settledPage }.collect { page ->
+                    onTabSelected(chipTabs[page].second)
+                }
+            }
+            HorizontalPager(
+                state = pagerState,
+                modifier = Modifier.fillMaxSize(),
+            ) { page ->
+                when (chipTabs[page].second) {
+                    LibraryTab.PLAYLISTS -> PlaylistsGrid(
+                        playlists = state.playlists,
+                        anyServiceConnected = anyServiceConnected,
+                        onPlayPlaylist = onPlayPlaylist,
+                        onAddPlaylistToQueue = onAddPlaylistToQueue,
+                        onRemovePlaylist = onRemovePlaylist,
+                        onDeletePlaylist = onDeletePlaylist,
+                        onSetPlaylistImage = onSetPlaylistImage,
+                        onRemovePlaylistImage = onRemovePlaylistImage,
+                        header = {},
+                    )
+                    LibraryTab.TRACKS -> TracksTab(
+                        tracks = state.tracks,
+                        currentlyPlayingTrackId = state.currentlyPlayingTrackId,
+                        onTrackClick = onTrackClick,
+                        onPlayNext = onPlayNext,
+                        onAddToQueue = onAddToQueue,
+                        onDeleteTrack = onDeleteTrack,
+                        anyServiceConnected = anyServiceConnected,
+                        selection = selection,
+                        header = libraryHeader,
+                    )
+                    LibraryTab.LIKED -> LikedTab(
+                        tracks = likedTracks,
+                        filter = likedFilter,
+                        sources = likedSources,
+                        currentlyPlayingTrackId = state.currentlyPlayingTrackId,
+                        onSelectSource = onSelectLikedSource,
+                        onTrackClick = onPlayLikedTrack,
+                    )
+                    LibraryTab.ARTISTS -> ArtistsGrid(
+                        artists = state.artists,
+                        singleTrackArtists = state.singleTrackArtists,
+                        anyServiceConnected = anyServiceConnected,
+                        onPlayArtist = onPlayArtist,
+                        onAddArtistToQueue = onAddArtistToQueue,
+                        onDeleteArtist = onDeleteArtist,
+                        header = {},
+                    )
+                    LibraryTab.ALBUMS -> AlbumsGrid(
+                        albums = state.albums,
+                        singleTrackAlbums = state.singleTrackAlbums,
+                        anyServiceConnected = anyServiceConnected,
+                        onPlayAlbum = onPlayAlbum,
+                        onAddAlbumToQueue = onAddAlbumToQueue,
+                        header = {},
+                    )
+                }
             }
         }
     }
@@ -570,6 +680,90 @@ private fun BulkFlacUpgradeStrip(
 }
 
 // ── Compact controls bar ─────────────────────────────────────────────────────
+// ── Recently downloaded rail ─────────────────────────────────────────────────
+
+@Composable
+private fun RecentlyDownloadedRail(
+    tracks: List<Track>,
+    onTrackClick: (Track) -> Unit,
+) {
+    Column {
+        Text(
+            text = "RECENTLY DOWNLOADED",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.secondary,
+            modifier = Modifier.padding(start = 20.dp, top = 12.dp, bottom = 8.dp),
+        )
+        LazyRow(
+            contentPadding = PaddingValues(horizontal = 20.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            items(tracks, key = { it.id }) { track ->
+                com.stash.core.ui.components.AlbumSquareCard(
+                    title = track.title,
+                    artist = track.artist,
+                    thumbnailUrl = track.albumArtUrl,
+                    year = null,
+                    isLossless = track.fileFormat.equals("flac", ignoreCase = true),
+                    onClick = { onTrackClick(track) },
+                )
+            }
+        }
+    }
+}
+
+// ── Liked subcategory (browse + sift likes by origin) ───────────────────────
+
+@Composable
+private fun LikedTab(
+    tracks: List<Track>,
+    filter: LikedFilter,
+    sources: Set<LikedFilter>,
+    currentlyPlayingTrackId: Long?,
+    onSelectSource: (LikedFilter) -> Unit,
+    onTrackClick: (Track) -> Unit,
+) {
+    // Sift chips: "All" plus only the origins that actually have likes.
+    val sift = buildList {
+        add("All" to LikedFilter.ALL)
+        if (LikedFilter.STASH in sources) add("Stash" to LikedFilter.STASH)
+        if (LikedFilter.SPOTIFY in sources) add("Spotify" to LikedFilter.SPOTIFY)
+        if (LikedFilter.YOUTUBE in sources) add("YouTube" to LikedFilter.YOUTUBE)
+    }
+    val listState = rememberLazyListState()
+    Box(Modifier.fillMaxSize()) {
+        LazyColumn(state = listState) {
+            // Only offer the sift when there's more than one origin to pick between.
+            if (sift.size > 2) {
+                item {
+                    com.stash.core.ui.components.CrispChipRow(
+                        chips = sift.map { it.first },
+                        selected = sift.firstOrNull { it.second == filter }?.first ?: "All",
+                        onSelect = { label -> onSelectSource(sift.first { it.first == label }.second) },
+                        modifier = Modifier.padding(vertical = 4.dp),
+                    )
+                }
+            }
+            if (tracks.isEmpty()) {
+                item { EmptyTabMessage("No liked songs yet — tap the heart on a track to like it") }
+            }
+            items(tracks, key = { it.id }) { track ->
+                TrackListItem(
+                    track = track,
+                    onClick = { onTrackClick(track) },
+                    isPlaying = track.id == currentlyPlayingTrackId,
+                    onLongPress = {},
+                    selectionActive = false,
+                    selected = false,
+                    onMoreClick = {},
+                )
+            }
+        }
+        VerticalScrollbar(state = listState)
+    }
+}
+
+// ── Search bar ───────────────────────────────────────────────────────────────
 
 /**
  * Single-row control strip for the Library: a Spotify-style filled Play
@@ -923,15 +1117,8 @@ private fun PlaylistsGrid(
     onDeletePlaylist: (Playlist, Boolean) -> Unit,
     onSetPlaylistImage: (Long, Uri) -> Unit,
     onRemovePlaylistImage: (Long) -> Unit,
+    header: @Composable () -> Unit = {},
 ) {
-    if (playlists.isEmpty()) {
-        EmptyTabMessage(
-            if (anyServiceConnected) "Sync your playlists to see them here"
-            else "Connect a service in Settings to see your playlists",
-        )
-        return
-    }
-
     // Playlist selected for the context-menu bottom sheet.
     var selectedPlaylist by remember { mutableStateOf<Playlist?>(null) }
     // Playlist pending delete confirmation.
@@ -948,105 +1135,122 @@ private fun PlaylistsGrid(
         playlistForImagePick = null
     }
 
-    LazyVerticalGrid(
-        columns = GridCells.Fixed(2),
-        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        items(playlists, key = { it.id }) { playlist ->
-            if (playlist.artUrl != null) {
-                // Playlist with artwork: image background + dark overlay
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(140.dp)
-                        .clip(RoundedCornerShape(16.dp))
-                        .combinedClickable(
-                            onClick = { onPlayPlaylist(playlist) },
-                            onLongClick = { selectedPlaylist = playlist },
-                        ),
-                ) {
-                    AsyncImage(
-                        model = playlist.artUrl,
-                        contentDescription = "${playlist.name} artwork",
-                        modifier = Modifier.fillMaxSize(),
-                        contentScale = ContentScale.Crop,
+    val gridState = rememberLazyGridState()
+    Box(Modifier.fillMaxSize()) {
+        LazyVerticalGrid(
+            state = gridState,
+            columns = GridCells.Fixed(2),
+            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            // Full-width leading header (Shuffle hero + recent rail, Songs-tab only).
+            item(span = { androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan) }) {
+                header()
+            }
+            if (playlists.isEmpty()) {
+                item(span = { androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan) }) {
+                    EmptyTabMessage(
+                        if (anyServiceConnected) "Sync your playlists to see them here"
+                        else "Connect a service in Settings to see your playlists",
                     )
-                    // Dark scrim overlay for text legibility
+                }
+            }
+            items(playlists, key = { it.id }) { playlist ->
+                if (playlist.artUrl != null) {
+                    // Playlist with artwork: image background + dark overlay
                     Box(
                         modifier = Modifier
-                            .fillMaxSize()
-                            .background(
-                                Brush.verticalGradient(
-                                    colors = listOf(
-                                        Color.Transparent,
-                                        Color.Black.copy(alpha = 0.7f),
-                                    ),
-                                    startY = 40f,
-                                ),
+                            .fillMaxWidth()
+                            .height(140.dp)
+                            .clip(RoundedCornerShape(16.dp))
+                            .combinedClickable(
+                                onClick = { onPlayPlaylist(playlist) },
+                                onLongClick = { selectedPlaylist = playlist },
                             ),
-                    )
-                    // Text pinned to bottom
-                    Column(
-                        modifier = Modifier
-                            .align(Alignment.BottomStart)
-                            .padding(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
-                        Text(
-                            text = playlist.name,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = Color.White,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
+                        AsyncImage(
+                            model = playlist.artUrl,
+                            contentDescription = "${playlist.name} artwork",
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Crop,
                         )
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            verticalAlignment = Alignment.CenterVertically,
+                        // Dark scrim overlay for text legibility
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(
+                                    Brush.verticalGradient(
+                                        colors = listOf(
+                                            Color.Transparent,
+                                            Color.Black.copy(alpha = 0.7f),
+                                        ),
+                                        startY = 40f,
+                                    ),
+                                ),
+                        )
+                        // Text pinned to bottom
+                        Column(
+                            modifier = Modifier
+                                .align(Alignment.BottomStart)
+                                .padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
                         ) {
-                            SourceIndicator(source = playlist.source)
                             Text(
-                                text = "${playlist.trackCount} tracks",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = Color.White.copy(alpha = 0.8f),
+                                text = playlist.name,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = Color.White,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
                             )
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                SourceIndicator(source = playlist.source)
+                                Text(
+                                    text = "${playlist.trackCount} tracks",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Color.White.copy(alpha = 0.8f),
+                                )
+                            }
                         }
                     }
-                }
-            } else {
-                // No artwork: keep the original GlassCard look
-                GlassCard(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .combinedClickable(
-                            onClick = { onPlayPlaylist(playlist) },
-                            onLongClick = { selectedPlaylist = playlist },
-                        ),
-                ) {
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text(
-                            text = playlist.name,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onBackground,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            SourceIndicator(source = playlist.source)
+                } else {
+                    // No artwork: keep the original GlassCard look
+                    GlassCard(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .combinedClickable(
+                                onClick = { onPlayPlaylist(playlist) },
+                                onLongClick = { selectedPlaylist = playlist },
+                            ),
+                    ) {
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             Text(
-                                text = "${playlist.trackCount} tracks",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                text = playlist.name,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onBackground,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
                             )
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                SourceIndicator(source = playlist.source)
+                                Text(
+                                    text = "${playlist.trackCount} tracks",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
                         }
                     }
                 }
             }
         }
+        VerticalScrollbar(state = gridState)
     }
 
     // ── Context-menu bottom sheet ───────────────────────────────────────
@@ -1216,41 +1420,62 @@ private fun TracksTab(
     onDeleteTrack: (Track, Boolean) -> Unit,
     anyServiceConnected: Boolean,
     selection: SelectionState,
+    header: @Composable () -> Unit = {},
 ) {
     if (tracks.isEmpty()) {
-        EmptyTabMessage(
-            if (anyServiceConnected) "Sync your library to see tracks here"
-            else "Connect a service in Settings to see your tracks",
-        )
+        Column {
+            header()
+            EmptyTabMessage(
+                if (anyServiceConnected) "Sync your library to see tracks here"
+                else "Connect a service in Settings to see your tracks",
+            )
+        }
         return
     }
 
     // Track selected for the context-menu bottom sheet (opened via the ⋮ now;
     // long-press enters multi-select instead).
     var selectedTrack by remember { mutableStateOf<Track?>(null) }
+    // Track whose share sheet is open (fork issue ParaliyzedEvo/Stash#40).
+    var trackToShare by remember { mutableStateOf<Track?>(null) }
+    trackToShare?.let { t ->
+        com.stash.core.ui.components.ShareTrackSheet(
+            title = t.title,
+            artist = t.artist,
+            spotifyUri = t.spotifyUri,
+            youtubeId = t.youtubeId,
+            onDismiss = { trackToShare = null },
+        )
+    }
     // Track pending delete confirmation.
     var trackToDelete by remember { mutableStateOf<Track?>(null) }
 
-    LazyColumn(
-        // While selecting, the mini-player hides (Task 7) but the bottom
-        // selection bar takes its place — pad enough that the last row clears
-        // it in either state.
-        contentPadding = PaddingValues(bottom = if (selection.isActive) 140.dp else 0.dp),
-    ) {
-        items(tracks, key = { it.id }) { track ->
-            TrackListItem(
-                track = track,
-                onClick = {
-                    if (selection.isActive) selection.toggle(track.id)
-                    else onTrackClick(track)
-                },
-                isPlaying = track.id == currentlyPlayingTrackId,
-                onLongPress = { if (!selection.isActive) selection.enter(track.id) },
-                selectionActive = selection.isActive,
-                selected = selection.isSelected(track.id),
-                onMoreClick = { selectedTrack = track },
-            )
+    val listState = rememberLazyListState()
+    Box(Modifier.fillMaxSize()) {
+        LazyColumn(
+            state = listState,
+            // While selecting, the mini-player hides (Task 7) but the bottom
+            // selection bar takes its place — pad enough that the last row clears
+            // it in either state.
+            contentPadding = PaddingValues(bottom = if (selection.isActive) 140.dp else 0.dp),
+        ) {
+            item { header() }
+            items(tracks, key = { it.id }) { track ->
+                TrackListItem(
+                    track = track,
+                    onClick = {
+                        if (selection.isActive) selection.toggle(track.id)
+                        else onTrackClick(track)
+                    },
+                    isPlaying = track.id == currentlyPlayingTrackId,
+                    onLongPress = { if (!selection.isActive) selection.enter(track.id) },
+                    selectionActive = selection.isActive,
+                    selected = selection.isSelected(track.id),
+                    onMoreClick = { selectedTrack = track },
+                )
+            }
         }
+        VerticalScrollbar(state = listState)
     }
 
     // ── Context-menu bottom sheet ───────────────────────────────────────
@@ -1312,6 +1537,14 @@ private fun TracksTab(
                 label = "Add to Queue",
                 onClick = {
                     onAddToQueue(track)
+                    selectedTrack = null
+                },
+            )
+            BottomSheetActionRow(
+                icon = Icons.Default.Share,
+                label = "Share",
+                onClick = {
+                    trackToShare = track
                     selectedTrack = null
                 },
             )
@@ -1436,12 +1669,16 @@ private fun ArtistsGrid(
     onPlayArtist: (String) -> Unit,
     onAddArtistToQueue: (String) -> Unit,
     onDeleteArtist: (String) -> Unit,
+    header: @Composable () -> Unit = {},
 ) {
     if (artists.isEmpty() && singleTrackArtists.isEmpty()) {
-        EmptyTabMessage(
-            if (anyServiceConnected) "Sync your library to see artists here"
-            else "Connect a service in Settings to see your artists",
-        )
+        Column {
+            header()
+            EmptyTabMessage(
+                if (anyServiceConnected) "Sync your library to see artists here"
+                else "Connect a service in Settings to see your artists",
+            )
+        }
         return
     }
 
@@ -1451,106 +1688,112 @@ private fun ArtistsGrid(
 
     val displayList = if (showSingleTrack) artists + singleTrackArtists else artists
 
-    LazyVerticalGrid(
-        columns = GridCells.Fixed(2),
-        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        items(displayList, key = { it.name }) { artist ->
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 8.dp)
-                    .combinedClickable(
-                        onClick = { onPlayArtist(artist.name) },
-                        onLongClick = { selectedArtist = artist },
-                    ),
-            ) {
-                // Album art proxy or gradient circle fallback
-                if (artist.artUrl != null) {
-                    coil3.compose.AsyncImage(
-                        model = artist.artUrl,
-                        contentDescription = null,
-                        modifier = Modifier
-                            .size(72.dp)
-                            .clip(CircleShape),
-                        contentScale = androidx.compose.ui.layout.ContentScale.Crop,
-                    )
-                } else {
-                    val gradientColors = remember(artist.name) {
-                        artistGradient(artist.name)
-                    }
-                    Box(
-                        modifier = Modifier
-                            .size(72.dp)
-                            .clip(CircleShape)
-                            .background(Brush.linearGradient(gradientColors)),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text(
-                            text = artist.name.firstOrNull()
-                                ?.uppercaseChar()?.toString() ?: "?",
-                            style = MaterialTheme.typography.headlineMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = Color.White,
-                        )
-                    }
-                }
-                Text(
-                    text = artist.name,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onBackground,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    textAlign = TextAlign.Center,
-                )
-                Text(
-                    text = "${artist.trackCount} tracks",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
-
-        // Collapsible section for single-track artists
-        if (singleTrackArtists.isNotEmpty()) {
-            item(span = { GridItemSpan(2) }) {
-                Surface(
+    val gridState = rememberLazyGridState()
+    Box(Modifier.fillMaxSize()) {
+        LazyVerticalGrid(
+            state = gridState,
+            columns = GridCells.Fixed(2),
+            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            item(span = { GridItemSpan(maxLineSpan) }) { header() }
+            items(displayList, key = { it.name }) { artist ->
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(vertical = 8.dp)
-                        .clickable { showSingleTrack = !showSingleTrack },
-                    color = StashTheme.extendedColors.glassBackground,
-                    shape = RoundedCornerShape(12.dp),
-                    border = androidx.compose.foundation.BorderStroke(
-                        1.dp, StashTheme.extendedColors.glassBorder,
-                    ),
+                        .combinedClickable(
+                            onClick = { onPlayArtist(artist.name) },
+                            onLongClick = { selectedArtist = artist },
+                        ),
                 ) {
-                    Row(
-                        modifier = Modifier.padding(16.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                    ) {
-                        Text(
-                            text = if (showSingleTrack) "Hide single-track artists"
-                            else "${singleTrackArtists.size} artists with 1 track",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.weight(1f),
-                        )
-                        Icon(
-                            imageVector = if (showSingleTrack) Icons.Default.ExpandLess
-                            else Icons.Default.ExpandMore,
+                    // Album art proxy or gradient circle fallback
+                    if (artist.artUrl != null) {
+                        coil3.compose.AsyncImage(
+                            model = artist.artUrl,
                             contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier
+                                .size(72.dp)
+                                .clip(CircleShape),
+                            contentScale = androidx.compose.ui.layout.ContentScale.Crop,
                         )
+                    } else {
+                        val gradientColors = remember(artist.name) {
+                            artistGradient(artist.name)
+                        }
+                        Box(
+                            modifier = Modifier
+                                .size(72.dp)
+                                .clip(CircleShape)
+                                .background(Brush.linearGradient(gradientColors)),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                text = artist.name.firstOrNull()
+                                    ?.uppercaseChar()?.toString() ?: "?",
+                                style = MaterialTheme.typography.headlineMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White,
+                            )
+                        }
+                    }
+                    Text(
+                        text = artist.name,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onBackground,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        textAlign = TextAlign.Center,
+                    )
+                    Text(
+                        text = "${artist.trackCount} tracks",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+
+            // Collapsible section for single-track artists
+            if (singleTrackArtists.isNotEmpty()) {
+                item(span = { GridItemSpan(2) }) {
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 8.dp)
+                            .clickable { showSingleTrack = !showSingleTrack },
+                        color = StashTheme.extendedColors.glassBackground,
+                        shape = RoundedCornerShape(12.dp),
+                        border = androidx.compose.foundation.BorderStroke(
+                            1.dp, StashTheme.extendedColors.glassBorder,
+                        ),
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(16.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                        ) {
+                            Text(
+                                text = if (showSingleTrack) "Hide single-track artists"
+                                else "${singleTrackArtists.size} artists with 1 track",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Icon(
+                                imageVector = if (showSingleTrack) Icons.Default.ExpandLess
+                                else Icons.Default.ExpandMore,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                     }
                 }
             }
         }
+        VerticalScrollbar(state = gridState)
     }
 
     // ── Context-menu bottom sheet ───────────────────────────────────────
@@ -1649,12 +1892,16 @@ private fun AlbumsGrid(
     anyServiceConnected: Boolean,
     onPlayAlbum: (String, String) -> Unit,
     onAddAlbumToQueue: (String, String) -> Unit,
+    header: @Composable () -> Unit = {},
 ) {
     if (albums.isEmpty() && singleTrackAlbums.isEmpty()) {
-        EmptyTabMessage(
-            if (anyServiceConnected) "Sync your library to see albums here"
-            else "Connect a service in Settings to see your albums",
-        )
+        Column {
+            header()
+            EmptyTabMessage(
+                if (anyServiceConnected) "Sync your library to see albums here"
+                else "Connect a service in Settings to see your albums",
+            )
+        }
         return
     }
 
@@ -1663,113 +1910,119 @@ private fun AlbumsGrid(
 
     val displayList = if (showSingleTrack) albums + singleTrackAlbums else albums
 
-    LazyVerticalGrid(
-        columns = GridCells.Fixed(2),
-        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        items(displayList, key = { "${it.name}|${it.artist}" }) { album ->
-            Column(
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 4.dp)
-                    .combinedClickable(
-                        onClick = { onPlayAlbum(album.name, album.artist) },
-                        onLongClick = { selectedAlbum = album },
-                    ),
-            ) {
-                // Album art: try local path, then remote URL, then fallback icon
-                val artModel = album.artPath ?: album.artUrl
-                Box(
+    val gridState = rememberLazyGridState()
+    Box(Modifier.fillMaxSize()) {
+        LazyVerticalGrid(
+            state = gridState,
+            columns = GridCells.Fixed(2),
+            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            item(span = { GridItemSpan(maxLineSpan) }) { header() }
+            items(displayList, key = { "${it.name}|${it.artist}" }) { album ->
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(120.dp)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(StashTheme.extendedColors.elevatedSurface),
-                    contentAlignment = Alignment.Center,
+                        .padding(vertical = 4.dp)
+                        .combinedClickable(
+                            onClick = { onPlayAlbum(album.name, album.artist) },
+                            onLongClick = { selectedAlbum = album },
+                        ),
                 ) {
-                    if (artModel != null) {
-                        AsyncImage(
-                            model = artModel,
-                            contentDescription = "${album.name} album art",
-                            modifier = Modifier.fillMaxSize(),
-                            contentScale = ContentScale.Crop,
-                        )
-                    } else {
-                        Icon(
-                            imageVector = Icons.Default.Album,
-                            contentDescription = null,
-                            tint = StashTheme.extendedColors.textTertiary,
-                            modifier = Modifier.size(40.dp),
-                        )
+                    // Album art: try local path, then remote URL, then fallback icon
+                    val artModel = album.artPath ?: album.artUrl
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(120.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(StashTheme.extendedColors.elevatedSurface),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        if (artModel != null) {
+                            AsyncImage(
+                                model = artModel,
+                                contentDescription = "${album.name} album art",
+                                modifier = Modifier.fillMaxSize(),
+                                contentScale = ContentScale.Crop,
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.Default.Album,
+                                contentDescription = null,
+                                tint = StashTheme.extendedColors.textTertiary,
+                                modifier = Modifier.size(40.dp),
+                            )
+                        }
                     }
-                }
-                Text(
-                    text = album.name,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onBackground,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
                     Text(
-                        text = album.artist,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        text = album.name,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onBackground,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false),
                     )
-                    Text(
-                        text = "· ${album.trackCount}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-        }
-
-        // Collapsible section for single-track albums
-        if (singleTrackAlbums.isNotEmpty()) {
-            item(span = { GridItemSpan(2) }) {
-                Surface(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 8.dp)
-                        .clickable { showSingleTrack = !showSingleTrack },
-                    color = StashTheme.extendedColors.glassBackground,
-                    shape = RoundedCornerShape(12.dp),
-                    border = androidx.compose.foundation.BorderStroke(
-                        1.dp, StashTheme.extendedColors.glassBorder,
-                    ),
-                ) {
                     Row(
-                        modifier = Modifier.padding(16.dp),
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
                         Text(
-                            text = if (showSingleTrack) "Hide single-track albums"
-                            else "${singleTrackAlbums.size} albums with 1 track",
-                            style = MaterialTheme.typography.bodyMedium,
+                            text = album.artist,
+                            style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.weight(1f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false),
                         )
-                        Icon(
-                            imageVector = if (showSingleTrack) Icons.Default.ExpandLess
-                            else Icons.Default.ExpandMore,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        Text(
+                            text = "· ${album.trackCount}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                 }
             }
+
+            // Collapsible section for single-track albums
+            if (singleTrackAlbums.isNotEmpty()) {
+                item(span = { GridItemSpan(2) }) {
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 8.dp)
+                            .clickable { showSingleTrack = !showSingleTrack },
+                        color = StashTheme.extendedColors.glassBackground,
+                        shape = RoundedCornerShape(12.dp),
+                        border = androidx.compose.foundation.BorderStroke(
+                            1.dp, StashTheme.extendedColors.glassBorder,
+                        ),
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(16.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                        ) {
+                            Text(
+                                text = if (showSingleTrack) "Hide single-track albums"
+                                else "${singleTrackAlbums.size} albums with 1 track",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Icon(
+                                imageVector = if (showSingleTrack) Icons.Default.ExpandLess
+                                else Icons.Default.ExpandMore,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
         }
+        VerticalScrollbar(state = gridState)
     }
 
     // ── Context-menu bottom sheet ───────────────────────────────────────

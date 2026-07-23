@@ -62,6 +62,25 @@ class QbdlxApiClient @Inject constructor(
             runCatching { json.decodeFromString<QbdlxArtistSearchResponse>(body).artists.items }.getOrDefault(emptyList())
         }
 
+    /**
+     * Search the Qobuz catalog for playlists (read-only metadata). Same
+     * `catalog/search` endpoint as tracks/artists — the playlists bucket
+     * shares the featured-playlists envelope. Search is catalog-global:
+     * the endpoint has no genre filter.
+     */
+    suspend fun searchPlaylists(query: String, token: String, limit: Int = 30, offset: Int = 0): List<QbdlxPlaylistItem> =
+        withContext(Dispatchers.IO) {
+            val url = "$baseUrl/api.json/0.2/catalog/search".toHttpUrl().newBuilder()
+                .addQueryParameter("query", query)
+                .addQueryParameter("type", "playlists")
+                .addQueryParameter("limit", limit.toString())
+                .addQueryParameter("offset", offset.toString())
+                .addQueryParameter("app_id", appId)
+                .build()
+            val body = get(url.toString(), token)
+            runCatching { json.decodeFromString<QbdlxFeaturedPlaylistsResponse>(body).playlists.items }.getOrDefault(emptyList())
+        }
+
     /** Fetch an artist's albums (read-only discography metadata). */
     suspend fun getArtistAlbums(artistId: Long, token: String, limit: Int = 100): List<QbdlxAlbumItem> =
         withContext(Dispatchers.IO) {
@@ -85,6 +104,56 @@ class QbdlxApiClient @Inject constructor(
                 .build()
             val body = get(url.toString(), token)
             json.decodeFromString<QbdlxAlbumDetailResponse>(body)
+        }
+
+    /**
+     * Featured albums (`type` = `new-releases-full` / `best-sellers`). Unsigned
+     * GET; [genreId] null = all genres. Reuses the album-list envelope. Read-only.
+     */
+    suspend fun getFeaturedAlbums(type: String, genreId: Int?, token: String, limit: Int = 20): List<QbdlxAlbumItem> =
+        withContext(Dispatchers.IO) {
+            val url = "$baseUrl/api.json/0.2/album/getFeatured".toHttpUrl().newBuilder()
+                .addQueryParameter("type", type)
+                .apply { if (genreId != null) addQueryParameter("genre_id", genreId.toString()) }
+                .addQueryParameter("limit", limit.toString())
+                .addQueryParameter("app_id", appId)
+                .build()
+            val body = get(url.toString(), token)
+            runCatching { json.decodeFromString<QbdlxArtistAlbumsResponse>(body).albums.items }.getOrDefault(emptyList())
+        }
+
+    /**
+     * Featured playlists (editor-picks). Unsigned GET; [genreId] null = all,
+     * [offset] paginates the ~6.3k editorial catalog. Read-only.
+     *
+     * NB: playlists filter on `genre_ids` (PLURAL). The singular `genre_id`
+     * that `album/getFeatured` uses is silently ignored here (returns all
+     * genres) — so this must send the plural form or the genre chips don't
+     * actually filter the playlist row.
+     */
+    suspend fun getFeaturedPlaylists(genreId: Int?, token: String, limit: Int = 15, offset: Int = 0): List<QbdlxPlaylistItem> =
+        withContext(Dispatchers.IO) {
+            val url = "$baseUrl/api.json/0.2/playlist/getFeatured".toHttpUrl().newBuilder()
+                .addQueryParameter("type", "editor-picks")
+                .apply { if (genreId != null) addQueryParameter("genre_ids", genreId.toString()) }
+                .addQueryParameter("limit", limit.toString())
+                .addQueryParameter("offset", offset.toString())
+                .addQueryParameter("app_id", appId)
+                .build()
+            val body = get(url.toString(), token)
+            runCatching { json.decodeFromString<QbdlxFeaturedPlaylistsResponse>(body).playlists.items }.getOrDefault(emptyList())
+        }
+
+    /** Playlist detail incl. its tracks. Unsigned GET (read-only metadata). */
+    suspend fun getPlaylist(playlistId: String, token: String, limit: Int = 500): QbdlxPlaylistDetailResponse =
+        withContext(Dispatchers.IO) {
+            val url = "$baseUrl/api.json/0.2/playlist/get".toHttpUrl().newBuilder()
+                .addQueryParameter("playlist_id", playlistId)
+                .addQueryParameter("extra", "tracks")
+                .addQueryParameter("limit", limit.toString())
+                .addQueryParameter("app_id", appId)
+                .build()
+            json.decodeFromString<QbdlxPlaylistDetailResponse>(get(url.toString(), token))
         }
 
     /** Resolve a track id to a signed FLAC URL, classified. */

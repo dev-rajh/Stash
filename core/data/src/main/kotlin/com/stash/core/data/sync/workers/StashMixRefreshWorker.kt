@@ -42,6 +42,7 @@ import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
 import java.time.Instant
 import java.util.concurrent.TimeUnit
@@ -95,6 +96,9 @@ class StashMixRefreshWorker @AssistedInject constructor(
     companion object {
         private const val TAG = "StashMixRefresh"
         private const val WORK_NAME = "stash_mix_refresh"
+
+        /** Serializes [materializeMix] across concurrent worker instances. */
+        private val materializeMutex = kotlinx.coroutines.sync.Mutex()
         const val ONE_SHOT_WORK_NAME = "stash_mix_refresh_oneshot"
         private const val TOP_ARTISTS_LIMIT = 8
         private const val SIMILAR_REQUEST_INTERVAL_MS = 220L
@@ -128,6 +132,63 @@ class StashMixRefreshWorker @AssistedInject constructor(
 
         /** Timeout for the TAG_GRAPH fallback Last.fm call. */
         private const val SEED_FALLBACK_TIMEOUT_MS = 30_000L
+
+        // ── #287: day-fresh Daily Discover ────────────────────────────────
+        /**
+         * "Yesterday's listening" window that leads the seed chain. Two days,
+         * not one — a calendar-day boundary would empty the window every
+         * morning before the user plays anything.
+         */
+        private val RECENT_LISTENING_LOOKBACK_MS = TimeUnit.HOURS.toMillis(48)
+
+        /** Guaranteed newest slice of the rotated survivor window. */
+        private const val FRESH_HEAD_RATIO = 0.3f
+
+        /** Upper bound on the DONE backlog considered for rotation. */
+        private const val SURVIVOR_POOL_LIMIT = 500
+
+        private val DAY_MS = TimeUnit.DAYS.toMillis(1)
+
+        /**
+         * #287: rotate the discovery-survivor window across the recipe's whole
+         * accepted backlog instead of pinning the newest [cap] forever — the
+         * old newest-first `.take(cap)` meant a refresh with no new DONE rows
+         * recomputed the identical list and the idempotency backstop skipped
+         * the write, so "Refresh" visibly did nothing.
+         *
+         * [pool] arrives newest-first. The newest ~[FRESH_HEAD_RATIO] of the
+         * window is always kept (new finds must surface); the rest is a
+         * seeded shuffle of the remaining backlog. Same [seed] → same window:
+         * manual refreshes pass a per-tap seed (every tap rotates), periodic
+         * runs pass a day bucket (rotates daily, stable within the day so
+         * same-day re-runs still no-op).
+         */
+        internal fun rotateSurvivorWindow(pool: List<Long>, cap: Int, seed: Long): List<Long> {
+            if (cap <= 0) return emptyList()
+            val rnd = kotlin.random.Random(seed)
+            // Small pools rotate their ORDER too — a static order is the same
+            // invisibility bug at smaller scale.
+            if (pool.size <= cap) return pool.shuffled(rnd)
+            val freshHead = (cap * FRESH_HEAD_RATIO).roundToInt().coerceIn(0, cap)
+            val head = pool.take(freshHead)
+            val rest = pool.drop(freshHead).shuffled(rnd)
+            // The freshness guarantee is MEMBERSHIP, not position: pinning the
+            // newest finds at the top froze positions 0..N (and the cover
+            // mosaic = first 4 positions) across refreshes — users watched the
+            // one part of the mix that never moved and read Refresh as a
+            // no-op. Shuffle the final window so position 0 and the art
+            // rotate every seed while new finds stay guaranteed present.
+            return (head + rest.take(cap - head.size)).shuffled(rnd)
+        }
+
+        /**
+         * #287: recent listening leads, older taste backfills — dedup'd,
+         * capped at [limit]. Keeps discovery pointed at what the user played
+         * yesterday without collapsing to a single-artist echo chamber when
+         * the recent window is thin.
+         */
+        internal fun <T> blendRecentFirst(recent: List<T>, fallback: List<T>, limit: Int): List<T> =
+            (recent + fallback.filterNot { it in recent }).take(limit)
 
         /**
          * Input-data key for [enqueueOneTime] (single-recipe overload).
@@ -294,6 +355,11 @@ class StashMixRefreshWorker @AssistedInject constructor(
         val orderedRecipes = active.sortedBy { recipeDedupPriority(it) }
         val excludeIds = mutableSetOf<Long>()
 
+        // #287: manual single-recipe refresh rotates on every tap; periodic
+        // batch runs rotate once per day (stable within the day so the
+        // idempotency backstop still suppresses same-day no-op flashes).
+        val rotationSeed = if (targetId > 0L) now else now / DAY_MS
+
         // v0.9.20 follow-up: single-recipe path needs explicit seeding from the
         // OTHER mixes' current playlist contents. The batch-mode loop accumulates
         // excludeIds naturally as it iterates; the single-element loop has nothing
@@ -329,7 +395,15 @@ class StashMixRefreshWorker @AssistedInject constructor(
                 continue
             }
 
-            val result = materializeMix(recipe, tracks, now, excludeSnapshot)
+            // #287: serialize materialization across worker instances — the
+            // manual single-recipe refresh and the chained batch pass can run
+            // concurrently (separate WorkManager unique chains), and the
+            // clear-then-reinsert membership write is not atomic. Observed on
+            // device: two runs 10s apart interleaved and left Daily Discover
+            // with 25 of 39 rows (and a wrong count) — a torn playlist.
+            val result = materializeMutex.withLock {
+                materializeMix(recipe, tracks, now, excludeSnapshot, rotationSeed)
+            }
             recipeDao.setPlaylistId(recipe.id, result.playlistId)
             recipeDao.setLastRefreshedAt(recipe.id, now)
 
@@ -431,6 +505,7 @@ class StashMixRefreshWorker @AssistedInject constructor(
         tracks: List<TrackEntity>,
         now: Long,
         excludeIds: Set<Long>,
+        rotationSeed: Long,
     ): MaterializeResult {
         // Existing playlist: verify it's still there (could have been
         // deleted by the user). If gone, fall through to re-create.
@@ -500,10 +575,11 @@ class StashMixRefreshWorker @AssistedInject constructor(
         // to preserve the over-fetch headroom semantics from above. ORDER
         // BY completed_at DESC inside the query means .take still slides
         // newest-first.
-        val fetchLimit = discoveryCap * 2 + excludeIds.size
+        // #287: consider the recipe's whole DONE backlog (bounded) instead of
+        // a thin newest-first window — rotation needs breadth to rotate over.
         val rawCandidateIds = playlistDao
             .getStreamableOrDoneTrackIdsForRecipe(recipe.id)
-            .take(fetchLimit)
+            .take(SURVIVOR_POOL_LIMIT)
         val nonLibraryCandidates = rawCandidateIds.filter { it !in librarySet }
         // v0.9.21: soft cross-mix dedup. Prefer survivors not already claimed
         // by an earlier-ordered mix; if dedup leaves us below the cap, backfill
@@ -513,10 +589,21 @@ class StashMixRefreshWorker @AssistedInject constructor(
         // library-only when refreshed after their peers had already grabbed
         // the shared candidates. See conversation 2026-05-12: Deep Cuts had
         // 102 recipe-4 downloaded tracks but 0 discovery survivors.
-        val (preferredIds, sharedIds) = nonLibraryCandidates
+        val (preferredRaw, sharedIds) = nonLibraryCandidates
             .partition { it !in excludeIds }
+        // #287: unheard discoveries outrank repeats — rotation exists to
+        // serve NEW music, so the pool orders unplayed-first (each half
+        // stays newest-first internally; the rotation's guaranteed head is
+        // therefore the newest UNHEARD finds).
+        val playedIds = if (preferredRaw.isEmpty()) {
+            emptySet()
+        } else {
+            listeningEventDao.getPlayedTrackIdsAmong(preferredRaw).toHashSet()
+        }
+        val (unplayedPool, playedPool) = preferredRaw.partition { it !in playedIds }
+        val preferredIds = unplayedPool + playedPool
         val survivorCandidates = if (preferredIds.size >= discoveryCap) {
-            preferredIds.take(discoveryCap)
+            rotateSurvivorWindow(preferredIds, discoveryCap, rotationSeed)
         } else {
             val backfill = sharedIds.take(discoveryCap - preferredIds.size)
             if (backfill.isNotEmpty()) {
@@ -542,7 +629,18 @@ class StashMixRefreshWorker @AssistedInject constructor(
         )
         // The full ordered membership we are about to write: library slice
         // (generator order) followed by discovery survivors.
-        val finalOrderedIds = tracks.map { it.id } + discoveryTrackIds
+        // #287 follow-up: a discovery-led mix leads WITH its discoveries —
+        // fresh finds own the top of the list, the cover mosaic (built from
+        // the first 4 positions), and the first tap of Play. Under the old
+        // library-first order a successful rotation was visually invisible:
+        // same openers, same art, same count — users read Refresh as a no-op.
+        // Library-led mixes keep their library-first order.
+        val discoveryFirst = recipe.discoveryRatio >= 0.5f
+        val finalOrderedIds = if (discoveryFirst) {
+            discoveryTrackIds + tracks.map { it.id }
+        } else {
+            tracks.map { it.id } + discoveryTrackIds
+        }
         val totalCount = finalOrderedIds.size
 
         // v0.9.42: idempotency short-circuit. If the playlist already exists
@@ -584,24 +682,14 @@ class StashMixRefreshWorker @AssistedInject constructor(
             playlistDao.insert(newPlaylist)
         }
 
-        // Rebuild track membership in generator order (library slice first).
+        // Rebuild track membership in the final order computed above.
         val nowInstant = Instant.ofEpochMilli(now)
-        tracks.forEachIndexed { position, track ->
-            playlistDao.insertCrossRef(
-                PlaylistTrackCrossRef(
-                    playlistId = playlistId,
-                    trackId = track.id,
-                    position = position,
-                    addedAt = nowInstant,
-                )
-            )
-        }
-        discoveryTrackIds.forEachIndexed { offset, trackId ->
+        finalOrderedIds.forEachIndexed { position, trackId ->
             playlistDao.insertCrossRef(
                 PlaylistTrackCrossRef(
                     playlistId = playlistId,
                     trackId = trackId,
-                    position = tracks.size + offset,
+                    position = position,
                     addedAt = nowInstant,
                 )
             )
@@ -648,28 +736,36 @@ class StashMixRefreshWorker @AssistedInject constructor(
             return
         }
 
-        val since = System.currentTimeMillis() -
-            AFFINITY_LOOKBACK_DAYS * 24 * 60 * 60 * 1000
+        val nowMs = System.currentTimeMillis()
+        val since = nowMs - AFFINITY_LOOKBACK_DAYS * 24 * 60 * 60 * 1000
+        val recentSince = nowMs - RECENT_LISTENING_LOOKBACK_MS
 
-        // Seed-artist fallback chain. Persona slice (1-month) > local
-        // listening events > library-top-artists. The library fallback
-        // matters for fresh installs that have synced but not yet played
-        // — without it, Stash Discover would be empty until the user
-        // racked up a few scrobbles.
-        val seedArtists = personas.topArtistsByPeriod[LastFmPeriod.ONE_MONTH]
+        // #287: yesterday's listening LEADS the seed chain — a "Daily"
+        // discover should chase what the user actually played in the last
+        // day or two, not a month-old persona. The older-taste tiers
+        // (persona 1-month > local 180d > library-top) become the blend
+        // backfill so a thin recent window never narrows discovery to a
+        // single-artist echo chamber. Recent-first seeds also vary the
+        // Last.fm query keys day to day, which keeps the proxy's edge cache
+        // from pinning the candidate pools for its full TTL.
+        val recentArtists = listeningEventDao
+            .getTopArtistsSince(recentSince, TOP_ARTISTS_LIMIT)
+            .map { it.artist }
+        val affinityArtists = personas.topArtistsByPeriod[LastFmPeriod.ONE_MONTH]
             ?.takeIf { it.isNotEmpty() }
             ?.take(TOP_ARTISTS_LIMIT)?.map { it.name }
             ?: listeningEventDao.getTopArtistsSince(since, TOP_ARTISTS_LIMIT)
                 .map { it.artist }
                 .ifEmpty { trackDao.getTopArtistsByTrackCount(TOP_ARTISTS_LIMIT) }
+        val seedArtists = blendRecentFirst(recentArtists, affinityArtists, TOP_ARTISTS_LIMIT)
 
-        // v0.9.20 PR 8: seedTracks gets the same three-tier fallback chain as
-        // seedArtists. When Last.fm persona top-tracks is empty (sparse
-        // scrobbles, persona fetch race, or 1-month window without enough
-        // data), fall back to local in-app listening events, then to library
-        // top-by-LFM-playcount. Prevents the silent zero-candidate failure
-        // that left Deep Cuts stuck on its library slice in PR 3+.
-        val seedTracks: List<Pair<String, String>> = personas.topTracksByPeriod[LastFmPeriod.ONE_MONTH]
+        // v0.9.20 PR 8: seedTracks gets the same fallback chain as
+        // seedArtists (persona > local events > library top-by-LFM-playcount),
+        // now likewise led by the recent-listening blend.
+        val recentTracks = listeningEventDao
+            .getTopTracksByLocalPlays(recentSince, 20)
+            .map { it.artist to it.title }
+        val affinityTracks: List<Pair<String, String>> = personas.topTracksByPeriod[LastFmPeriod.ONE_MONTH]
             ?.takeIf { it.isNotEmpty() }
             ?.take(20)?.map { it.artist to it.title }
             ?: listeningEventDao.getTopTracksByLocalPlays(since, 20)
@@ -678,6 +774,7 @@ class StashMixRefreshWorker @AssistedInject constructor(
                     trackDao.getTopTracksByLfmPlaycount(20)
                         .map { it.artist to it.title }
                 }
+        val seedTracks = blendRecentFirst(recentTracks, affinityTracks, 20)
 
         val topTags = mixGenerator.computeUserTopTags(limit = 10)
 

@@ -33,6 +33,27 @@ import dagger.assisted.AssistedInject
 import kotlinx.coroutines.flow.first
 
 /**
+ * A newly-discovered playlist's initial [PlaylistEntity.syncEnabled].
+ * Algorithmic mixes (DAILY_MIX) auto-enable in Online mode so they surface
+ * immediately with no download. Everything else — and every playlist in
+ * Offline mode — stays opt-in: the first Sync Now is a discovery pass that
+ * downloads nothing unasked. [online] is the streaming-mode flag (on = stream,
+ * don't download).
+ */
+internal fun defaultSyncEnabled(type: PlaylistType, online: Boolean): Boolean =
+    type == PlaylistType.DAILY_MIX && online
+
+/**
+ * Whether a playlist's tracks should be enqueued for download during this sync.
+ * Online/streaming mode never downloads (tracks stream on tap). In Offline mode
+ * everything downloads EXCEPT algorithmic mixes (DAILY_MIX) — those are
+ * surface-only (stream-on-tap), so an auto-enabled mix never pulls bytes even
+ * after the user switches to Offline and re-syncs.
+ */
+internal fun shouldEnqueueForDownload(type: PlaylistType, streamingMode: Boolean): Boolean =
+    !streamingMode && type != PlaylistType.DAILY_MIX
+
+/**
  * Second worker in the sync chain. Compares remote playlist/track snapshots
  * against the local database to find new tracks that need downloading.
  *
@@ -65,7 +86,24 @@ class DiffWorker @AssistedInject constructor(
         const val KEY_NEW_TRACKS = "new_tracks"
         const val KEY_PLAYLISTS_CHECKED = "playlists_checked"
         private const val TAG = "DiffWorker"
+        private const val NEVER_MATCH_SENTINEL = "\u0000__stash_never_match__"
     }
+
+    /**
+     * Mutable identity state for one playlist batch. Newly discovered tracks
+     * are registered before the bulk insert so duplicate snapshots reuse the
+     * same pending row instead of staging another UNIQUE-key conflict.
+     */
+    private class BatchTrack(
+        var entity: TrackEntity,
+        val isNew: Boolean,
+        var persistedId: Long? = entity.id.takeUnless { isNew },
+    )
+
+    private data class CanonicalKey(
+        val title: String,
+        val artist: String,
+    )
 
     override suspend fun doWork(): Result {
         val syncId = inputData.getLong(PlaylistFetchWorker.KEY_SYNC_ID, -1L)
@@ -107,7 +145,7 @@ class DiffWorker @AssistedInject constructor(
                 // Find or create the local playlist (writes, but outside
                 // the per-playlist transaction — it owns its own atomicity
                 // and needs its id to drive the block below).
-                val localPlaylist = findOrCreatePlaylist(playlistSnapshot)
+                val localPlaylist = findOrCreatePlaylist(playlistSnapshot, streamingMode)
 
                 // Skip playlists the user has disabled in Sync Preferences.
                 if (!localPlaylist.syncEnabled) {
@@ -214,16 +252,16 @@ class DiffWorker @AssistedInject constructor(
      */
     private suspend fun findOrCreatePlaylist(
         snapshot: RemotePlaylistSnapshotEntity,
+        streamingMode: Boolean,
     ): PlaylistEntity {
         val existing = playlistDao.findBySourceId(snapshot.sourcePlaylistId)
         if (existing != null) {
             // Art refresh: ONLY for DAILY_MIX. Daily Mixes (and Spotify's
             // weekly mixes — Discover Weekly, Release Radar, etc., which
             // share the DAILY_MIX type) rotate, so their cover should
-            // follow the tracks. Curated content (LIKED_SONGS, CUSTOM,
-            // STASH_MIX) keeps whatever art was imported on first sync —
-            // overwriting it surprises users whose personal playlists
-            // would otherwise look different every sync.
+            // follow the tracks. Other playlist types never rotate here;
+            // LIKED_SONGS gets only a missing-art repair during metadata
+            // finalization below.
             val rotatesArt = existing.type == PlaylistType.DAILY_MIX
             if (rotatesArt && snapshot.artUrl != null && snapshot.artUrl != existing.artUrl) {
                 playlistDao.updateArtUrl(existing.id, snapshot.artUrl)
@@ -255,36 +293,19 @@ class DiffWorker @AssistedInject constructor(
             mixNumber = snapshot.mixNumber,
             artUrl = snapshot.artUrl,
             trackCount = snapshot.trackCount,
-            // Opt-in by default for every source. The first Sync Now is
-            // effectively a discovery pass — it populates playlist rows
-            // but queues nothing for download until the user picks what
-            // they actually want in the Sync Preferences card. Fixes
-            // issue #10 (unchecked playlists downloading anyway) and
-            // brings YouTube in line with Spotify's existing behavior.
-            syncEnabled = false,
+            // Opt-in by default — EXCEPT algorithmic mixes in Online mode.
+            // A DAILY_MIX discovered while streaming auto-enables so it
+            // surfaces immediately with no download (Online skips the
+            // download_queue enqueue anyway). Every other type, and every
+            // playlist in Offline mode, stays opt-in: the first Sync Now is
+            // a discovery pass that populates playlist rows but queues
+            // nothing until the user picks what they want in the Sync
+            // Preferences card. Fixes issue #10 (unchecked playlists
+            // downloading anyway) and keeps YouTube in line with Spotify.
+            syncEnabled = defaultSyncEnabled(snapshot.playlistType, streamingMode),
         )
         val id = playlistDao.insert(newPlaylist)
         return newPlaylist.copy(id = id)
-    }
-
-    /**
-     * Checks whether a remote track already exists in the local database.
-     * Collapses three previously-sequential lookups (Spotify URI →
-     * YouTube ID → canonical identity) into a single OR-query whose
-     * ORDER BY mirrors the legacy priority. For a 3,000-track library
-     * this eliminates ~6,000 extra SELECTs per full sync.
-     */
-    private suspend fun findExistingTrack(snapshot: RemoteTrackSnapshotEntity): TrackEntity? {
-        val canonicalTitle = trackMatcher.canonicalTitle(snapshot.title)
-        val canonicalArtist = trackMatcher.canonicalArtist(snapshot.artist)
-        return trackDao.findByAnyIdentity(
-            spotifyUri = snapshot.spotifyUri,
-            spotifyUriIsNull = if (snapshot.spotifyUri == null) 1 else 0,
-            youtubeId = snapshot.youtubeId,
-            youtubeIdIsNull = if (snapshot.youtubeId == null) 1 else 0,
-            canonicalTitle = canonicalTitle,
-            canonicalArtist = canonicalArtist,
-        )
     }
 
     /**
@@ -304,175 +325,338 @@ class DiffWorker @AssistedInject constructor(
         syncId: Long,
         streamingMode: Boolean,
     ): Int {
-        // In REFRESH mode, clear existing playlist-track associations
-        // before inserting the current set. In ACCUMULATE mode, keep
-        // existing tracks — new ones are added, the soft-delete guard in
-        // ensurePlaylistMembership stops user-removed tracks from coming
-        // back, and duplicates fall out naturally since existing rows are
-        // re-stamped by the same (playlistId, trackId) primary key.
-        //
-        // v0.9.23 — only wipe SYNC-added rows. User-added tracks
-        // (locally_added = 1) survive REFRESH so manual additions to
-        // imported Spotify / YT Music playlists persist across re-syncs.
-        // See issue #42.
         if (syncMode == SyncMode.REFRESH) {
-            playlistDao.clearSyncedPlaylistTracks(localPlaylist.id)
+            // #343: NEVER mirror-clear against a fetch that admits (or looks
+            // like) incompleteness — one flaky API call was emptying whole
+            // playlists, and the orphan cleaner then deleted the files.
+            //  - partial: the fetch worker marked this snapshot incomplete
+            //    (track fetch threw/errored, or pagination hit its cap — the
+            //    long-standing YT truncation loss is this same hole).
+            //  - suspiciousEmpty: zero tracks fetched while the playlist
+            //    LISTING claimed some exist — an unmarked failure shape.
+            // In both cases we fall through and merge additions only
+            // (accumulate semantics); a later clean fetch re-mirrors fully.
+            if (snapshotUnreliable(playlistSnapshot, trackSnapshots)) {
+                Log.w(
+                    TAG,
+                    "REFRESH: keeping local tracks for '${playlistSnapshot.playlistName}' — " +
+                        if (playlistSnapshot.partial) {
+                            "fetch marked partial (${trackSnapshots.size} snapshot tracks)"
+                        } else {
+                            "snapshot empty but listing claims ${playlistSnapshot.trackCount} tracks"
+                        },
+                )
+            } else {
+                playlistDao.clearSyncedPlaylistTracks(localPlaylist.id)
+            }
         }
 
-        var newTrackCount = 0
-        for (trackSnapshot in trackSnapshots) {
-            // v0.9.15: Blocklist guard at the door. Identity-keyed so a
-            // re-like on a different source / canonical disagreement / new
-            // tracks row can't slip past. Replaces the prior
-            // `existingTrack.isBlacklisted` check, which only worked when
-            // findExistingTrack happened to land on the same row.
-            if (blocklistGuard.isBlocked(
-                    artist = trackSnapshot.artist,
-                    title = trackSnapshot.title,
-                    spotifyUri = trackSnapshot.spotifyUri,
-                    youtubeId = trackSnapshot.youtubeId,
-                )) {
-                Log.d(TAG, "Skipping blocked snapshot: ${trackSnapshot.artist} - ${trackSnapshot.title}")
-                continue
+        if (trackSnapshots.isEmpty()) {
+            finalizePlaylistMetadata(playlistSnapshot, localPlaylist, trackSnapshots)
+            return 0
+        }
+
+        // Blocklist guard up front, same predicate as before, just applied
+        // to the whole batch instead of inline per-iteration.
+        val allowedSnapshots = trackSnapshots.filterNot { snapshot ->
+            val blocked = blocklistGuard.isBlocked(
+                artist = snapshot.artist,
+                title = snapshot.title,
+                spotifyUri = snapshot.spotifyUri,
+                youtubeId = snapshot.youtubeId,
+            )
+            if (blocked) {
+                Log.d(TAG, "Skipping blocked snapshot: ${snapshot.artist} - ${snapshot.title}")
             }
+            blocked
+        }
 
-            val existingTrack = findExistingTrack(trackSnapshot)
+        if (allowedSnapshots.isEmpty()) {
+            finalizePlaylistMetadata(playlistSnapshot, localPlaylist, trackSnapshots)
+            return 0
+        }
 
-            if (existingTrack != null) {
-                ensurePlaylistMembership(
-                    playlistId = localPlaylist.id,
-                    trackId = existingTrack.id,
-                    position = trackSnapshot.position,
+        // ── Bulk identity resolution ─────────────────────────────────────
+        // Replaces the old per-snapshot findExistingTrack() N+1 (one SELECT
+        // per remote track — 9,000 individual round-trips on a large sync)
+        // with a single batched lookup, then matches candidates in memory
+        // using the same spotifyUri -> youtubeId -> canonical priority.
+        val canonicalOf = allowedSnapshots.associateWith {
+            CanonicalKey(
+                title = trackMatcher.canonicalTitle(it.title),
+                artist = trackMatcher.canonicalArtist(it.artist),
+            )
+        }
+        val spotifyUris = allowedSnapshots.mapNotNull { it.spotifyUri?.takeIf(String::isNotBlank) }.distinct()
+            .ifEmpty { listOf(NEVER_MATCH_SENTINEL) }
+        val youtubeIds = allowedSnapshots.mapNotNull { it.youtubeId?.takeIf(String::isNotBlank) }.distinct()
+            .ifEmpty { listOf(NEVER_MATCH_SENTINEL) }
+        val canonicalKeys = canonicalOf.values.map { (t, a) -> "$t|$a" }.distinct()
+
+        val candidates = trackDao.findExistingForBatch(spotifyUris, youtubeIds, canonicalKeys)
+        val candidateTracks = candidates.associate { candidate ->
+            candidate.id to BatchTrack(candidate, isNew = false)
+        }
+        val bySpotifyUri = mutableMapOf<String, BatchTrack>()
+        val byYoutubeId = mutableMapOf<String, BatchTrack>()
+        val byCanonical = mutableMapOf<CanonicalKey, BatchTrack>()
+
+        fun registerBatchTrack(track: BatchTrack) {
+            track.entity.spotifyUri?.takeIf(String::isNotBlank)?.let { bySpotifyUri[it] = track }
+            track.entity.youtubeId?.takeIf(String::isNotBlank)?.let { byYoutubeId[it] = track }
+            byCanonical[
+                CanonicalKey(
+                    title = track.entity.canonicalTitle,
+                    artist = track.entity.canonicalArtist,
                 )
+            ] = track
+        }
 
-                // v0.9.21 enrichment: if the new snapshot has a youtube_id
-                // and the existing track doesn't, fill it in — and stamp
-                // any pending download_queue row with the YT URL. Without
-                // this, a track originally created by a Spotify sync stays
-                // `youtube_id=null` forever; even after a YT Music sync
-                // brings the same track in with its videoId, DownloadManager
-                // still routes it through the slow Spotify → YT match path
-                // because `preResolvedUrl` is null. See conversation
-                // 2026-05-12: 4 tracks downloading via Spotify even after
-                // Spotify playlists were deselected.
-                val snapshotYtId = trackSnapshot.youtubeId
-                if (!snapshotYtId.isNullOrBlank() && existingTrack.youtubeId.isNullOrBlank()) {
-                    trackDao.updateYoutubeId(existingTrack.id, snapshotYtId)
-                    val ytUrl = "https://music.youtube.com/watch?v=$snapshotYtId"
-                    downloadQueueDao.fillMissingYoutubeUrlForTrack(existingTrack.id, ytUrl)
-                }
+        candidateTracks.values.forEach(::registerBatchTrack)
 
-                // v0.9.21 enrichment: refresh album-art URL when the
-                // incoming snapshot differs from what's stored. Snapshot
-                // URLs flow through ArtUrlUpgrader at write time, so when
-                // the upgrader gains support for a new CDN, the next
-                // re-sync of a playlist rewrites stale rows in place. No
-                // backfill migration needed. See conversation 2026-05-13:
-                // 228 yt3.googleusercontent.com tracks frozen at 120×120
-                // because they synced before the upgrader knew that CDN.
-                val snapshotArt = trackSnapshot.albumArtUrl
-                if (!snapshotArt.isNullOrBlank() && snapshotArt != existingTrack.albumArtUrl) {
-                    trackDao.updateAlbumArtUrl(existingTrack.id, snapshotArt)
-                }
+        fun matchBatchTrack(snapshot: RemoteTrackSnapshotEntity): BatchTrack? {
+            snapshot.spotifyUri?.takeIf(String::isNotBlank)?.let { uri ->
+                bySpotifyUri[uri]?.let { return it }
+            }
+            snapshot.youtubeId?.takeIf(String::isNotBlank)?.let { yid ->
+                byYoutubeId[yid]?.let { return it }
+            }
+            return byCanonical[canonicalOf.getValue(snapshot)]
+        }
 
-                // Auto-reconciliation: if this track is undownloaded,
-                // check if a manually-downloaded track with the same
-                // canonical identity exists. This handles cases where a
-                // user downloaded a track via a different playlist or
-                // source, so the existing entry can be resolved
-                // automatically.
-                if (!existingTrack.isDownloaded && !existingTrack.matchDismissed) {
-                    val downloadedMatch = trackDao.findDownloadedByCanonical(
-                        canonicalTitle = existingTrack.canonicalTitle.lowercase(),
-                        canonicalArtist = existingTrack.canonicalArtist.lowercase(),
-                    )
-                    if (downloadedMatch != null && downloadedMatch.id != existingTrack.id) {
-                        ensurePlaylistMembership(
-                            playlistId = localPlaylist.id,
-                            trackId = downloadedMatch.id,
-                            position = trackSnapshot.position,
-                        )
-                        val failedEntry = downloadQueueDao.getFailedByTrackId(existingTrack.id)
-                        if (failedEntry != null) {
-                            downloadQueueDao.updateStatus(
-                                id = failedEntry.id,
-                                status = DownloadStatus.COMPLETED,
-                            )
-                        }
+        suspend fun enrichExistingBatchTrack(
+            batchTrack: BatchTrack,
+            snapshot: RemoteTrackSnapshotEntity,
+        ) {
+            val existingTrack = batchTrack.entity
+            val snapshotYtId = snapshot.youtubeId?.takeIf(String::isNotBlank)
+            if (snapshotYtId != null && existingTrack.youtubeId.isNullOrBlank()) {
+                val youtubeOwner = byYoutubeId[snapshotYtId]
+                if (youtubeOwner == null || youtubeOwner === batchTrack) {
+                    val applied = trackDao.updateYoutubeIdIfUnclaimed(existingTrack.id, snapshotYtId)
+                    if (applied == 1) {
+                        batchTrack.entity = batchTrack.entity.copy(youtubeId = snapshotYtId)
+                        byYoutubeId[snapshotYtId] = batchTrack
+                        val ytUrl = "https://music.youtube.com/watch?v=$snapshotYtId"
+                        downloadQueueDao.fillMissingYoutubeUrlForTrack(existingTrack.id, ytUrl)
                     }
                 }
-            } else {
-                // New track: create entity and queue for download.
-                val canonicalTitle = trackMatcher.canonicalTitle(trackSnapshot.title)
-                val canonicalArtist = trackMatcher.canonicalArtist(trackSnapshot.artist)
+            }
 
-                val newTrack = TrackEntity(
-                    title = trackSnapshot.title,
-                    artist = trackSnapshot.artist,
-                    album = trackSnapshot.album ?: "",
-                    durationMs = trackSnapshot.durationMs,
-                    source = playlistSnapshot.source,
-                    spotifyUri = trackSnapshot.spotifyUri,
-                    youtubeId = trackSnapshot.youtubeId,
-                    albumArtUrl = trackSnapshot.albumArtUrl,
-                    canonicalTitle = canonicalTitle,
-                    canonicalArtist = canonicalArtist,
-                    isDownloaded = false,
-                    isrc = trackSnapshot.isrc,
-                    explicit = trackSnapshot.explicit,
-                )
-                val trackId = trackDao.insert(newTrack)
-
-                ensurePlaylistMembership(
-                    playlistId = localPlaylist.id,
-                    trackId = trackId,
-                    position = trackSnapshot.position,
-                )
-
-                // Streaming mode: track row + playlist membership land
-                // normally so the playlist surfaces on Home and the playlist
-                // detail screen can stream the track via Kennyy on tap. We
-                // skip the download_queue enqueue so no bytes hit disk.
-                // Offline mode: enqueue the download as usual.
-                val searchQuery = "${trackSnapshot.artist} - ${trackSnapshot.title}"
-                if (!streamingMode) {
-                    Log.i(TAG, "QueueTrace: DiffWorker.insert track_id=$trackId playlist=${localPlaylist.id} '${trackSnapshot.artist} - ${trackSnapshot.title}'")
-                    downloadQueueDao.insert(
-                        DownloadQueueEntity(
-                            trackId = trackId,
-                            syncId = syncId,
-                            searchQuery = searchQuery,
-                            youtubeUrl = trackSnapshot.youtubeId?.let {
-                                "https://music.youtube.com/watch?v=$it"
-                            },
-                        )
-                    )
-                } else {
-                    Log.i(TAG, "QueueTrace: DiffWorker streaming-mode insert track_id=$trackId playlist=${localPlaylist.id} (download skipped)")
-                }
-                newTrackCount++
+            val snapshotArt = snapshot.albumArtUrl
+            if (!snapshotArt.isNullOrBlank() && snapshotArt != batchTrack.entity.albumArtUrl) {
+                trackDao.updateAlbumArtUrl(existingTrack.id, snapshotArt)
+                batchTrack.entity = batchTrack.entity.copy(albumArtUrl = snapshotArt)
             }
         }
 
-        // Update local playlist metadata inside the transaction so the
-        // track count + snapshot id only change if the track work
-        // committed successfully.
+        // Preload every current cross-ref for this playlist ONCE instead of
+        // one getCrossRef() SELECT per track.
+        val existingCrossRefs = playlistDao.getCrossRefsForPlaylist(localPlaylist.id)
+            .associateBy { it.trackId }
+
+        val newTracks = mutableListOf<BatchTrack>()
+        val newOccurrences = mutableListOf<Pair<BatchTrack, RemoteTrackSnapshotEntity>>()
+        val existingPairs = mutableListOf<Pair<BatchTrack, RemoteTrackSnapshotEntity>>()
+
+        for (snapshot in allowedSnapshots) {
+            val batchTrack = matchBatchTrack(snapshot) ?: run {
+                val (ct, ca) = canonicalOf.getValue(snapshot)
+                BatchTrack(
+                    entity = TrackEntity(
+                        title = snapshot.title,
+                        artist = snapshot.artist,
+                        album = snapshot.album ?: "",
+                        durationMs = snapshot.durationMs,
+                        source = playlistSnapshot.source,
+                        spotifyUri = snapshot.spotifyUri?.takeIf(String::isNotBlank),
+                        youtubeId = snapshot.youtubeId?.takeIf(String::isNotBlank),
+                        albumArtUrl = snapshot.albumArtUrl,
+                        canonicalTitle = ct,
+                        canonicalArtist = ca,
+                        isDownloaded = false,
+                        isrc = snapshot.isrc,
+                        explicit = snapshot.explicit,
+                    ),
+                    isNew = true,
+                ).also {
+                    newTracks.add(it)
+                    registerBatchTrack(it)
+                }
+            }
+
+            if (batchTrack.isNew) {
+                val snapshotYtId = snapshot.youtubeId?.takeIf(String::isNotBlank)
+                val youtubeOwner = snapshotYtId?.let(byYoutubeId::get)
+                if (snapshotYtId != null &&
+                    batchTrack.entity.youtubeId.isNullOrBlank() &&
+                    (youtubeOwner == null || youtubeOwner === batchTrack)
+                ) {
+                    batchTrack.entity = batchTrack.entity.copy(youtubeId = snapshotYtId)
+                    byYoutubeId[snapshotYtId] = batchTrack
+                }
+
+                val snapshotArt = snapshot.albumArtUrl
+                if (!snapshotArt.isNullOrBlank() && snapshotArt != batchTrack.entity.albumArtUrl) {
+                    batchTrack.entity = batchTrack.entity.copy(albumArtUrl = snapshotArt)
+                }
+                newOccurrences.add(batchTrack to snapshot)
+            } else {
+                enrichExistingBatchTrack(batchTrack, snapshot)
+                existingPairs.add(batchTrack to snapshot)
+            }
+        }
+
+        // ── Bulk insert new tracks ───────────────────────────────────────
+        // Room's insertAll returns generated row ids in the same order as
+        // the input list.
+        val newTrackIds = if (newTracks.isNotEmpty()) {
+            trackDao.insertAll(newTracks.map { it.entity })
+        } else {
+            emptyList()
+        }
+        check(newTrackIds.size == newTracks.size) {
+            "Expected ${newTracks.size} generated track ids, got ${newTrackIds.size}"
+        }
+        newTracks.zip(newTrackIds).forEach { (track, trackId) ->
+            track.persistedId = trackId
+        }
+
+        val crossRefsToInsert = linkedMapOf<Long, PlaylistTrackCrossRef>()
+        val downloadEntries = mutableListOf<DownloadQueueEntity>()
+
+        for ((batchTrack, snapshot) in newOccurrences) {
+            val trackId = checkNotNull(batchTrack.persistedId)
+            addCrossRefIfNotSoftDeleted(localPlaylist.id, trackId, snapshot.position, existingCrossRefs, crossRefsToInsert)
+        }
+
+        if (!streamingMode) {
+            for (batchTrack in newTracks) {
+                val trackId = checkNotNull(batchTrack.persistedId)
+                downloadEntries.add(
+                    DownloadQueueEntity(
+                        trackId = trackId,
+                        syncId = syncId,
+                        searchQuery = "${batchTrack.entity.artist} - ${batchTrack.entity.title}",
+                        youtubeUrl = batchTrack.entity.youtubeId?.let {
+                            "https://music.youtube.com/watch?v=$it"
+                        },
+                    )
+                )
+            }
+        }
+        val newTrackCount = newTracks.size
+
+        // ── Existing-track path: membership + enrichment ─────────────────
+        // Enrichment writes (youtubeId backfill, art refresh, auto-
+        // reconciliation) stay per-row — they're targeted single-column
+        // UPDATEs, not the insert flood that caused the slowdown.
+        for ((batchTrack, snapshot) in existingPairs) {
+            val existingTrack = batchTrack.entity
+            addCrossRefIfNotSoftDeleted(localPlaylist.id, existingTrack.id, snapshot.position, existingCrossRefs, crossRefsToInsert)
+
+            if (!existingTrack.isDownloaded && !existingTrack.matchDismissed) {
+                val downloadedMatch = trackDao.findDownloadedByCanonical(
+                    canonicalTitle = existingTrack.canonicalTitle.lowercase(),
+                    canonicalArtist = existingTrack.canonicalArtist.lowercase(),
+                )
+                if (downloadedMatch != null && downloadedMatch.id != existingTrack.id) {
+                    addCrossRefIfNotSoftDeleted(localPlaylist.id, downloadedMatch.id, snapshot.position, existingCrossRefs, crossRefsToInsert)
+                    val failedEntry = downloadQueueDao.getFailedByTrackId(existingTrack.id)
+                    if (failedEntry != null) {
+                        downloadQueueDao.updateStatus(id = failedEntry.id, status = DownloadStatus.COMPLETED)
+                    }
+                }
+            }
+        }
+
+        // ── Flush batched writes ─────────────────────────────────────────
+        if (crossRefsToInsert.isNotEmpty()) {
+            playlistDao.insertAllCrossRefs(crossRefsToInsert.values.toList())
+        }
+        if (downloadEntries.isNotEmpty()) {
+            downloadQueueDao.insertAll(downloadEntries)
+        }
+        // Single summary line per playlist instead of one Log.i per track —
+        // the prior per-row logging was flooding logcat (LOG_FLOWCTRL
+        // dropping rows) on large syncs.
+        if (newTrackCount > 0) {
+            Log.i(
+                TAG,
+                "Playlist '${playlistSnapshot.playlistName}' (id=${localPlaylist.id}): " +
+                    "$newTrackCount new track(s), streamingMode=$streamingMode, " +
+                    "downloadsQueued=${downloadEntries.size}",
+            )
+        }
+
+        finalizePlaylistMetadata(playlistSnapshot, localPlaylist, trackSnapshots)
+        return newTrackCount
+    }
+
+    /**
+     * Adds a cross-ref to [out] unless a soft-deleted row already exists
+     * for (playlistId, trackId) — mirrors the removedAt guard that used to
+     * live inline in ensurePlaylistMembership. [existingByTrackId] is the
+     * whole-playlist cross-ref map preloaded once per [processPlaylist] call.
+     */
+    private fun addCrossRefIfNotSoftDeleted(
+        playlistId: Long,
+        trackId: Long,
+        position: Int,
+        existingByTrackId: Map<Long, PlaylistTrackCrossRef>,
+        out: MutableMap<Long, PlaylistTrackCrossRef>,
+    ) {
+        val storedPrior = existingByTrackId[trackId]
+        if (storedPrior != null && storedPrior.removedAt != null) {
+            Log.d(TAG, "Skipping re-link for soft-deleted track $trackId in playlist $playlistId (user removed it)")
+            return
+        }
+        val batchPrior = out[trackId]
+        out[trackId] = PlaylistTrackCrossRef(
+            playlistId = playlistId,
+            trackId = trackId,
+            position = position,
+            addedAt = batchPrior?.addedAt ?: storedPrior?.addedAt ?: java.time.Instant.now(),
+        )
+    }
+
+    /**
+     * A snapshot that must NOT be treated as the full remote truth (#343):
+     * either the fetch worker marked it partial (track fetch errored, or
+     * pagination hit a cap), or it fetched zero tracks while the playlist
+     * LISTING claims some exist — an unmarked failure shape. Shared by the
+     * REFRESH clear guard and [finalizePlaylistMetadata] so the "don't
+     * mirror" and "don't record mirrored state" decisions can't drift.
+     */
+    private fun snapshotUnreliable(
+        snapshot: RemotePlaylistSnapshotEntity,
+        trackSnapshots: List<RemoteTrackSnapshotEntity>,
+    ): Boolean = snapshot.partial || (trackSnapshots.isEmpty() && snapshot.trackCount > 0)
+
+    /**
+     * Playlist metadata bookkeeping shared by every processPlaylist exit
+     * path (including the early-return-on-empty branches). Unchanged from
+     * the original inline tail of processPlaylist.
+     */
+    private suspend fun finalizePlaylistMetadata(
+        playlistSnapshot: RemotePlaylistSnapshotEntity,
+        localPlaylist: PlaylistEntity,
+        trackSnapshots: List<RemoteTrackSnapshotEntity>,
+    ) {
         playlistDao.updateLastSynced(localPlaylist.id, System.currentTimeMillis())
+        if (snapshotUnreliable(playlistSnapshot, trackSnapshots)) {
+            // #343: an unreliable fetch was NOT mirrored (see processPlaylist).
+            // Recording its snapshot_id would make the next sync skip this
+            // playlist as "unchanged" and the missing tracks would never
+            // re-sync; stamping trackSnapshots.size would show a lying track
+            // count over retained content. Leave both as they were.
+            return
+        }
         if (playlistSnapshot.snapshotId != null) {
             playlistDao.updateSnapshotId(localPlaylist.id, playlistSnapshot.snapshotId)
         }
         playlistDao.updateTrackCount(localPlaylist.id, trackSnapshots.size)
 
-        // Refresh the playlist's cover art from the first unique track
-        // album art — but ONLY for DAILY_MIX, which rotates. Curated
-        // content (LIKED_SONGS, CUSTOM, STASH_MIX) keeps the art that
-        // was imported on first sync; overwriting it on every sync
-        // surprises users whose personal playlists would otherwise
-        // visually drift toward whatever the latest first track happens
-        // to be. Spotify's Daily Mix mosaic URL is aggressively cached
-        // upstream and often doesn't rotate between syncs — deriving
-        // the cover from current tracks guarantees a visible change
-        // when the tracklist rotates.
         if (localPlaylist.type == PlaylistType.DAILY_MIX) {
             val coverToSet = trackSnapshots
                 .mapNotNull { it.albumArtUrl }
@@ -481,53 +665,12 @@ class DiffWorker @AssistedInject constructor(
             if (coverToSet != null && coverToSet != localPlaylist.artUrl) {
                 playlistDao.updateArtUrl(localPlaylist.id, coverToSet)
             }
+        } else if (
+            localPlaylist.type == PlaylistType.LIKED_SONGS &&
+            localPlaylist.artUrl.isNullOrBlank() &&
+            !playlistSnapshot.artUrl.isNullOrBlank()
+        ) {
+            playlistDao.updateArtUrl(localPlaylist.id, playlistSnapshot.artUrl)
         }
-
-        return newTrackCount
-    }
-
-    /**
-     * Ensures a cross-reference exists between a playlist and a track.
-     *
-     * Three behaviours, picked by the state of any existing row:
-     *
-     * 1. **No prior row** — insert fresh with `addedAt = Instant.now()`.
-     * 2. **Prior row, removed_at IS NULL** — preserve the original
-     *    `addedAt` so ACCUMULATE mode can sort newest-added first. If we
-     *    let REPLACE stamp `Instant.now()` every sync, every row would
-     *    end up with the same addedAt and the "newest on top" UX vanishes.
-     * 3. **Prior row, removed_at IS NOT NULL** — the user soft-deleted
-     *    this track from this playlist. Do NOT re-insert; that would
-     *    overwrite the removal marker and resurrect the track the user
-     *    explicitly removed. Tombstone stays; remote snapshot is ignored
-     *    for this `(playlist, track)` pair until the user un-removes it.
-     *
-     * Scope note: behaviour (3) only matters in ACCUMULATE mode. REFRESH
-     * hard-deletes all cross-refs for the playlist before this method
-     * runs, so there's no prior row to find — REFRESH resurrection is a
-     * separate problem and is not addressed here.
-     */
-    private suspend fun ensurePlaylistMembership(
-        playlistId: Long,
-        trackId: Long,
-        position: Int,
-    ) {
-        val existingRef = playlistDao.getCrossRef(playlistId, trackId)
-        if (existingRef != null && existingRef.removedAt != null) {
-            Log.d(
-                TAG,
-                "Skipping re-link for soft-deleted track $trackId " +
-                    "in playlist $playlistId (user removed it)",
-            )
-            return
-        }
-        playlistDao.insertCrossRef(
-            PlaylistTrackCrossRef(
-                playlistId = playlistId,
-                trackId = trackId,
-                position = position,
-                addedAt = existingRef?.addedAt ?: java.time.Instant.now(),
-            )
-        )
-    }
+    }   
 }

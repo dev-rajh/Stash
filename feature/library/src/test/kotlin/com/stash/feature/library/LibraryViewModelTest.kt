@@ -3,6 +3,7 @@ package com.stash.feature.library
 import com.stash.core.auth.TokenManager
 import com.stash.core.auth.model.AuthState
 import com.stash.core.data.lossless.LosslessUpgrader
+import com.stash.core.data.prefs.StreamingPreference
 import com.stash.core.data.repository.MusicRepository
 import com.stash.core.media.PlayerRepository
 import com.stash.core.model.PlayerState
@@ -230,6 +231,7 @@ class LibraryViewModelTest {
             on { state } doReturn MutableStateFlow<LocalImportState>(LocalImportState.Idle)
         },
         losslessUpgrader: LosslessUpgrader = mock(),
+        streamingPreference: StreamingPreference = mock(),
     ): LibraryViewModel = LibraryViewModel(
         musicRepository = musicRepository,
         playerRepository = playerRepository,
@@ -237,5 +239,6 @@ class LibraryViewModelTest {
         playlistImageHelper = playlistImageHelper,
         localImportCoordinator = localImportCoordinator,
         losslessUpgrader = losslessUpgrader,
+        streamingPreference = streamingPreference,
     )
 }

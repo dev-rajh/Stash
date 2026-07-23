@@ -101,8 +101,8 @@ class SpotifyApiClient @Inject constructor(
         /**
          * Names of Spotify-generated personalized playlists that appear in the
          * home feed. These are all owned by "spotify" and rotate on various
-         * schedules. We capture any playlist whose name matches one of these
-         * patterns OR is owned by "spotify" with a known name.
+         * schedules. See [isSpotifyMix] for the full keep-decision (this set is
+         * one branch of it).
          */
         private val SPOTIFY_MIX_NAMES = setOf(
             "discover weekly",
@@ -112,6 +112,25 @@ class SpotifyApiClient @Inject constructor(
             "time capsule",
             "daylist",
         )
+
+        /**
+         * Whether a home-feed playlist is a Spotify-personalized mix worth
+         * syncing. Keeps "Daily Mix N", the known named mixes, and — the
+         * locale-proof catch-all — anything owned by "spotify" (Your Top Songs,
+         * Blend, Made-For-You mood mixes, "This Is <artist>": names vary by
+         * locale but all are spotify-owned).
+         *
+         * Note the caller defaults [ownerId] to "spotify" when the home item
+         * carries no owner data, so owner-less items also take the catch-all.
+         *
+         * ponytail: owner rule first; add a deny-set only if device shows
+         * editorial leakage (e.g. "Today's Top Hits" surfacing in the home feed).
+         */
+        internal fun isSpotifyMix(name: String, ownerId: String): Boolean {
+            if (DAILY_MIX_REGEX.matches(name)) return true
+            if (name.lowercase(java.util.Locale.ROOT) in SPOTIFY_MIX_NAMES) return true
+            return ownerId == "spotify"
+        }
     }
 
     // ── Client Credentials Token Cache ──────────────────────────────────
@@ -395,7 +414,7 @@ class SpotifyApiClient @Inject constructor(
                 put("timeZone", java.util.TimeZone.getDefault().id)
                 put("sp_t", spT)
                 put("facet", JsonNull)
-                put("sectionItemsLimit", 20)
+                put("sectionItemsLimit", 40)
             }.toString()
 
             val responseJson = executeGraphQL(
@@ -472,15 +491,15 @@ class SpotifyApiClient @Inject constructor(
                         val name = data["name"]?.jsonPrimitive?.contentOrNull ?: continue
                         val uri = data["uri"]?.jsonPrimitive?.contentOrNull ?: continue
 
-                        val isSpotifyMix = DAILY_MIX_REGEX.matches(name) || name.lowercase() in SPOTIFY_MIX_NAMES
-                        if (!isSpotifyMix) continue
-
-                        val playlistId = uri.removePrefix("spotify:playlist:")
                         val ownerData = data["ownerV2"]?.jsonObject?.get("data")?.jsonObject
                         val ownerId = ownerData?.get("username")?.jsonPrimitive?.contentOrNull
                             ?: ownerData?.get("id")?.jsonPrimitive?.contentOrNull
                             ?: "spotify"
                         val ownerName = ownerData?.get("name")?.jsonPrimitive?.contentOrNull ?: "Spotify"
+
+                        if (!isSpotifyMix(name, ownerId)) continue
+
+                        val playlistId = uri.removePrefix("spotify:playlist:")
 
                         val images = data["images"]?.jsonObject?.get("items")?.jsonArray
                         val artUrl = images?.firstOrNull()

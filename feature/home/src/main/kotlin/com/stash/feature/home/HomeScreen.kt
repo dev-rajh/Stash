@@ -7,7 +7,6 @@ import androidx.compose.animation.animateColor
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.MarqueeSpacing
@@ -26,7 +25,10 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -63,6 +65,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.DownloadDone
 import androidx.compose.material.icons.filled.RemoveCircleOutline
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -80,8 +83,16 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.withFrameMillis
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.foundation.layout.wrapContentWidth
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.animation.Crossfade
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -105,10 +116,18 @@ import com.stash.core.model.MusicSource
 import com.stash.core.model.Playlist
 import com.stash.core.model.PlaylistType
 import com.stash.core.model.Track
-import com.stash.core.ui.components.CreatePlaylistDialog
+import com.stash.core.ui.components.AlbumSquareCard
+import com.stash.core.ui.components.CardRail
+import com.stash.core.ui.components.CrispChipRow
+import com.stash.core.data.prefs.HomeSection
+import com.stash.core.ui.components.DiscoverHeroCard
 import com.stash.core.ui.components.GlassCard
+import com.stash.core.ui.components.RankedAlbumList
+import com.stash.core.ui.components.RankedAlbumUi
 import com.stash.core.ui.components.SectionHeader
 import com.stash.core.ui.components.SourceIndicator
+import com.stash.data.ytmusic.model.AlbumSummary
+import com.stash.data.ytmusic.model.PlaylistSummary
 import com.stash.core.ui.theme.LocalIsDarkTheme
 import com.stash.core.ui.components.streaming.StreamingModeChip
 import com.stash.core.ui.components.streaming.StreamingModeSheet
@@ -124,13 +143,27 @@ import com.stash.core.ui.theme.StashTheme
 @Composable
 fun HomeScreen(
     modifier: Modifier = Modifier,
-    onNavigateToPlaylist: (Long) -> Unit = {},
-    onNavigateToLikedSongs: (String?) -> Unit = {},
     onNavigateToSettings: () -> Unit = {},
+    onNavigateToPlaylist: (Long) -> Unit = {},
+    onNavigateToAlbum: (AlbumSummary) -> Unit = {},
+    onSeeAllPlaylists: (String) -> Unit = {},
     onNavigateToMixBuilder: (Long?) -> Unit = {},
+    // Task 7 wires the actual mix-browse destination; today a no-op from the host.
+    onSeeAllMixes: (MixRail) -> Unit = {},
     viewModel: HomeViewModel = hiltViewModel(),
 ) {
+    // Long-pressed Stash mix whose action sheet is open (null = closed).
+    var actionSheetMixId by remember { mutableStateOf<Long?>(null) }
+    // Long-pressed Daily Discover hero → its own two-row sheet (refresh / minimize).
+    var heroActionSheet by remember { mutableStateOf(false) }
+    // Opening a mix = open its materialized playlist + freshen it if stale.
+    // A HomeMix's id IS its playlist id, so this reuses the existing playlist nav.
+    val openMix: (Long) -> Unit = { id ->
+        viewModel.refreshMixIfStale(id)
+        onNavigateToPlaylist(id)
+    }
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val heroMinimized by viewModel.heroMinimized.collectAsStateWithLifecycle()
     // Master streaming-mode flag. Both the top-bar StreamingModeChip and
     // the sheet (StreamingModeSheet) render from this single source of
     // truth; the chip itself early-returns to nothing while the build-
@@ -157,29 +190,11 @@ fun HomeScreen(
         }
     }
 
-    // Playlist selected for the context-menu bottom sheet (shared across daily mixes + grid).
-    var selectedPlaylist by remember { mutableStateOf<Playlist?>(null) }
-    var playlistToDelete by remember { mutableStateOf<Playlist?>(null) }
-    // Controls the "New Playlist" naming dialog launched from the Playlists section.
-    var showCreateDialog by remember { mutableStateOf(false) }
-
     val toastContext = LocalContext.current
     LaunchedEffect(Unit) {
         viewModel.userMessages.collect { msg ->
             android.widget.Toast.makeText(toastContext, msg, android.widget.Toast.LENGTH_LONG).show()
         }
-    }
-
-    // Pre-computed 2-column chunking for the Playlists grid. Hoisted out
-    // of the LazyColumn's item{} so the chunked() + buildList{} only runs
-    // when the playlists list actually changes — not on every recomposition
-    // triggered by unrelated state (sync status, liked songs count, etc.).
-    val playlistGridRows = remember(uiState.playlists) {
-        val tiles: List<PlaylistTile> = buildList {
-            add(PlaylistTile.Create)
-            uiState.playlists.forEach { add(PlaylistTile.Item(it)) }
-        }
-        tiles.chunked(2)
     }
 
     LazyColumn(
@@ -255,15 +270,21 @@ fun HomeScreen(
         item {
             val tipJar = uiState.tipJar
             val pillSupporters = remember(tipJar) {
-                tipJar.supporters.map {
+                val live = tipJar.supporters.map {
                     Supporter(name = it.name, amount = "$${it.amountUsd}", message = it.message)
-                }.ifEmpty { HOME_SUPPORTERS }
+                }
+                // Legacy donors pre-date the Ko-fi webhook and exist nowhere
+                // in the Worker's KV — they always ride the tape (deduped in
+                // case they ever re-donate through the live pipeline).
+                val liveNames = live.map { it.name.lowercase() }.toSet()
+                live + LEGACY_SUPPORTERS.filter { it.name.lowercase() !in liveNames }
             }
-            SupporterPill(
+            // Edge-to-edge: the ticker runs the full screen width, no card
+            // chrome — maximum runway for the scrolling messages.
+            SupporterTicker(
                 supporters = pillSupporters,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 20.dp)
                     .padding(bottom = 12.dp),
             )
         }
@@ -306,238 +327,237 @@ fun HomeScreen(
             }
         }
 
-        // ── Mixes (split by source, each with a Play All button) ─────
-        if (uiState.spotifyMixes.isNotEmpty() || uiState.youtubeMixes.isNotEmpty()) {
-            item {
-                MixesSectionHeader(
-                    showPlayBoth = uiState.hasBothMixSources,
-                    onPlayBoth = { viewModel.playAllMixes(source = null) },
-                )
-            }
-
-            // Spotify mixes row — sub-header with Play All always present
-            if (uiState.spotifyMixes.isNotEmpty()) {
-                item {
-                    SourceSubHeader(
-                        label = "Spotify",
-                        source = MusicSource.SPOTIFY,
-                        onPlayAll = { viewModel.playAllMixes(MusicSource.SPOTIFY) },
-                    )
-                }
-                item {
-                    LazyRow(
-                        contentPadding = PaddingValues(horizontal = 16.dp),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    ) {
-                        items(uiState.spotifyMixes, key = { it.id }) { playlist ->
-                            DailyMixCard(
-                                playlist = playlist,
-                                onClick = { onNavigateToPlaylist(playlist.id) },
-                                onLongPress = { selectedPlaylist = playlist },
-                            )
-                        }
-                    }
-                }
-            }
-
-            // YouTube mixes row — sub-header with Play All always present
-            if (uiState.youtubeMixes.isNotEmpty()) {
-                item {
-                    SourceSubHeader(
-                        label = "YouTube Music",
-                        source = MusicSource.YOUTUBE,
-                        onPlayAll = { viewModel.playAllMixes(MusicSource.YOUTUBE) },
-                    )
-                }
-                item {
-                    LazyRow(
-                        contentPadding = PaddingValues(horizontal = 16.dp),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    ) {
-                        items(uiState.youtubeMixes, key = { it.id }) { playlist ->
-                            DailyMixCard(
-                                playlist = playlist,
-                                onClick = { onNavigateToPlaylist(playlist.id) },
-                                onLongPress = { selectedPlaylist = playlist },
-                            )
-                        }
-                    }
-                }
-            }
-        }
-
-        // ── Stash Mixes (recipe-driven, generated locally) ───────────
-        // v0.4.1: sits BELOW the sync-sourced Daily Mixes while the
-        // feature is in beta. Once it graduates, this block can move
-        // back up so user-generated mixes feel primary.
-        //
-        // The header + row render unconditionally (no `stashMixes.isNotEmpty`
-        // gate) so the trailing "Create mix" tile is ALWAYS reachable, even
-        // for a user with zero mixes. When mixes exist the layout is
-        // identical to before — they render first, Create tile last.
+        // ── Discover hero pager (Daily Discover + your Stash mixes) ──
+        // A mix created from the hero's ＋ ring lands right here as an
+        // identical sibling card — swipe between Daily Discover and your
+        // own mixes (dots below signal the pages). Long-press a Your-mix
+        // page for the action sheet (refresh / edit / delete / hide).
+        // Replaces the old "Your mixes" rail.
         item {
-            SectionHeader(title = "Stash Mixes  (Beta)")
-        }
-        item {
-            LazyRow(
-                contentPadding = PaddingValues(horizontal = 16.dp),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                // Create tile leads the row (a compact "add" affordance).
-                item {
-                    CreateMixCard(onClick = { onNavigateToMixBuilder(null) })
-                }
-                items(uiState.stashMixes, key = { it.id }) { playlist ->
-                    val buildState = when {
-                        uiState.buildingMixIds.contains(playlist.id) -> MixBuildState.BUILDING
-                        uiState.emptyMixIds.contains(playlist.id) -> MixBuildState.EMPTY
-                        else -> MixBuildState.READY
-                    }
-                    DailyMixCard(
-                        playlist = playlist,
-                        buildState = buildState,
-                        onClick = {
-                            // Opening a stale custom mix transparently
-                            // refreshes it (fire-and-forget; no-ops for
-                            // builtins + non-stale mixes).
-                            viewModel.refreshMixIfStale(playlist.id)
-                            onNavigateToPlaylist(playlist.id)
-                        },
-                        onLongPress = { selectedPlaylist = playlist },
-                    )
-                }
-            }
-        }
-
-        // ── Recently Added ───────────────────────────────────────────
-        if (uiState.recentlyAdded.isNotEmpty()) {
-            item {
-                SectionHeader(title = "Recently Added")
-            }
-            item {
-                LazyRow(
-                    contentPadding = PaddingValues(horizontal = 16.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    itemsIndexed(
-                        uiState.recentlyAdded,
-                        key = { _, track -> track.id },
-                    ) { index, track ->
-                        CompactTrackCard(
-                            track = track,
-                            onClick = {
-                                viewModel.playTrack(uiState.recentlyAdded, index)
-                            },
-                        )
-                    }
-                }
-            }
-        }
-
-        // ── Liked Songs card (with source split + smart collapse) ────
-        if (uiState.hasAnyLikedSongs) {
-            item {
-                Spacer(Modifier.height(8.dp))
-                LikedSongsCard(
-                    totalCount = uiState.totalLikedCount,
-                    spotifyCount = uiState.spotifyLikedCount,
-                    youtubeCount = uiState.youtubeLikedCount,
-                    showSourceChips = uiState.hasBothLikedSources,
-                    singleSource = uiState.singleLikedSource,
-                    onPlayAll = { viewModel.playLikedSongs(source = null) },
-                    onPlaySpotify = { viewModel.playLikedSongs(source = MusicSource.SPOTIFY) },
-                    onPlayYouTube = { viewModel.playLikedSongs(source = MusicSource.YOUTUBE) },
-                    onClick = { onNavigateToLikedSongs(null) },
-                    onClickSpotify = {
-                        val spotifyPlaylistId = uiState.spotifyLikedPlaylists.firstOrNull()?.id
-                        if (spotifyPlaylistId != null) onNavigateToPlaylist(spotifyPlaylistId)
-                    },
-                    onClickYouTube = {
-                        val youtubePlaylistId = uiState.youtubeLikedPlaylists.firstOrNull()?.id
-                        if (youtubePlaylistId != null) onNavigateToPlaylist(youtubePlaylistId)
-                    },
+            Spacer(Modifier.height(6.dp))
+            // Minimized (long-press → "Minimize for now") drops the hero page
+            // for the session; the mix pages keep the pager alive. Distinct
+            // from hero == null (not connected), which shows PersonalizeCard.
+            val hero = if (heroMinimized) null else uiState.hero
+            val mixPages = uiState.yourMixes
+            when {
+                uiState.isLoading -> DiscoverHeroCard(
+                    label = "Daily discovery",
+                    title = "Discover",
+                    subtitle = "",
+                    artUrl = null,
+                    onPlay = {},
+                    onOpen = {},
+                    loading = true,
                     modifier = Modifier.padding(horizontal = 16.dp),
                 )
+                uiState.hero == null && mixPages.isEmpty() -> PersonalizeCard(
+                    onConnect = onNavigateToSettings,
+                    modifier = Modifier.padding(horizontal = 16.dp),
+                )
+                hero == null && mixPages.isEmpty() -> Unit // minimized, nothing to page
+                else -> {
+                    val heroPages = if (hero != null) 1 else 0
+                    val pageCount = heroPages + mixPages.size
+                    val pagerState = androidx.compose.foundation.pager.rememberPagerState(
+                        pageCount = { pageCount },
+                    )
+                    Column {
+                        androidx.compose.foundation.pager.HorizontalPager(
+                            state = pagerState,
+                            contentPadding = PaddingValues(horizontal = 16.dp),
+                            pageSpacing = 10.dp,
+                        ) { page ->
+                            if (page < heroPages && hero != null) {
+                                DiscoverHeroCard(
+                                    label = "Daily discovery",
+                                    title = hero.title,
+                                    subtitle = hero.subtitle,
+                                    artUrl = hero.artUrl,
+                                    onPlay = viewModel::playHero,
+                                    onOpen = { onNavigateToPlaylist(hero.playlistId) },
+                                    onCreateMix = { onNavigateToMixBuilder(null) },
+                                    onLongPress = { heroActionSheet = true },
+                                )
+                            } else {
+                                val m = mixPages[page - heroPages]
+                                DiscoverHeroCard(
+                                    label = "Your mix",
+                                    title = m.title,
+                                    subtitle = when (m.buildState) {
+                                        MixBuildState.BUILDING -> "building…"
+                                        MixBuildState.EMPTY -> "empty — edit to fill"
+                                        else -> "${m.trackCount} tracks"
+                                    },
+                                    artUrl = m.artUrl,
+                                    onPlay = { viewModel.playMix(m.id) },
+                                    onOpen = { openMix(m.id) },
+                                    onLongPress = { actionSheetMixId = m.id },
+                                )
+                            }
+                        }
+                        if (pageCount > 1) {
+                            Spacer(Modifier.height(8.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.Center,
+                            ) {
+                                repeat(pageCount) { i ->
+                                    val active = pagerState.currentPage == i
+                                    Box(
+                                        modifier = Modifier
+                                            .padding(horizontal = 3.dp)
+                                            .size(6.dp)
+                                            .clip(CircleShape)
+                                            .background(
+                                                if (active) {
+                                                    MaterialTheme.colorScheme.primary
+                                                } else {
+                                                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f)
+                                                },
+                                            ),
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 
-        // ── Playlists grid ───────────────────────────────────────────
-        // Always rendered so the Create Playlist card is available even when
-        // the user has no custom playlists yet.
-        item {
-            SectionHeader(title = "Playlists")
+        // ── User-arranged sections (Settings > Appearance > Home layout) ──
+        // Order + visibility come from uiState.sections. The genre chips
+        // steer only the Qobuz rows, so they ride glued above the FIRST
+        // visible Qobuz section wherever the user placed it — and the old
+        // chips→header seam (16dp spacer stacked on the header's 12dp
+        // padding, 28dp of blank) tightens to 2dp + 12dp for that row.
+        val firstQobuzSection = uiState.sections.firstOrNull {
+            it == HomeSection.NEW_RELEASES ||
+                it == HomeSection.QOBUZ_PLAYLISTS ||
+                it == HomeSection.TOP_ALBUMS
         }
-        item {
-            PlaylistSortChipRow(
-                activeSort = uiState.playlistSortOrder,
-                onSortSelected = viewModel::setPlaylistSortOrder,
-            )
-        }
-        // 2-column grid virtualized via the outer LazyColumn: each chunked
-        // row is its own LazyColumn item, so only the rows near the viewport
-        // get composed/measured. The pre-Phase-8 version wrapped the whole
-        // grid in a single item{} + non-lazy Column, which forced every
-        // PlaylistGridCard (33+ in a typical library) to compose + layout +
-        // load its AsyncImage every time the parent item was near-visible.
-        // That was the dominant source of vertical-scroll jank; horizontal
-        // carousels stayed smooth because they were already real LazyRows.
-        itemsIndexed(
-            items = playlistGridRows,
-            key = { index, row ->
-                // Row-stable key so LazyColumn can reuse layouts when the
-                // user's playlist list mutates (rename, delete, reorder).
-                row.joinToString("-") { tile ->
-                    when (tile) {
-                        PlaylistTile.Create -> "create"
-                        is PlaylistTile.Item -> tile.playlist.id.toString()
-                    }
+        uiState.sections.forEach { section ->
+            val chipsLead = uiState.qobuzDiscoveryEnabled && section == firstQobuzSection
+            if (chipsLead) {
+                item(key = "section_genre_chips") {
+                    Spacer(Modifier.height(14.dp))
+                    CrispChipRow(
+                        chips = uiState.genres.map { it.label },
+                        selected = uiState.selectedGenre,
+                        onSelect = viewModel::onSelectGenre,
+                    )
                 }
-            },
-        ) { index, rowItems ->
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(
-                        start = 16.dp,
-                        end = 16.dp,
-                        // Spacing between rows — previously handled by the
-                        // outer Column's spacedBy(12). Done inline here so
-                        // each item carries its own bottom padding.
-                        top = if (index == 0) 0.dp else 12.dp,
-                    ),
-            ) {
-                rowItems.forEach { tile ->
-                    when (tile) {
-                        is PlaylistTile.Create -> CreatePlaylistCard(
-                            onClick = { showCreateDialog = true },
-                            modifier = Modifier.weight(1f),
-                        )
-                        is PlaylistTile.Item -> PlaylistGridCard(
-                            playlist = tile.playlist,
-                            onClick = { onNavigateToPlaylist(tile.playlist.id) },
-                            onLongPress = { selectedPlaylist = tile.playlist },
-                            modifier = Modifier.weight(1f),
+            }
+            when (section) {
+                HomeSection.NEW_RELEASES -> if (uiState.newReleases.isNotEmpty()) {
+                    item(key = "section_new_releases") {
+                        DiscoveryAlbumRow(
+                            title = "New Releases",
+                            albums = uiState.newReleases,
+                            onOpen = onNavigateToAlbum,
+                            topSpacing = if (chipsLead) 2.dp else 16.dp,
                         )
                     }
                 }
-                // Pad single-item rows with a spacer
-                if (rowItems.size == 1) {
-                    Spacer(Modifier.weight(1f))
+                HomeSection.QOBUZ_PLAYLISTS -> if (uiState.playlists.isNotEmpty()) {
+                    item(key = "section_qobuz_playlists") {
+                        DiscoveryPlaylistRow(
+                            title = "Qobuz Playlists",
+                            playlists = uiState.playlists,
+                            onOpen = onNavigateToAlbum,
+                            onSeeAll = { onSeeAllPlaylists(uiState.selectedGenre) },
+                            topSpacing = if (chipsLead) 2.dp else 16.dp,
+                        )
+                    }
+                }
+                HomeSection.TOP_ALBUMS -> if (uiState.topAlbums.isNotEmpty()) {
+                    item(key = "section_top_albums") {
+                        // Collapsed to the top 5 by default; "Show all N" expands the
+                        // full best-sellers chart in place. Saveable so the choice
+                        // survives the item scrolling out of composition.
+                        var topAlbumsExpanded by rememberSaveable { mutableStateOf(false) }
+                        val visibleTop =
+                            if (topAlbumsExpanded) uiState.topAlbums else uiState.topAlbums.take(5)
+                        Column {
+                            Spacer(Modifier.height(if (chipsLead) 2.dp else 16.dp))
+                            SectionHeader(
+                                title = "Top Albums",
+                                actionText = when {
+                                    uiState.topAlbums.size <= 5 -> null
+                                    topAlbumsExpanded -> "Show less"
+                                    else -> "Show all ${uiState.topAlbums.size}"
+                                },
+                                onActionClick = { topAlbumsExpanded = !topAlbumsExpanded },
+                            )
+                            RankedAlbumList(
+                                items = visibleTop.mapIndexed { i, a ->
+                                    RankedAlbumUi(
+                                        rank = i + 1,
+                                        title = a.title,
+                                        artist = a.artist,
+                                        artUrl = a.thumbnailUrl,
+                                        movement = null,   // Qobuz best-sellers carries no chart delta
+                                    )
+                                },
+                                onClick = { ranked -> onNavigateToAlbum(uiState.topAlbums[ranked.rank - 1]) },
+                            )
+                        }
+                    }
+                }
+                HomeSection.MADE_FOR_YOU -> if (uiState.madeForYou.isNotEmpty()) {
+                    item(key = "section_made_for_you") {
+                        CardRail(
+                            title = "Made for you",
+                            actionText = "See all",
+                            onActionClick = { onSeeAllMixes(MixRail.MADE_FOR_YOU) },
+                        ) {
+                            items(uiState.madeForYou, key = { it.id }) { m ->
+                                MixRailCard(
+                                    title = m.title, artUrl = m.artUrl, source = m.source,
+                                    buildState = m.buildState, onClick = { openMix(m.id) },
+                                    onLongPress = { actionSheetMixId = m.id },
+                                )
+                            }
+                        }
+                    }
+                }
+                HomeSection.RADIOS -> if (uiState.radios.isNotEmpty()) {
+                    item(key = "section_radios") {
+                        CardRail(
+                            title = "Radios",
+                            actionText = "See all",
+                            onActionClick = { onSeeAllMixes(MixRail.RADIOS) },
+                        ) {
+                            items(uiState.radios, key = { it.id }) { m ->
+                                MixRailCard(
+                                    title = m.title, artUrl = m.artUrl, source = m.source,
+                                    buildState = m.buildState, onClick = { openMix(m.id) },
+                                    onLongPress = { actionSheetMixId = m.id },
+                                )
+                            }
+                        }
+                    }
+                }
+                HomeSection.MOOD_DECADES -> if (uiState.moodDecades.isNotEmpty()) {
+                    item(key = "section_mood_decades") {
+                        CardRail(
+                            title = "Mood & decades",
+                            actionText = "See all",
+                            onActionClick = { onSeeAllMixes(MixRail.MOOD_DECADES) },
+                        ) {
+                            items(uiState.moodDecades, key = { it.id }) { m ->
+                                MixRailCard(
+                                    title = m.title, artUrl = m.artUrl, source = m.source,
+                                    buildState = m.buildState, onClick = { openMix(m.id) },
+                                    onLongPress = { actionSheetMixId = m.id },
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
-    }
 
-    // ── Create playlist naming dialog ────────────────────────────────────
-    if (showCreateDialog) {
-        CreatePlaylistDialog(
-            onConfirm = { name ->
-                viewModel.createPlaylist(name)
-                showCreateDialog = false
-            },
-            onDismiss = { showCreateDialog = false },
-        )
     }
 
     // ── Streaming privacy disclosure (first-use only) ────────────────────
@@ -565,1016 +585,145 @@ fun HomeScreen(
         )
     }
 
-    // ── Playlist context-menu bottom sheet ──────────────────────────────
-    selectedPlaylist?.let { playlist ->
-        val sheetState = rememberModalBottomSheetState()
-        ModalBottomSheet(
-            onDismissRequest = { selectedPlaylist = null },
-            sheetState = sheetState,
-            containerColor = MaterialTheme.colorScheme.surface,
-        ) {
-            // Header: playlist name + track count
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 20.dp)
-                    .padding(bottom = 8.dp),
+    // ── Stash-mix action sheet (long-press a "Your mixes" card) ──────────
+    // Moved from LibraryMixesSection (Library keeps its own copy until Task 8).
+    // Gating mirrors Library: Refresh for every Stash mix, Edit/Delete for
+    // custom mixes only, Open always. "Your mixes" == the STASH_MIX rail, so
+    // membership there stands in for the type == STASH_MIX check.
+    actionSheetMixId?.let { id ->
+        // Guard render only — a stale id (mix vanished from every rail after a
+        // delete/refresh re-emit) simply renders nothing; the next long-press
+        // overwrites it. No state write during composition.
+        val mix = (uiState.madeForYou + uiState.radios + uiState.moodDecades + uiState.yourMixes)
+            .firstOrNull { it.id == id }
+        if (mix != null) {
+            val sheetState = rememberModalBottomSheetState()
+            val isStashMix = uiState.yourMixes.any { it.id == id }
+            val isCustom = id in uiState.customMixPlaylistIds
+            ModalBottomSheet(
+                onDismissRequest = { actionSheetMixId = null },
+                sheetState = sheetState,
+                containerColor = MaterialTheme.colorScheme.surface,
             ) {
-                Text(
-                    text = playlist.name,
-                    style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Text(
-                    text = "${playlist.trackCount} tracks",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-
-            // v0.9.16: Manual single-mix refresh — only meaningful for
-            // recipe-driven Stash Mixes, not sync-imported daily mixes or
-            // user playlists.
-            if (playlist.type == PlaylistType.STASH_MIX) {
-                HomeBottomSheetActionRow(
-                    icon = Icons.Default.Refresh,
-                    label = "Refresh this mix",
-                    onClick = {
-                        viewModel.refreshMix(playlist.id)
-                        selectedPlaylist = null
-                    },
-                )
-            }
-
-            // Edit / Delete — only for user-built (non-builtin) Stash Mixes.
-            // Gated on customMixPlaylistIds so builtin recipe playlists (which
-            // can't be edited or deleted here) never surface these rows.
-            if (uiState.customMixPlaylistIds.contains(playlist.id)) {
-                HomeBottomSheetActionRow(
-                    icon = Icons.Default.Edit,
-                    label = "Edit mix",
-                    onClick = {
-                        // Resolve the recipe id async, then route to the
-                        // builder. Dismiss the sheet immediately.
-                        viewModel.editRecipeId(playlist.id) { recipeId ->
-                            onNavigateToMixBuilder(recipeId)
-                        }
-                        selectedPlaylist = null
-                    },
-                )
-                HomeBottomSheetActionRow(
-                    icon = Icons.Default.Delete,
-                    label = "Delete mix",
-                    tint = MaterialTheme.colorScheme.error,
-                    onClick = {
-                        viewModel.deleteCustomMix(playlist)
-                        selectedPlaylist = null
-                    },
-                )
-            }
-            HomeBottomSheetActionRow(
-                icon = Icons.Default.PlayArrow,
-                label = "Play All",
-                onClick = {
-                    viewModel.playPlaylist(playlist)
-                    selectedPlaylist = null
-                },
-            )
-            HomeBottomSheetActionRow(
-                icon = Icons.Default.PlaylistAdd,
-                label = "Add to Queue",
-                onClick = {
-                    viewModel.addPlaylistToQueue(playlist)
-                    selectedPlaylist = null
-                },
-            )
-            HomeBottomSheetActionRow(
-                icon = Icons.Default.Download,
-                label = "Download All",
-                onClick = {
-                    viewModel.queueDownloadsForPlaylist(playlist)
-                    selectedPlaylist = null
-                },
-            )
-            HomeBottomSheetActionRow(
-                icon = Icons.Default.DownloadDone,
-                label = "Remove Downloads",
-                onClick = {
-                    viewModel.removeDownloadsForPlaylist(playlist)
-                    selectedPlaylist = null
-                },
-            )
-            HomeBottomSheetActionRow(
-                icon = Icons.Default.RemoveCircleOutline,
-                label = "Remove Playlist",
-                onClick = {
-                    viewModel.removePlaylist(playlist)
-                    selectedPlaylist = null
-                },
-            )
-            HomeBottomSheetActionRow(
-                icon = Icons.Default.Delete,
-                label = "Delete Playlist & Songs",
-                tint = MaterialTheme.colorScheme.error,
-                onClick = {
-                    playlistToDelete = playlist
-                    selectedPlaylist = null
-                },
-            )
-
-            Spacer(modifier = Modifier.height(24.dp))
-        }
-    }
-
-    // ── Delete playlist confirmation dialog ──────────────────────────────
-    playlistToDelete?.let { playlist ->
-        var alsoBlacklist by remember(playlist.id) { mutableStateOf(false) }
-        var preview by remember(playlist.id) {
-            mutableStateOf<HomeViewModel.DeletePreview?>(null)
-        }
-        // Load the cascade preview (deleted vs. kept-due-to-protection)
-        // as soon as the dialog opens so the copy is accurate.
-        LaunchedEffect(playlist.id) {
-            preview = viewModel.previewPlaylistDelete(playlist)
-        }
-
-        androidx.compose.material3.AlertDialog(
-            onDismissRequest = { playlistToDelete = null },
-            title = { Text("Delete ${playlist.name}?") },
-            text = {
-                Column {
-                    val p = preview
-                    Text(
-                        text = when {
-                            p == null -> "This will delete downloaded songs in this playlist from your device."
-                            p.protectedCount == 0 -> "This will delete ${p.willDelete} downloaded song${if (p.willDelete != 1) "s" else ""} from your device."
-                            else -> "${p.willDelete} song${if (p.willDelete != 1) "s" else ""} will be deleted. ${p.protectedCount} ${if (p.protectedCount != 1) "are also in" else "is also in"} Liked Songs or a custom playlist and will stay."
-                        },
-                    )
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.clickable { alsoBlacklist = !alsoBlacklist },
-                    ) {
-                        androidx.compose.material3.Checkbox(
-                            checked = alsoBlacklist,
-                            onCheckedChange = { alsoBlacklist = it },
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "Also block these songs from future syncs",
-                                style = MaterialTheme.typography.bodyMedium,
-                            )
-                            Text(
-                                text = "Blocked songs never re-download. Unblock them in Settings later.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                    }
-                }
-            },
-            confirmButton = {
-                androidx.compose.material3.TextButton(
-                    onClick = {
-                        viewModel.deletePlaylistAndSongs(playlist, alsoBlacklist)
-                        playlistToDelete = null
-                    },
-                ) {
-                    Text(
-                        text = if (alsoBlacklist) "Delete & Block" else "Delete",
-                        color = MaterialTheme.colorScheme.error,
-                    )
-                }
-            },
-            dismissButton = {
-                androidx.compose.material3.TextButton(onClick = { playlistToDelete = null }) {
-                    Text("Cancel")
-                }
-            },
-        )
-    }
-}
-
-// ── Daily mix card ───────────────────────────────────────────────────────
-
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun DailyMixCard(
-    playlist: Playlist,
-    onClick: () -> Unit,
-    onLongPress: () -> Unit,
-    modifier: Modifier = Modifier,
-    buildState: MixBuildState = MixBuildState.READY,
-) {
-    val extendedColors = StashTheme.extendedColors
-    val gradientColors = if (playlist.source == MusicSource.SPOTIFY) {
-        listOf(
-            extendedColors.spotifyGreen.copy(alpha = 0.4f),
-            Color.Transparent,
-        )
-    } else {
-        listOf(
-            extendedColors.youtubeRed.copy(alpha = 0.4f),
-            Color.Transparent,
-        )
-    }
-
-    Surface(
-        modifier = modifier
-            .width(180.dp)
-            .height(120.dp)
-            .combinedClickable(
-                onClick = onClick,
-                onLongClick = onLongPress,
-            ),
-        color = extendedColors.glassBackground,
-        shape = RoundedCornerShape(16.dp),
-        border = androidx.compose.foundation.BorderStroke(1.dp, extendedColors.glassBorder),
-    ) {
-        Box(modifier = Modifier.fillMaxSize()) {
-            // Album art background. For daily mixes with 2 tile URLs
-            // (first 2 unique album covers from the current tracklist) we
-            // render them side-by-side — the cover updates visibly every
-            // sync that rotates tracks. Single-URL playlists render as a
-            // single background as before.
-            DailyMixCoverBackground(
-                tileUrls = playlist.artTileUrls,
-                fallback = playlist.artUrl,
-                modifier = Modifier.fillMaxSize(),
-            )
-            // Gradient overlay for text readability
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Brush.verticalGradient(gradientColors))
-                    .background(
-                        Brush.verticalGradient(
-                            listOf(Color.Transparent, Color.Black.copy(alpha = 0.6f)),
-                        )
-                    ),
-            )
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(14.dp),
-                verticalArrangement = Arrangement.SpaceBetween,
-            ) {
-                SourceIndicator(source = playlist.source, size = 8.dp)
-                Column {
-                    // Text always renders white because the card always has a
-                    // dark bottom gradient overlay (Black alpha 0.6) by design.
-                    // Using theme-aware onSurface would make the text disappear
-                    // on light theme where onSurface is near-black.
-                    Text(
-                        text = playlist.name,
-                        style = MaterialTheme.typography.titleSmall,
-                        color = Color.White,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    when (buildState) {
-                        MixBuildState.BUILDING -> Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        ) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(11.dp),
-                                color = Color.White.copy(alpha = 0.85f),
-                                strokeWidth = 1.5.dp,
-                            )
-                            Text(
-                                text = "Building…",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = Color.White.copy(alpha = 0.75f),
-                            )
-                        }
-                        MixBuildState.EMPTY -> Text(
-                            text = "No tracks found",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = Color.White.copy(alpha = 0.75f),
-                        )
-                        MixBuildState.READY -> Text(
-                            text = "${playlist.trackCount} tracks",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = Color.White.copy(alpha = 0.75f),
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
-// ── Compact track card ───────────────────────────────────────────────────
-
-@Composable
-private fun CompactTrackCard(
-    track: Track,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val extendedColors = StashTheme.extendedColors
-
-    Surface(
-        modifier = modifier
-            .width(140.dp)
-            .clickable(onClick = onClick),
-        color = extendedColors.glassBackground,
-        shape = RoundedCornerShape(12.dp),
-        border = androidx.compose.foundation.BorderStroke(1.dp, extendedColors.glassBorder),
-    ) {
-        Column(
-            modifier = Modifier.padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            // Album art
-            val artUrl = track.albumArtPath ?: track.albumArtUrl
-            Box(
-                modifier = Modifier
-                    .size(48.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(extendedColors.elevatedSurface),
-                contentAlignment = Alignment.Center,
-            ) {
-                if (artUrl != null) {
-                    coil3.compose.AsyncImage(
-                        model = artUrl,
-                        contentDescription = null,
-                        modifier = Modifier.fillMaxSize(),
-                        contentScale = androidx.compose.ui.layout.ContentScale.Crop,
-                    )
-                } else {
-                    Icon(
-                        imageVector = Icons.Default.MusicNote,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(24.dp),
-                    )
-                }
-            }
-            Text(
-                text = track.title,
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
-            ) {
-                SourceIndicator(source = track.source, size = 5.dp)
-                Text(
-                    text = track.artist,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-        }
-    }
-}
-
-// ── Mixes section header with optional Play Both button ─────────────────
-
-/**
- * Custom header for the "Your Mixes" section. Shows the title on the left
- * and an optional "Play Both" pill button on the right that plays every
- * mix from both Spotify and YouTube Music combined.
- *
- * The Play Both pill only renders when [showPlayBoth] is true, so users
- * connected to only one service see a plain header instead.
- *
- * @param showPlayBoth Whether to render the Play Both pill. True when the
- *   user has mixes from both sources.
- * @param onPlayBoth Callback invoked when the Play Both pill is tapped.
- */
-@Composable
-private fun MixesSectionHeader(
-    showPlayBoth: Boolean,
-    onPlayBoth: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(horizontal = 20.dp, vertical = 12.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = "Your Mixes",
-            style = MaterialTheme.typography.titleMedium,
-            color = MaterialTheme.colorScheme.onBackground,
-        )
-        if (showPlayBoth) {
-            val accent = MaterialTheme.colorScheme.primary
-            Surface(
-                modifier = Modifier
-                    .height(32.dp)
-                    .clickable(onClick = onPlayBoth),
-                color = accent.copy(alpha = 0.14f),
-                shape = RoundedCornerShape(16.dp),
-                border = androidx.compose.foundation.BorderStroke(1.dp, accent.copy(alpha = 0.4f)),
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxHeight()
-                        .padding(horizontal = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.PlayArrow,
-                        contentDescription = "Play mixes from both services",
-                        tint = accent,
-                        modifier = Modifier.size(16.dp),
-                    )
-                    Text(
-                        text = "Play Both",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = accent,
-                    )
-                }
-            }
-        }
-    }
-}
-
-// ── Source sub-header (used for grouping mix rows by service) ────────────
-
-/**
- * A row header used to separate mix rows by source. Contains a colored
- * source indicator, a label (e.g. "Spotify" or "YouTube Music"), and an
- * optional trailing "Play All" button that plays every track from every
- * mix under that source, effectively merging them into one queue.
- *
- * @param label Display label for the source.
- * @param source The source this header represents (for color/indicator).
- * @param onPlayAll Optional callback. When non-null, renders a trailing
- *   play-all button that invokes this lambda on tap.
- */
-@Composable
-private fun SourceSubHeader(
-    label: String,
-    source: MusicSource,
-    modifier: Modifier = Modifier,
-    onPlayAll: (() -> Unit)? = null,
-) {
-    val extendedColors = StashTheme.extendedColors
-    val accent = when (source) {
-        MusicSource.SPOTIFY -> extendedColors.spotifyGreen
-        MusicSource.YOUTUBE -> extendedColors.youtubeRed
-        MusicSource.LOCAL, MusicSource.BOTH -> MaterialTheme.colorScheme.primary
-    }
-
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(horizontal = 20.dp, vertical = 6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        SourceIndicator(source = source, size = 8.dp)
-        Text(
-            text = label,
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Spacer(modifier = Modifier.weight(1f))
-        if (onPlayAll != null) {
-            Surface(
-                modifier = Modifier
-                    .height(32.dp)
-                    .clickable(onClick = onPlayAll),
-                color = accent.copy(alpha = 0.12f),
-                shape = RoundedCornerShape(16.dp),
-                border = androidx.compose.foundation.BorderStroke(1.dp, accent.copy(alpha = 0.35f)),
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxHeight()
-                        .padding(horizontal = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.PlayArrow,
-                        contentDescription = "Play all $label mixes",
-                        tint = accent,
-                        modifier = Modifier.size(16.dp),
-                    )
-                    Text(
-                        text = "Play All",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = accent,
-                    )
-                }
-            }
-        }
-    }
-}
-
-// ── Liked songs card (with source chips + smart collapse) ───────────────
-
-/**
- * Featured card showing liked-songs across Spotify and YouTube Music.
- *
- * Layout:
- * - Tappable main row plays the combined pool (both sources).
- * - When [showSourceChips] is true (both sources have liked songs), a pair
- *   of tappable chips below the main row plays only one source at a time.
- * - When only one source contributes, chips are hidden and a small source
- *   indicator appears next to the title to identify which service the
- *   count represents.
- *
- * @param totalCount Combined liked-song count across both sources.
- * @param spotifyCount Spotify liked-song count (0 if none).
- * @param youtubeCount YouTube liked-song count (0 if none).
- * @param showSourceChips Whether to render per-source chips.
- * @param singleSource The sole contributing source when [showSourceChips] is
- *   false, used to label the card; null when both or neither source contributes.
- * @param onPlayAll Invoked when the main card body is tapped.
- * @param onPlaySpotify Invoked when the Spotify chip is tapped.
- * @param onPlayYouTube Invoked when the YouTube chip is tapped.
- */
-@Composable
-private fun LikedSongsCard(
-    totalCount: Int,
-    spotifyCount: Int,
-    youtubeCount: Int,
-    showSourceChips: Boolean,
-    singleSource: MusicSource?,
-    onPlayAll: () -> Unit,
-    onPlaySpotify: () -> Unit,
-    onPlayYouTube: () -> Unit,
-    onClick: () -> Unit,
-    onClickSpotify: () -> Unit,
-    onClickYouTube: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val extendedColors = StashTheme.extendedColors
-    val infiniteTransition = rememberInfiniteTransition(label = "livingHeart")
-
-    // Shifting gradient — cycles through purple hues
-    val gradientColor1 by infiniteTransition.animateColor(
-        initialValue = extendedColors.purpleLight,
-        targetValue = extendedColors.purpleDark,
-        animationSpec = infiniteRepeatable(
-            animation = tween(4000, easing = LinearEasing),
-            repeatMode = RepeatMode.Reverse,
-        ),
-        label = "gradientColor1",
-    )
-    val gradientColor2 by infiniteTransition.animateColor(
-        initialValue = extendedColors.purpleDark,
-        targetValue = extendedColors.purpleLight,
-        animationSpec = infiniteRepeatable(
-            animation = tween(4000, easing = LinearEasing),
-            repeatMode = RepeatMode.Reverse,
-        ),
-        label = "gradientColor2",
-    )
-
-    // Breathing glow — shadow radius pulses
-    val glowRadius by infiniteTransition.animateFloat(
-        initialValue = 8f,
-        targetValue = 20f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(3000, easing = EaseInOut),
-            repeatMode = RepeatMode.Reverse,
-        ),
-        label = "glowRadius",
-    )
-    val glowAlpha by infiniteTransition.animateFloat(
-        initialValue = 0.3f,
-        targetValue = 0.6f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(3000, easing = EaseInOut),
-            repeatMode = RepeatMode.Reverse,
-        ),
-        label = "glowAlpha",
-    )
-
-    Surface(
-        modifier = modifier.fillMaxWidth(),
-        color = extendedColors.glassBackground,
-        shape = RoundedCornerShape(16.dp),
-        border = androidx.compose.foundation.BorderStroke(1.dp, extendedColors.glassBorder),
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(
-                    Brush.horizontalGradient(
-                        listOf(
-                            MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
-                            Color.Transparent,
-                        )
-                    )
-                ),
-        ) {
-            // Main row
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable(onClick = onClick)
-                    .padding(24.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(16.dp),
-            ) {
-                // Text content on the left
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "YOUR COLLECTION",
-                        style = MaterialTheme.typography.labelSmall.copy(
-                            letterSpacing = 1.5.sp,
-                        ),
-                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f),
-                    )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        Text(
-                            text = "Liked Songs",
-                            style = MaterialTheme.typography.titleLarge,
-                            color = MaterialTheme.colorScheme.onSurface,
-                        )
-                        if (singleSource != null) {
-                            SourceIndicator(source = singleSource, size = 6.dp)
-                        }
-                    }
-                    Text(
-                        text = when (singleSource) {
-                            MusicSource.SPOTIFY -> "$totalCount tracks on Spotify"
-                            MusicSource.YOUTUBE -> "$totalCount tracks on YouTube Music"
-                            else -> "$totalCount tracks \u00B7 2 sources"
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-
-                // Living heart icon on the right
-                Box(
-                    modifier = Modifier
-                        .size(52.dp)
-                        .drawBehind {
-                            drawCircle(
-                                color = gradientColor1.copy(alpha = glowAlpha),
-                                radius = glowRadius.dp.toPx(),
-                            )
-                        }
-                        .clip(CircleShape)
-                        .background(
-                            Brush.linearGradient(
-                                listOf(gradientColor1, gradientColor2)
-                            )
-                        ),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Favorite,
-                        contentDescription = null,
-                        tint = Color.White,
-                        modifier = Modifier.size(24.dp),
-                    )
-                }
-            }
-
-            // Source chips — compact pills, dot + count only
-            if (showSourceChips) {
-                Row(
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(start = 24.dp, end = 24.dp, bottom = 16.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        .padding(horizontal = 20.dp)
+                        .padding(bottom = 8.dp),
                 ) {
-                    SourceLikedChip(
-                        source = MusicSource.SPOTIFY,
-                        count = spotifyCount,
-                        onClick = onClickSpotify,
-                    )
-                    SourceLikedChip(
-                        source = MusicSource.YOUTUBE,
-                        count = youtubeCount,
-                        onClick = onClickYouTube,
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun SourceLikedChip(
-    source: MusicSource,
-    count: Int,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val extendedColors = StashTheme.extendedColors
-    val accent = when (source) {
-        MusicSource.SPOTIFY -> extendedColors.spotifyGreen
-        MusicSource.YOUTUBE -> extendedColors.youtubeRed
-        MusicSource.LOCAL, MusicSource.BOTH -> MaterialTheme.colorScheme.primary
-    }
-    val sourceName = when (source) {
-        MusicSource.SPOTIFY -> "Spotify"
-        MusicSource.YOUTUBE -> "YouTube"
-        MusicSource.LOCAL -> "Local"
-        MusicSource.BOTH -> ""
-    }
-
-    Surface(
-        modifier = modifier
-            .clickable(onClick = onClick),
-        color = accent.copy(alpha = 0.12f),
-        shape = RoundedCornerShape(20.dp),
-        contentColor = MaterialTheme.colorScheme.onSurface,
-    ) {
-        Row(
-            modifier = Modifier
-                .padding(horizontal = 12.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(6.dp)
-                    .clip(CircleShape)
-                    .background(accent)
-                    .semantics {
-                        contentDescription = "$count $sourceName liked songs"
-                    },
-            )
-            Text(
-                text = count.toString(),
-                style = MaterialTheme.typography.labelMedium,
-                color = accent,
-            )
-        }
-    }
-}
-
-// ── Daily mix cover background ───────────────────────────────────────────
-
-/**
- * Renders the cover art for a daily-mix card. When 2 tile URLs are supplied,
- * draws them side-by-side as a 50/50 horizontal mosaic so users see visible
- * proof that the mix refreshed. With fewer URLs, falls back to a single
- * [AsyncImage] using [fallback]. Draws nothing when neither is available.
- */
-@Composable
-private fun DailyMixCoverBackground(
-    tileUrls: List<String>,
-    fallback: String?,
-    modifier: Modifier = Modifier,
-) {
-    when {
-        tileUrls.size >= 2 -> Row(modifier = modifier) {
-            AsyncImage(
-                model = tileUrls[0],
-                contentDescription = null,
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxHeight(),
-                contentScale = ContentScale.Crop,
-            )
-            AsyncImage(
-                model = tileUrls[1],
-                contentDescription = null,
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxHeight(),
-                contentScale = ContentScale.Crop,
-            )
-        }
-        fallback != null -> AsyncImage(
-            model = fallback,
-            contentDescription = null,
-            modifier = modifier,
-            contentScale = ContentScale.Crop,
-        )
-        else -> Unit
-    }
-}
-
-// ── Playlist grid card ───────────────────────────────────────────────────
-
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun PlaylistGridCard(
-    playlist: Playlist,
-    onClick: () -> Unit,
-    onLongPress: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val extendedColors = StashTheme.extendedColors
-
-    Surface(
-        modifier = modifier
-            .height(100.dp)
-            .combinedClickable(
-                onClick = onClick,
-                onLongClick = onLongPress,
-            ),
-        color = extendedColors.glassBackground,
-        shape = RoundedCornerShape(14.dp),
-        border = androidx.compose.foundation.BorderStroke(1.dp, extendedColors.glassBorder),
-    ) {
-        Box(modifier = Modifier.fillMaxSize()) {
-            // Album art background (if available)
-            if (playlist.artUrl != null) {
-                AsyncImage(
-                    model = playlist.artUrl,
-                    contentDescription = null,
-                    modifier = Modifier.fillMaxSize(),
-                    contentScale = ContentScale.Crop,
-                )
-                // Dark gradient overlay for text readability
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(
-                            Brush.verticalGradient(
-                                listOf(Color.Black.copy(alpha = 0.2f), Color.Black.copy(alpha = 0.7f)),
-                            )
-                        ),
-                )
-            }
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(14.dp),
-                verticalArrangement = Arrangement.SpaceBetween,
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.QueueMusic,
-                        contentDescription = null,
-                        tint = if (playlist.artUrl != null) Color.White else MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(18.dp),
-                    )
-                    SourceIndicator(source = playlist.source, size = 6.dp)
-                }
-                Column {
                     Text(
-                        text = playlist.name,
-                        style = MaterialTheme.typography.labelMedium,
-                        color = if (playlist.artUrl != null) Color.White else MaterialTheme.colorScheme.onSurface,
+                        text = mix.title,
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    Text(
-                        text = "${playlist.trackCount} tracks",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = if (playlist.artUrl != null) Color.White.copy(alpha = 0.7f) else MaterialTheme.colorScheme.onSurfaceVariant,
+                }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                if (isStashMix) {
+                    MixActionRow(
+                        icon = Icons.Default.Refresh,
+                        label = "Refresh this mix",
+                        onClick = {
+                            viewModel.refreshMix(id)
+                            actionSheetMixId = null
+                        },
                     )
                 }
+                if (isCustom) {
+                    MixActionRow(
+                        icon = Icons.Default.Edit,
+                        label = "Edit mix",
+                        onClick = {
+                            viewModel.editRecipeId(id) { recipeId -> onNavigateToMixBuilder(recipeId) }
+                            actionSheetMixId = null
+                        },
+                    )
+                    MixActionRow(
+                        icon = Icons.Default.Delete,
+                        label = "Delete mix",
+                        tint = MaterialTheme.colorScheme.error,
+                        onClick = {
+                            viewModel.deleteCustomMix(id)
+                            actionSheetMixId = null
+                        },
+                    )
+                }
+                MixActionRow(
+                    icon = Icons.Filled.RemoveCircleOutline,
+                    label = "Hide from Home",
+                    onClick = {
+                        viewModel.setHideFromHome(id, true)
+                        actionSheetMixId = null
+                    },
+                )
+                MixActionRow(
+                    icon = Icons.Default.PlayArrow,
+                    label = "Open",
+                    onClick = {
+                        openMix(id)
+                        actionSheetMixId = null
+                    },
+                )
+                Spacer(Modifier.height(12.dp))
+            }
+        }
+    }
+
+    // ── Daily Discover hero action sheet (long-press the hero page) ──────
+    if (heroActionSheet) {
+        val hero = uiState.hero
+        if (hero != null) {
+            val sheetState = rememberModalBottomSheetState()
+            ModalBottomSheet(
+                onDismissRequest = { heroActionSheet = false },
+                sheetState = sheetState,
+                containerColor = MaterialTheme.colorScheme.surface,
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp)
+                        .padding(bottom = 8.dp),
+                ) {
+                    Text(
+                        text = hero.title,
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                MixActionRow(
+                    icon = Icons.Default.Refresh,
+                    label = "Refresh",
+                    onClick = {
+                        viewModel.refreshMix(hero.playlistId)
+                        heroActionSheet = false
+                    },
+                )
+                MixActionRow(
+                    icon = Icons.Default.VisibilityOff,
+                    label = "Minimize for now",
+                    onClick = {
+                        viewModel.setHeroMinimized(true)
+                        heroActionSheet = false
+                    },
+                )
+                Spacer(Modifier.height(12.dp))
             }
         }
     }
 }
 
-/**
- * Sealed tile type used to interleave the Create-Playlist entry point with
- * the user's custom playlists inside the Home Playlists 2-column grid.
- */
-private sealed interface PlaylistTile {
-    object Create : PlaylistTile
-    data class Item(val playlist: Playlist) : PlaylistTile
-}
+// ── Mix action-sheet row ──────────────────────────────────────────────────
 
-// ── Create playlist card ────────────────────────────────────────────────
-
-/**
- * First tile in the Playlists grid. Tapping it opens the naming dialog to
- * create a new empty custom playlist. Styled to match [PlaylistGridCard]
- * so the grid reads consistently.
- */
+/** A single action row inside the Stash-mix action sheet. */
 @Composable
-private fun CreatePlaylistCard(
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val extendedColors = StashTheme.extendedColors
-
-    Surface(
-        modifier = modifier
-            .height(100.dp)
-            .clickable(onClick = onClick),
-        color = extendedColors.glassBackground,
-        shape = RoundedCornerShape(14.dp),
-        border = androidx.compose.foundation.BorderStroke(1.dp, extendedColors.glassBorder),
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            Icon(
-                imageVector = Icons.Default.Add,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(24.dp),
-            )
-            Text(
-                text = "Create Playlist",
-                style = MaterialTheme.typography.labelLarge,
-                color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-    }
-}
-
-// ── Create mix card ──────────────────────────────────────────────────────
-
-/**
- * Leading tile in the Stash Mixes row. Tapping it opens the Mix Builder
- * to create a brand-new custom mix (recipeId = null). Compact (104×120 — a
- * narrow "add" affordance, not a full 180-wide mix card) with a dashed glass
- * border, mirroring the Playlists grid's [CreatePlaylistCard] affordance.
- */
-@Composable
-private fun CreateMixCard(
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val extendedColors = StashTheme.extendedColors
-    val accent = MaterialTheme.colorScheme.primary
-
-    Box(
-        modifier = modifier
-            .width(104.dp)
-            .height(120.dp)
-            .clip(RoundedCornerShape(16.dp))
-            .background(extendedColors.glassBackground)
-            .drawBehind {
-                val stroke = androidx.compose.ui.graphics.drawscope.Stroke(
-                    width = 1.dp.toPx(),
-                    pathEffect = androidx.compose.ui.graphics.PathEffect.dashPathEffect(
-                        floatArrayOf(8.dp.toPx(), 6.dp.toPx()),
-                        0f,
-                    ),
-                )
-                drawRoundRect(
-                    color = accent.copy(alpha = 0.5f),
-                    style = stroke,
-                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(16.dp.toPx()),
-                )
-            }
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center,
-    ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            Icon(
-                imageVector = Icons.Default.Add,
-                contentDescription = null,
-                tint = accent,
-                modifier = Modifier.size(24.dp),
-            )
-            Text(
-                text = "Create\nmix",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurface,
-                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-            )
-        }
-    }
-}
-
-// ── Bottom sheet action row ──────────────────────────────────────────────
-
-/**
- * A single action row inside a playlist context-menu bottom sheet.
- *
- * @param icon  Leading icon for the action.
- * @param label Human-readable label.
- * @param tint  Icon and label color. Defaults to [MaterialTheme.colorScheme.onSurface].
- * @param onClick Callback when the row is tapped.
- */
-@Composable
-private fun HomeBottomSheetActionRow(
+private fun MixActionRow(
     icon: ImageVector,
     label: String,
     onClick: () -> Unit,
@@ -1685,7 +834,7 @@ private const val STASH_ISSUE_URL = "https://github.com/rawnaldclark/Stash/issue
 // browser. Edit when the invite rotates.
 private const val STASH_DISCORD_URL = "https://discord.gg/vcbjEby5PC"
 
-private val HOME_SUPPORTERS = listOf(
+private val LEGACY_SUPPORTERS = listOf(
     Supporter(
         name = "Cedric",
         amount = "$10",
@@ -1704,22 +853,15 @@ private val HOME_SUPPORTERS = listOf(
 )
 
 /**
- * v0.9.13: Tip Jar pill — calmer, on-brand redesign.
+ * Tip-jar ticker — dublab-style community marquee.
  *
- * Replaces the prior typewriter+sheet approach (felt corny). Now:
- *  - Small mono lowercase `tip jar` tag with subtle purple glow
- *  - Avatar circle with the supporter's initial (track-row vocabulary)
- *  - Name in Space Grotesk Bold (heroic, like a song title)
- *  - Amount right-aligned in mono (the only number on the surface)
- *  - Message in Inter italic, low-contrast (testimonial / liner-note)
- *  - Footer hint `ko-fi.com/rawnald →` so the tap target is obvious
- *  - Crossfade between supporters every ~6s
- *
- * Tap on the whole card opens ko-fi in the browser. No in-app sheet —
- * goal/progress tracking lives at ko-fi where it actually happens.
+ * One slim strip, ALL supporters flowing through it as a continuous
+ * horizontal scroll (name · amount, then their message, ✦-separated) —
+ * grassroots radio-station energy instead of a rotating card. Tap
+ * anywhere opens ko-fi; goal/progress tracking lives there.
  */
 @Composable
-private fun SupporterPill(
+private fun SupporterTicker(
     supporters: List<Supporter>,
     modifier: Modifier = Modifier,
 ) {
@@ -1727,117 +869,169 @@ private fun SupporterPill(
     val uriHandler = LocalUriHandler.current
     val extendedColors = StashTheme.extendedColors
 
-    var index by remember { mutableStateOf(0) }
-    LaunchedEffect(supporters.size) {
-        while (true) {
-            kotlinx.coroutines.delay(7000)
-            if (supporters.isNotEmpty()) {
-                index = (index + 1) % supporters.size
+    val ink = MaterialTheme.colorScheme.onSurface
+    val dim = MaterialTheme.colorScheme.onSurfaceVariant
+
+    // Supporters woven with station announcements (mission line, dev and
+    // contributor calls) so the wire carries variety, not just gratitude.
+    // Separator: a dimmed interpunct — no color pop, so the
+    // strip stays quiet inside the app's palette.
+    val line = remember(supporters, ink, dim) {
+        val segments = buildTickerSegments(
+            supporters.map { TickerSegment.Shoutout(it.name, it.amount, it.message) },
+        )
+        buildAnnotatedString {
+            segments.forEach { seg ->
+                when (seg) {
+                    is TickerSegment.Shoutout -> {
+                        withStyle(SpanStyle(color = ink, fontWeight = FontWeight.SemiBold)) {
+                            append("${seg.name} · ${seg.amount}")
+                        }
+                        if (seg.message.isNotBlank()) {
+                            withStyle(SpanStyle(color = dim, fontStyle = FontStyle.Italic)) {
+                                append("  “${seg.message}”")
+                            }
+                        }
+                    }
+                    is TickerSegment.Announcement -> {
+                        // Station voice: quiet by design — muted ink, regular
+                        // weight (names are bold, quotes italic; this murmurs).
+                        withStyle(SpanStyle(color = dim)) {
+                            append(seg.text)
+                        }
+                    }
+                }
+                // Entry separator: the app's own interpunct, dimmed — no
+                // color pop, just a quiet beat of air between voices.
+                withStyle(SpanStyle(color = dim.copy(alpha = 0.5f))) { append("    ·    ") }
             }
         }
     }
-    val current = supporters[index.coerceIn(0, supporters.lastIndex)]
 
+    // Wall-clock marquee: offset is a pure function of elapsed-since-epoch
+    // (see marqueeOffsetPx), so the tape RESUMES mid-flow after the item
+    // leaves and re-enters composition. basicMarquee restarted from zero on
+    // every return to the top of Home — which is why announcements deep in
+    // the tape were never seen. rememberSaveable pins the epoch across
+    // lazy-item disposal.
+    val epochMs = rememberSaveable { System.currentTimeMillis() }
+    var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            withFrameMillis { nowMs = System.currentTimeMillis() }
+        }
+    }
+    val velocityPxPerSec = with(LocalDensity.current) { 31.dp.toPx() }
+    var tapeWidthPx by remember { mutableIntStateOf(0) }
+
+    // Full-bleed strip: no card, no border, no leading icon — every pixel
+    // of width belongs to the tape.
     Surface(
         modifier = modifier.clickable { uriHandler.openUri("https://ko-fi.com/rawnald") },
-        color = extendedColors.glassBackground,
-        shape = RoundedCornerShape(14.dp),
-        border = androidx.compose.foundation.BorderStroke(1.dp, extendedColors.glassBorder),
+        // AMOLED: the glass tint would keep the strip's pixels lit — let the
+        // pure-black ground show through instead.
+        color = if (com.stash.core.ui.theme.LocalIsAmoledTheme.current) {
+            Color.Transparent
+        } else {
+            extendedColors.glassBackground
+        },
     ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
-            verticalAlignment = Alignment.Top,
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 10.dp)
+                .clipToBounds(),
         ) {
-            androidx.compose.material3.Icon(
-                imageVector = androidx.compose.material.icons.Icons.Default.FavoriteBorder,
-                contentDescription = "Supporters on Ko-fi",
-                tint = Color(0xFFFFC947),
+            Row(
                 modifier = Modifier
-                    .size(16.dp)
-                    .padding(top = 2.dp),
-            )
-            Crossfade(
-                targetState = current,
-                animationSpec = tween(durationMillis = 600),
-                label = "supporter-crossfade",
-                modifier = Modifier.weight(1f),
-            ) { s ->
-                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text(
-                        text = "${s.name} \u00B7 ${s.amount}",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Text(
-                        text = "\u201C${s.message}\u201D",
-                        style = MaterialTheme.typography.bodySmall.copy(
-                            fontStyle = FontStyle.Italic,
-                        ),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        // Cap long donation messages at 2 lines so a paragraph
-                        // can't balloon the pill height; ellipsis trims the rest.
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
+                    .wrapContentWidth(align = Alignment.Start, unbounded = true)
+                    .graphicsLayer {
+                        translationX = -marqueeOffsetPx(nowMs - epochMs, velocityPxPerSec, tapeWidthPx)
+                    },
+            ) {
+                Text(
+                    text = line,
+                    style = MaterialTheme.typography.labelMedium,
+                    maxLines = 1,
+                    softWrap = false,
+                    modifier = Modifier.onSizeChanged { tapeWidthPx = it.width },
+                )
+                // Second copy of the tape for a seamless wrap.
+                Text(
+                    text = line,
+                    style = MaterialTheme.typography.labelMedium,
+                    maxLines = 1,
+                    softWrap = false,
+                )
             }
         }
     }
 }
 
-// ── Playlist sort chips ──────────────────────────────────────────────────
+// \u2500\u2500 Qobuz discovery rows \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
-/**
- * Horizontally-scrollable row of filter chips controlling the sort applied to
- * the Home Playlists grid. Deliberately mirrors the Library module's
- * SortChipRow so the two surfaces feel identical.
- */
+/** Horizontal carousel of Qobuz albums (New Releases). Tap \u2192 album detail. */
 @Composable
-private fun PlaylistSortChipRow(
-    activeSort: PlaylistSortOrder,
-    onSortSelected: (PlaylistSortOrder) -> Unit,
+private fun DiscoveryAlbumRow(
+    title: String,
+    albums: List<AlbumSummary>,
+    onOpen: (AlbumSummary) -> Unit,
+    topSpacing: androidx.compose.ui.unit.Dp = 16.dp,
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .horizontalScroll(rememberScrollState())
-            .padding(horizontal = 20.dp, vertical = 4.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        PlaylistSortOrder.entries.forEach { order ->
-            val isSelected = order == activeSort
-            FilterChip(
-                selected = isSelected,
-                onClick = { onSortSelected(order) },
-                label = {
-                    Text(
-                        text = order.displayName(),
-                        style = MaterialTheme.typography.labelMedium,
-                    )
-                },
-                colors = FilterChipDefaults.filterChipColors(
-                    selectedContainerColor = StashTheme.extendedColors.elevatedSurface,
-                    selectedLabelColor = MaterialTheme.colorScheme.onBackground,
-                    containerColor = Color.Transparent,
-                    labelColor = StashTheme.extendedColors.textTertiary,
-                ),
-                border = FilterChipDefaults.filterChipBorder(
-                    borderColor = Color.Transparent,
-                    selectedBorderColor = StashTheme.extendedColors.glassBorderBright,
-                    enabled = true,
-                    selected = isSelected,
-                ),
-            )
+    Column {
+        Spacer(Modifier.height(topSpacing))
+        SectionHeader(title = title)
+        LazyRow(
+            contentPadding = PaddingValues(horizontal = 20.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            items(albums) { album ->
+                AlbumSquareCard(
+                    title = album.title,
+                    artist = album.artist,
+                    thumbnailUrl = album.thumbnailUrl,
+                    year = album.year,
+                    isLossless = true,
+                    onClick = { onOpen(album) },
+                )
+            }
         }
     }
 }
 
-private fun PlaylistSortOrder.displayName(): String = when (this) {
-    PlaylistSortOrder.RECENT -> "Recently Added"
-    PlaylistSortOrder.ALPHABETICAL -> "A-Z"
-    PlaylistSortOrder.MOST_PLAYED -> "Most Played"
+/**
+ * Horizontal carousel of Qobuz community playlists. Each card carries the
+ * curator as its subtitle and opens via a QOBUZ_PLAYLIST [AlbumSummary] so the
+ * existing album-detail screen renders + plays it.
+ */
+@Composable
+private fun DiscoveryPlaylistRow(
+    title: String,
+    playlists: List<PlaylistSummary>,
+    onOpen: (AlbumSummary) -> Unit,
+    onSeeAll: () -> Unit,
+    topSpacing: androidx.compose.ui.unit.Dp = 16.dp,
+) {
+    Column {
+        Spacer(Modifier.height(topSpacing))
+        SectionHeader(title = title, actionText = "See all", onActionClick = onSeeAll)
+        LazyRow(
+            contentPadding = PaddingValues(horizontal = 20.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            items(playlists) { playlist ->
+                AlbumSquareCard(
+                    title = playlist.title,
+                    // Curator is always the regional Qobuz account ("Qobuz France")
+                    // — redundant on every card, so show the track count instead.
+                    artist = "${playlist.trackCount} tracks",
+                    thumbnailUrl = playlist.thumbnailUrl,
+                    year = null,
+                    isLossless = true,
+                    onClick = { onOpen(playlist.toAlbumNav()) },
+                )
+            }
+        }
+    }
 }
 

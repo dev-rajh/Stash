@@ -39,10 +39,16 @@ import javax.inject.Inject
 data class SyncHistoryInfo(
     val id: Long,
     val startedAt: Long,
+    val completedAt: Long? = null,
     val status: String,
-    val tracksDownloaded: Int,
-    val tracksFailed: Int,
+    val tracksDownloaded: Int = 0,
+    val tracksFailed: Int = 0,
     val newTracksFound: Int = 0,
+    val playlistsChecked: Int = 0,
+    val bytesDownloaded: Long = 0,
+    val trigger: com.stash.core.model.SyncTrigger = com.stash.core.model.SyncTrigger.MANUAL,
+    /** Online (true) / Offline (false) / unknown-legacy (null) at the time of this sync. */
+    val streamingMode: Boolean? = null,
     val errorMessage: String? = null,
     val diagnostics: String? = null,
     /**
@@ -66,6 +72,7 @@ data class SpotifySyncPlaylist(
     val type: com.stash.core.model.PlaylistType,
     val syncEnabled: Boolean,
     val artUrl: String? = null,
+    val hideFromHome: Boolean = false,
 )
 
 /**
@@ -81,6 +88,7 @@ data class YouTubeSyncPlaylist(
     val type: com.stash.core.model.PlaylistType,
     val syncEnabled: Boolean,
     val artUrl: String? = null,
+    val hideFromHome: Boolean = false,
 )
 
 data class SyncUiState(
@@ -318,6 +326,15 @@ class SyncViewModel @Inject constructor(
     }
 
     /**
+     * Toggle hide_from_home for a specific playlist. Unlike [onTogglePlaylistSync]
+     * this does NOT sweep downloads — hiding a mix from Home has nothing to do
+     * with what's queued or synced.
+     */
+    fun onToggleHideFromHome(playlistId: Long, hidden: Boolean) {
+        viewModelScope.launch { playlistDao.setHideFromHome(playlistId, hidden) }
+    }
+
+    /**
      * Update the daily sync schedule time and reschedule.
      *
      * @param hour   Hour of day (0-23).
@@ -526,6 +543,7 @@ class SyncViewModel @Inject constructor(
                     SyncDisplayStatus.Success -> "✓"
                     is SyncDisplayStatus.PartialSuccess -> "!"
                     is SyncDisplayStatus.Interrupted -> "!"
+                    SyncDisplayStatus.Cancelled -> "⊘"
                     is SyncDisplayStatus.Failed -> "×"
                     else -> ""
                 }
@@ -535,6 +553,8 @@ class SyncViewModel @Inject constructor(
                     is SyncDisplayStatus.PartialSuccess,
                     is SyncDisplayStatus.Interrupted ->
                         androidx.compose.ui.graphics.Color(0xFFF59E0B)
+                    SyncDisplayStatus.Cancelled ->
+                        androidx.compose.ui.graphics.Color(0xFF9CA3AF)
                     is SyncDisplayStatus.Failed ->
                         androidx.compose.ui.graphics.Color(0xFFEF4444)
                     else -> androidx.compose.ui.graphics.Color.Transparent
@@ -564,6 +584,7 @@ class SyncViewModel @Inject constructor(
                                 type = e.type,
                                 syncEnabled = e.syncEnabled,
                                 artUrl = e.artUrl,
+                                hideFromHome = e.hideFromHome,
                             )
                         }
                     )
@@ -585,6 +606,7 @@ class SyncViewModel @Inject constructor(
                                 type = e.type,
                                 syncEnabled = e.syncEnabled,
                                 artUrl = e.artUrl,
+                                hideFromHome = e.hideFromHome,
                             )
                         }
                     )
@@ -682,10 +704,15 @@ class SyncViewModel @Inject constructor(
     private fun SyncHistoryEntity.toInfo() = SyncHistoryInfo(
         id = id,
         startedAt = startedAt.toEpochMilli(),
+        completedAt = completedAt?.toEpochMilli(),
         status = status.name,
         tracksDownloaded = tracksDownloaded,
         tracksFailed = tracksFailed,
         newTracksFound = newTracksFound,
+        playlistsChecked = playlistsChecked,
+        bytesDownloaded = bytesDownloaded,
+        trigger = trigger,
+        streamingMode = streamingMode,
         errorMessage = errorMessage,
         diagnostics = diagnostics,
         displayStatus = toDisplayStatus(),

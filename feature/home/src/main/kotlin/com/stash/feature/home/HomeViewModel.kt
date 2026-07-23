@@ -4,8 +4,17 @@ import android.content.Context
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.work.Constraints
+import androidx.work.ExistingWorkPolicy
+import androidx.work.NetworkType
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkInfo
+import androidx.work.WorkManager
+import androidx.work.workDataOf
 import com.stash.core.data.db.dao.DiscoveryQueueDao
 import com.stash.core.data.db.dao.StashMixRecipeDao
+import com.stash.core.data.discovery.GenreCatalog
+import com.stash.core.data.discovery.HomeDiscoveryRepository
 import com.stash.core.data.mix.MixBuildState
 import com.stash.core.data.mix.mixBuildState
 import com.stash.core.data.prefs.DownloadNetworkPreference
@@ -14,26 +23,19 @@ import com.stash.core.data.repository.MusicRepository
 import com.stash.core.data.sync.workers.StashDiscoveryWorker
 import com.stash.core.data.sync.workers.StashMixRefreshWorker
 import com.stash.core.media.PlayerRepository
-import com.stash.core.media.streaming.queuePlayableTracks
-import com.stash.core.model.MusicSource
 import com.stash.core.model.Playlist
-import com.stash.core.model.PlaylistType
-import com.stash.core.model.Track
 import com.stash.data.download.lossless.LosslessSourcePreferences
 import com.stash.data.download.backfill.MetadataBackfillState
+import com.stash.data.ytmusic.model.AlbumSummary
+import com.stash.data.ytmusic.model.PlaylistSummary
 import com.stash.feature.home.banner.MetadataBackfillBannerState
 import com.stash.feature.home.banner.metadataBackfillBannerStateFor
-import androidx.work.Constraints
-import androidx.work.ExistingWorkPolicy
-import androidx.work.NetworkType
-import androidx.work.OneTimeWorkRequestBuilder
-import androidx.work.WorkInfo
-import androidx.work.WorkManager
-import androidx.work.await
-import androidx.work.workDataOf
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -41,32 +43,29 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
-import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.firstOrNull
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.scan
 import kotlinx.coroutines.flow.stateIn
-import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
-private const val TAG = "HomeViewModel"
-
 /**
- * ViewModel for the Home screen. Collects playlist, track, recently-added,
- * and prompt-banner data from [MusicRepository] and the Last.fm / lossless
- * preference surfaces, combining them into a single reactive [HomeUiState].
+ * ViewModel for the redesigned Home screen — a pure *discovery* surface.
  *
- * All data sources are Flow-based so the UI updates automatically when:
- * - New tracks/playlists are inserted after a sync
- * - A sync completes and a new history record appears
+ * Home now carries only the **Discover hero** (the materialized builtin Daily
+ * Discover playlist) plus the persistent "chrome": tip-jar pill, lossless
+ * prompt, metadata-backfill banner, and the streaming toggle. All library
+ * content (mixes, liked songs, recently-added, custom playlists) and its
+ * flows/methods were relocated to the Library screen (`:feature:library`).
  *
- * Note: the Sync status card (and its per-source connection booleans,
- * library-size walk, and latest-sync stream) was relocated to
- * `:feature:sync` in the SyncStatusCard relocation refactor — see
- * SyncViewModel for the moved flow assembly. Home no longer observes
- * TokenManager.spotifyAuthState / youTubeAuthState directly.
+ * Data sources are Flow-based so the hero updates automatically when the
+ * Daily Discover playlist materializes after a discovery run.
  */
 @HiltViewModel
 class HomeViewModel @Inject constructor(
@@ -77,9 +76,13 @@ class HomeViewModel @Inject constructor(
     private val tipJarRepository: com.stash.core.data.tipjar.TipJarRepository,
     private val recipeDao: StashMixRecipeDao,
     private val discoveryQueueDao: DiscoveryQueueDao,
+    private val playlistDao: com.stash.core.data.db.dao.PlaylistDao,
     private val downloadNetworkPreference: DownloadNetworkPreference,
     private val streamingPreference: StreamingPreference,
+    private val homeDiscoveryPreference: com.stash.core.data.prefs.HomeDiscoveryPreference,
+    private val homeSectionsPreference: com.stash.core.data.prefs.HomeSectionsPreference,
     private val metadataBackfillState: MetadataBackfillState,
+    private val homeDiscoveryRepository: HomeDiscoveryRepository,
     @ApplicationContext private val context: Context,
 ) : ViewModel() {
 
@@ -143,13 +146,10 @@ class HomeViewModel @Inject constructor(
     }
 
     private val _userMessages = MutableSharedFlow<String>(
-        // Bumped to 8 to mirror NowPlayingViewModel — actions that emit two
-        // back-to-back messages (refresh start → done, lossless retry start →
-        // result) need headroom against the Toast collector's drain rate.
         extraBufferCapacity = 8,
         onBufferOverflow = BufferOverflow.DROP_OLDEST,
     )
-    /** One-shot snackbar messages (e.g. "Refreshing Daily Discover…"). */
+    /** One-shot snackbar messages. */
     val userMessages: SharedFlow<String> = _userMessages.asSharedFlow()
 
     init {
@@ -173,54 +173,101 @@ class HomeViewModel @Inject constructor(
     }
 
     /**
-     * Bundles the two Room-backed flows Home needs into a single
-     * intermediate holder. Track count + disk-walked library size used
-     * to live here too — both fed the SyncStatusCard at the top of
-     * Home; that card now lives in `:feature:sync` and its plumbing
-     * moved with it.
+     * Session-scoped "minimize Daily Discover": long-press the hero →
+     * "Minimize for now" drops the hero page until the next app launch.
+     * Deliberately not persisted — it's "hide it for a bit", not a setting.
      */
-    private val musicDataFlow = combine(
+    private val _heroMinimized = MutableStateFlow(false)
+    val heroMinimized: StateFlow<Boolean> = _heroMinimized
+
+    fun setHeroMinimized(minimized: Boolean) {
+        _heroMinimized.value = minimized
+    }
+
+    /** Everything derived from the playlists + recipe streams in one holder. */
+    private data class HomePlaylistData(
+        val hero: DiscoverHeroState?,
+        val madeForYou: List<HomeMix>,
+        val radios: List<HomeMix>,
+        val moodDecades: List<HomeMix>,
+        val yourMixes: List<HomeMix>,
+        val customMixPlaylistIds: Set<Long>,
+    )
+
+    private val homePlaylistFlow: Flow<HomePlaylistData> = combine(
         musicRepository.getAllPlaylists(),
-        musicRepository.getRecentlyAdded(20),
-        // Folded in here (rather than as a 6th positional arg to the top-
-        // level `uiState` combine, which is already at the 5-arg typed-
-        // overload max) so the recipe-derived custom-mix sets ride the
-        // existing holder flow alongside `playlists`.
         recipeDao.observeAll(),
         discoveryQueueDao.observeNonFailedCountsByRecipe(),
-    ) { playlists, recentlyAdded, recipes, discoveryCounts ->
+        // Builtin ids are a one-shot suspend read wrapped as a flow.
+        flow { emit(recipeDao.getBuiltinPlaylistIds()) },
+    ) { playlists, recipes, discoveryCounts, builtinIdList ->
+        val builtinIds = builtinIdList.toSet()
         val customRecipes = recipes.filter { !it.isBuiltin && it.playlistId != null }
         val customMixPlaylistIds = customRecipes.mapNotNull { it.playlistId }.toSet()
 
-        // Per-custom-mix build state, so the Home card can show "Building…"
-        // while a freshly-created mix populates, and "No tracks" if it found
-        // nothing — instead of looking broken at "0 tracks".
+        // Per-custom-mix build state (Building… / No tracks) — mirrors LibraryViewModel.
         val trackCounts = playlists.associate { it.id to it.trackCount }
         val discoveryByRecipe = discoveryCounts.associate { it.recipeId to it.count }
         val buildingMixIds = mutableSetOf<Long>()
         val emptyMixIds = mutableSetOf<Long>()
         for (recipe in customRecipes) {
             val playlistId = recipe.playlistId ?: continue
-            val state = mixBuildState(
-                recipe = recipe,
-                trackCount = trackCounts[playlistId] ?: 0,
-                nonFailedDiscoveryCount = discoveryByRecipe[recipe.id] ?: 0,
-            )
-            when (state) {
+            when (
+                mixBuildState(
+                    recipe = recipe,
+                    trackCount = trackCounts[playlistId] ?: 0,
+                    nonFailedDiscoveryCount = discoveryByRecipe[recipe.id] ?: 0,
+                )
+            ) {
                 MixBuildState.BUILDING -> buildingMixIds.add(playlistId)
                 MixBuildState.EMPTY -> emptyMixIds.add(playlistId)
                 MixBuildState.READY -> Unit
             }
         }
-        MusicData(playlists, recentlyAdded, customMixPlaylistIds, buildingMixIds, emptyMixIds)
+
+        // Hero: the builtin Daily Discover playlist, once it has materialized.
+        val hero = playlists
+            .firstOrNull { it.id == builtinIdList.firstOrNull() && it.trackCount > 0 }
+            ?.let { playlist ->
+                DiscoverHeroState(
+                    title = playlist.name,
+                    subtitle = "${playlist.trackCount} tracks · updated daily",
+                    artUrl = playlist.artUrl,
+                    playlistId = playlist.id,
+                )
+            }
+
+        // Classify each playlist into its Home rail. buildState only carries for
+        // STASH_MIX (YOUR_MIXES); builtin Daily Discover is excluded from YOUR_MIXES.
+        val madeForYou = mutableListOf<HomeMix>()
+        val radios = mutableListOf<HomeMix>()
+        val moodDecades = mutableListOf<HomeMix>()
+        val yourMixes = mutableListOf<HomeMix>()
+        for (p in playlists.filter { !it.hideFromHome }) {
+            when (mixRail(p)) {
+                MixRail.MADE_FOR_YOU -> madeForYou += p.toHomeMix()
+                MixRail.RADIOS -> radios += p.toHomeMix()
+                MixRail.MOOD_DECADES -> moodDecades += p.toHomeMix()
+                MixRail.YOUR_MIXES -> if (p.id !in builtinIds) {
+                    val state = when {
+                        p.id in buildingMixIds -> MixBuildState.BUILDING
+                        p.id in emptyMixIds -> MixBuildState.EMPTY
+                        else -> MixBuildState.READY
+                    }
+                    yourMixes += p.toHomeMix(state)
+                }
+                null -> Unit
+            }
+        }
+
+        HomePlaylistData(hero, madeForYou, radios, moodDecades, yourMixes, customMixPlaylistIds)
     }
 
-    /**
-     * Active sort for the Home Playlists grid. Starts at RECENT to match
-     * the previous default (implicit `getAllPlaylists` ordering, now made
-     * explicit as "most recently added first").
-     */
-    private val _playlistSortOrder = MutableStateFlow(PlaylistSortOrder.RECENT)
+    private fun Playlist.toHomeMix(buildState: MixBuildState = MixBuildState.READY) =
+        HomeMix(
+            id = id, title = name, artUrl = artUrl, source = source,
+            buildState = buildState, trackCount = trackCount,
+        )
 
     /**
      * Lossless connect nudge: only visible when the user has not
@@ -244,74 +291,116 @@ class HomeViewModel @Inject constructor(
     private val metadataBackfillBannerFlow: Flow<MetadataBackfillBannerState> =
         metadataBackfillState.snapshot.map { metadataBackfillBannerStateFor(it) }
 
-    val uiState: StateFlow<HomeUiState> = combine(
-        musicDataFlow,
-        losslessPromptFlow,
-        _playlistSortOrder,
-        tipJarRepository.state,
-        metadataBackfillBannerFlow,
-    ) { musicData, losslessPrompt, playlistSortOrder, tipJar, metadataBackfillBanner ->
-        // Stash Mixes — recipe-driven, generated locally. Separate from
-        // sync-imported Daily Mixes so the UI can label them distinctly.
-        val stashMixes = musicData.playlists.filter {
-            it.type == PlaylistType.STASH_MIX || it.type == PlaylistType.DOWNLOADS_MIX
+    /** Selected genre chip label ("All" = no filter). Drives the discovery rows. */
+    private val genreFilter = MutableStateFlow("All")
+
+    private data class DiscoveryUi(
+        val selectedGenre: String,
+        val newReleases: List<AlbumSummary>,
+        val topAlbums: List<AlbumSummary>,
+        val playlists: List<PlaylistSummary>,
+        val enabled: Boolean = true,
+        // Rides this emission (instead of a 6th uiState combine source):
+        // the user-arranged visible Home sections, which also gate the
+        // fetches above — a hidden Qobuz section costs zero requests.
+        val sections: List<com.stash.core.data.prefs.HomeSection> =
+            com.stash.core.data.prefs.HomeSection.entries.toList(),
+    )
+
+    /**
+     * The three Qobuz discovery rows, re-fetched whenever the genre chip
+     * changes ([flatMapLatest] cancels the previous fetch). The previous
+     * genre's rows STAY on screen while the new fetch runs (the scan keeps
+     * the last loaded state) — the rows sit directly under the hero, so
+     * clearing them eagerly made the mix rails jump up for the fetch
+     * duration on every chip tap. The chip highlight still updates
+     * instantly via the loading emission (null rows = keep previous), and
+     * the loaded emission replaces wholesale — even when empty — so stale
+     * content never survives a completed fetch. Fail-soft as before.
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private val discoveryFlow: Flow<DiscoveryUi> = combine(
+        homeDiscoveryPreference.enabled,
+        homeSectionsPreference.visibleSections,
+    ) { enabled, sections -> enabled to sections }
+        .distinctUntilChanged()
+        .flatMapLatest { (qobuzEnabled, sections) ->
+            // Each Qobuz row fetches only when its section is actually on
+            // Home — hiding a section in Settings > Home layout (or the
+            // global Qobuz opt-out) costs zero catalog requests.
+            val wantReleases = qobuzEnabled && com.stash.core.data.prefs.HomeSection.NEW_RELEASES in sections
+            val wantPlaylists = qobuzEnabled && com.stash.core.data.prefs.HomeSection.QOBUZ_PLAYLISTS in sections
+            val wantTop = qobuzEnabled && com.stash.core.data.prefs.HomeSection.TOP_ALBUMS in sections
+            if (!wantReleases && !wantPlaylists && !wantTop) {
+                kotlinx.coroutines.flow.flowOf(
+                    DiscoveryUi(
+                        "All", emptyList(), emptyList(), emptyList(),
+                        enabled = qobuzEnabled, sections = sections,
+                    ),
+                )
+            } else {
+                genreFilter
+                    .flatMapLatest { label ->
+                        flow<Pair<String, DiscoveryUi?>> {
+                            val genreId = GenreCatalog.idFor(label)
+                            emit(label to null) // loading: re-label, keep previous rows
+                            coroutineScope {
+                                val newReleases = if (wantReleases) async { homeDiscoveryRepository.newReleases(genreId) } else null
+                                val playlists = if (wantPlaylists) async { homeDiscoveryRepository.communityPlaylists(genreId) } else null
+                                val topAlbums = if (wantTop) async { homeDiscoveryRepository.topAlbums(genreId) } else null
+                                emit(
+                                    label to DiscoveryUi(
+                                        label,
+                                        newReleases?.await() ?: emptyList(),
+                                        topAlbums?.await() ?: emptyList(),
+                                        playlists?.await() ?: emptyList(),
+                                        sections = sections,
+                                    ),
+                                )
+                            }
+                        }
+                    }
+                    .scan(
+                        DiscoveryUi("All", emptyList(), emptyList(), emptyList(), sections = sections),
+                    ) { prev, (label, loaded) ->
+                        loaded ?: prev.copy(selectedGenre = label)
+                    }
+            }
         }
 
-        // Split daily mixes by source
-        val dailyMixes = musicData.playlists.filter { it.type == PlaylistType.DAILY_MIX }
-        val spotifyMixes = dailyMixes.filter { it.source == MusicSource.SPOTIFY }
-        val youtubeMixes = dailyMixes.filter { it.source == MusicSource.YOUTUBE }
+    /** Select a genre chip; re-derives all three discovery rows. */
+    fun onSelectGenre(label: String) { genreFilter.value = label }
 
-        // Split liked songs by source
-        val likedPlaylists = musicData.playlists.filter { it.type == PlaylistType.LIKED_SONGS }
-        val spotifyLikedPlaylists = likedPlaylists.filter { it.source == MusicSource.SPOTIFY }
-        val youtubeLikedPlaylists = likedPlaylists.filter { it.source == MusicSource.YOUTUBE }
-        val spotifyLikedCount = spotifyLikedPlaylists.sumOf { it.trackCount }
-        val youtubeLikedCount = youtubeLikedPlaylists.sumOf { it.trackCount }
-
-        val otherPlaylists = musicData.playlists
-            .filter { it.type == PlaylistType.CUSTOM || it.type == PlaylistType.STASH_LIKED }
-            .let { list ->
-                when (playlistSortOrder) {
-                    PlaylistSortOrder.RECENT -> list.sortedByDescending { it.dateAdded }
-                    PlaylistSortOrder.ALPHABETICAL -> list.sortedBy { it.name.lowercase() }
-                    PlaylistSortOrder.MOST_PLAYED -> list.sortedByDescending { it.trackCount }
-                }
-            }
-
+    val uiState: StateFlow<HomeUiState> = combine(
+        homePlaylistFlow,
+        losslessPromptFlow,
+        tipJarRepository.state,
+        metadataBackfillBannerFlow,
+        discoveryFlow,
+    ) { home, losslessPrompt, tipJar, metadataBackfillBanner, discovery ->
         HomeUiState(
-            stashMixes = stashMixes,
-            spotifyMixes = spotifyMixes,
-            youtubeMixes = youtubeMixes,
-            recentlyAdded = musicData.recentlyAdded,
-            spotifyLikedPlaylists = spotifyLikedPlaylists,
-            youtubeLikedPlaylists = youtubeLikedPlaylists,
-            spotifyLikedCount = spotifyLikedCount,
-            youtubeLikedCount = youtubeLikedCount,
-            playlists = otherPlaylists,
-            customMixPlaylistIds = musicData.customMixPlaylistIds,
-            buildingMixIds = musicData.buildingMixIds,
-            emptyMixIds = musicData.emptyMixIds,
-            playlistSortOrder = playlistSortOrder,
+            hero = home.hero,
             isLoading = false,
             losslessPrompt = losslessPrompt,
             tipJar = tipJar,
             metadataBackfillBanner = metadataBackfillBanner,
+            selectedGenre = discovery.selectedGenre,
+            qobuzDiscoveryEnabled = discovery.enabled,
+            sections = discovery.sections,
+            newReleases = discovery.newReleases,
+            topAlbums = discovery.topAlbums,
+            playlists = discovery.playlists,
+            madeForYou = home.madeForYou,
+            radios = home.radios,
+            moodDecades = home.moodDecades,
+            yourMixes = home.yourMixes,
+            customMixPlaylistIds = home.customMixPlaylistIds,
         )
     }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5_000),
         initialValue = HomeUiState(),
     )
-
-    /**
-     * Updates the sort applied to the Home Playlists grid. The new order
-     * propagates through the UI state combine and the grid re-sorts on the
-     * next recomposition.
-     */
-    fun setPlaylistSortOrder(order: PlaylistSortOrder) {
-        _playlistSortOrder.update { order }
-    }
 
     /**
      * Hide the "Try lossless audio" Home banner forever. Writes
@@ -347,161 +436,33 @@ class HomeViewModel @Inject constructor(
     }
 
     /**
-     * Begins playback of the given track list starting at [index].
+     * Play the Discover hero: load the builtin Daily Discover playlist's
+     * tracks and start playback from the top. In streaming mode every
+     * member is playable; offline, only on-disk tracks are queued (the
+     * player's offline gate would skip stream-only rows anyway).
      */
-    fun playTrack(tracks: List<Track>, index: Int) {
+    fun playHero() {
+        val heroPlaylistId = uiState.value.hero?.playlistId ?: return
+        playMix(heroPlaylistId)
+    }
+
+    /** Play any mix playlist from the hero pager (same gate as [playHero]). */
+    fun playMix(playlistId: Long) {
         viewModelScope.launch {
-            playerRepository.setQueue(tracks, index)
+            val streamingOn = streamingPreference.current()
+            val tracks = musicRepository.getTracksByPlaylist(playlistId).first()
+                .let { if (streamingOn) it else it.filter { t -> t.filePath != null } }
+            if (tracks.isNotEmpty()) playerRepository.setQueue(tracks, startIndex = 0)
         }
     }
 
-    /**
-     * Loads the tracks for [playlist] and begins playback from the first
-     * track. In streaming mode every member is playable (Kennyy resolves
-     * on demand inside setQueue); in offline mode only on-disk tracks
-     * are queued.
-     */
-    fun playPlaylist(playlist: Playlist) {
-        viewModelScope.launch {
-            val tracks = musicRepository.getTracksByPlaylist(playlist.id).first()
-            val playable = queuePlayableTracks(tracks, streamingPreference.current())
-            if (playable.isNotEmpty()) {
-                playerRepository.setQueue(playable, startIndex = 0)
-            }
-        }
-    }
-
-    /**
-     * Queue every undownloaded track in [playlist] for download. Surfaces
-     * a snackbar with the count so the user knows it took effect even
-     * though the download chain runs in WorkManager background context.
-     */
-    fun queueDownloadsForPlaylist(playlist: Playlist) {
-        viewModelScope.launch {
-            val count = musicRepository.queueDownloadsForPlaylist(playlist.id)
-            val msg = when (count) {
-                0 -> "Nothing to download — all tracks are already on disk."
-                1 -> "Queued 1 track for download."
-                else -> "Queued $count tracks for download."
-            }
-            _userMessages.tryEmit(msg)
-        }
-    }
-
-    /**
-     * Remove the on-disk file for every downloaded track in [playlist].
-     * Rows stay (still streamable). Counterpart to [queueDownloadsForPlaylist].
-     */
-    fun removeDownloadsForPlaylist(playlist: Playlist) {
-        viewModelScope.launch {
-            val count = musicRepository.removeDownloadsForPlaylist(playlist.id)
-            val msg = when (count) {
-                0 -> "No downloads to remove."
-                1 -> "Removed 1 download."
-                else -> "Removed downloads for $count tracks."
-            }
-            _userMessages.tryEmit(msg)
-        }
-    }
-
-    /**
-     * Loads the tracks for [playlist] and appends each to the playback
-     * queue. Streaming-mode-aware (same filter as [playPlaylist]).
-     */
-    fun addPlaylistToQueue(playlist: Playlist) {
-        viewModelScope.launch {
-            val tracks = musicRepository.getTracksByPlaylist(playlist.id).first()
-            val playable = queuePlayableTracks(tracks, streamingPreference.current())
-            playable.forEach { playerRepository.addToQueue(it) }
-        }
-    }
-
-    /**
-     * Deletes a playlist using the protected-playlist cascade. Tracks that
-     * also belong to Liked Songs or an in-app custom playlist are kept —
-     * only their membership in [playlist] is removed. If [alsoBlacklist]
-     * is `true`, tracks that WERE deleted are also marked never-download-
-     * again, so future syncs skip their identity forever.
-     *
-     * The [CascadeRemovalSummary] returned via [_lastCascadeSummary] drives
-     * the post-delete Snackbar so users see exactly what happened.
-     */
-    fun deletePlaylistAndSongs(playlist: Playlist, alsoBlacklist: Boolean = false) {
-        viewModelScope.launch {
-            val summary = musicRepository.deletePlaylistWithCascade(
-                playlistId = playlist.id,
-                alsoBlacklist = alsoBlacklist,
-            )
-            _lastCascadeSummary.emit(summary)
-        }
-    }
-
-    /**
-     * Preview counts the UI uses in the delete-confirmation dialog:
-     * how many tracks would actually be removed vs. kept due to
-     * protected-playlist membership.
-     */
-    suspend fun previewPlaylistDelete(playlist: Playlist): DeletePreview {
-        val tracks = musicRepository.getTracksByPlaylist(playlist.id).first()
-        var protected = 0
-        for (track in tracks) {
-            // isTrackInProtectedPlaylist returns true if the track is in
-            // Liked Songs / custom playlists OTHER than [playlist]. We
-            // have to do the "other than" filtering here because the DAO
-            // query doesn't exclude the source playlist.
-            val inProtectedElsewhere = musicRepository.isTrackProtectedExcluding(
-                trackId = track.id,
-                excludePlaylistId = playlist.id,
-            )
-            if (inProtectedElsewhere) protected++
-        }
-        return DeletePreview(
-            totalTracks = tracks.size,
-            protectedCount = protected,
-        )
-    }
-
-    private val _lastCascadeSummary =
-        kotlinx.coroutines.flow.MutableSharedFlow<com.stash.core.data.repository.MusicRepository.CascadeRemovalSummary>(
-            extraBufferCapacity = 1,
-            onBufferOverflow = kotlinx.coroutines.channels.BufferOverflow.DROP_OLDEST,
-        )
-    /** One-shot cascade summaries for the delete Snackbar. */
-    val lastCascadeSummary: kotlinx.coroutines.flow.SharedFlow<com.stash.core.data.repository.MusicRepository.CascadeRemovalSummary> =
-        _lastCascadeSummary.asSharedFlow()
-
-    /** Preview counts shown in the playlist-delete confirmation dialog. */
-    data class DeletePreview(
-        val totalTracks: Int,
-        val protectedCount: Int,
-    ) {
-        val willDelete: Int get() = totalTracks - protectedCount
-    }
-
-    /** Remove playlist from library without deleting its downloaded tracks. */
-    fun removePlaylist(playlist: Playlist) {
-        viewModelScope.launch {
-            musicRepository.removePlaylist(playlist)
-        }
-    }
-
-    /**
-     * Creates a new empty custom playlist with the given [name]. Trims input
-     * and no-ops if the trimmed name is blank. The new playlist will appear
-     * in the Home Playlists section automatically (Room Flow).
-     */
-    fun createPlaylist(name: String) {
-        val trimmed = name.trim()
-        if (trimmed.isBlank()) return
-        viewModelScope.launch {
-            musicRepository.createPlaylist(trimmed)
-        }
-    }
+    // ── Stash-mix actions (moved from LibraryViewModel; Library's copies are
+    //    removed in Task 8 when the Library mixes shelf goes away) ────────────
 
     /**
      * Manually re-run the Stash Mix refresh worker for a single recipe (the
-     * one whose materialized playlist is [playlistId]). Used by the long-
-     * press "Refresh this mix" action on Stash Mix cards.
+     * one whose materialized playlist is [playlistId]). Used by the "Refresh
+     * this mix" action on Stash Mix cards.
      *
      * Emits snackbar lifecycle messages via [userMessages]: "Refreshing X…"
      * on enqueue, then "Refreshed X" or "Refresh failed" on the worker's
@@ -517,11 +478,11 @@ class HomeViewModel @Inject constructor(
                 // Data-integrity bug: playlist.type == STASH_MIX but no recipe
                 // back-links it. Menu shouldn't have appeared. Log + soft-fail.
                 Log.w(TAG, "refreshMix: no recipe back-links playlistId=$playlistId")
-                _userMessages.tryEmit("Couldn't refresh \u2014 this mix isn't linked to a recipe")
+                _userMessages.tryEmit("Couldn't refresh — this mix isn't linked to a recipe")
                 return@launch
             }
 
-            _userMessages.tryEmit("Refreshing ${recipe.name}\u2026")
+            _userMessages.tryEmit("Refreshing ${recipe.name}…")
 
             // Build the request ourselves so we can capture its id for exact-
             // match WorkInfo filtering below. enqueueUniqueWork uses the same
@@ -563,7 +524,7 @@ class HomeViewModel @Inject constructor(
                             true
                         }
                         WorkInfo.State.FAILED, WorkInfo.State.CANCELLED -> {
-                            _userMessages.tryEmit("Refresh failed \u2014 try again later")
+                            _userMessages.tryEmit("Refresh failed — try again later")
                             true
                         }
                         else -> false
@@ -587,6 +548,19 @@ class HomeViewModel @Inject constructor(
             musicRepository.deletePlaylistWithCascade(playlist.id, alsoBlacklist = false)
             recipe?.let { recipeDao.deleteCustom(it.id) }
             _userMessages.tryEmit("Deleted “${playlist.name}”")
+        }
+    }
+
+    /**
+     * Home cards carry only a [HomeMix] (id), not the full [Playlist]. Resolve
+     * the playlist from the current stream and delegate to [deleteCustomMix].
+     * No-ops if it's already gone.
+     */
+    fun deleteCustomMix(playlistId: Long) {
+        viewModelScope.launch {
+            val playlist = musicRepository.getAllPlaylists().first()
+                .firstOrNull { it.id == playlistId } ?: return@launch
+            deleteCustomMix(playlist)
         }
     }
 
@@ -617,107 +591,19 @@ class HomeViewModel @Inject constructor(
         }
     }
 
-    /**
-     * Plays every downloaded track across every daily mix from the given [source],
-     * effectively merging all of that source's mixes into one continuous queue.
-     * Passing null plays the combined pool from BOTH sources (Spotify first,
-     * then YouTube) with per-track deduplication.
-     *
-     * Duplicates are removed via [distinctBy] so tracks appearing in multiple
-     * mixes are only queued once. Tracks appear in the order their parent
-     * playlists are returned by the repository.
-     *
-     * @param source The source whose mixes to play, or null to combine both.
-     */
-    fun playAllMixes(source: MusicSource?) {
-        viewModelScope.launch {
-            val state = uiState.value
-            val mixes = when (source) {
-                MusicSource.SPOTIFY -> state.spotifyMixes
-                MusicSource.YOUTUBE -> state.youtubeMixes
-                null -> state.spotifyMixes + state.youtubeMixes
-                else -> return@launch
-            }
-            if (mixes.isEmpty()) return@launch
-
-            val streamingOn = streamingPreference.current()
-            val allTracks = mixes
-                .flatMap { mix ->
-                    musicRepository.getTracksByPlaylist(mix.id).first()
-                }
-                .let { tracks -> if (streamingOn) tracks else tracks.filter { it.filePath != null } }
-                .distinctBy { it.id }
-
-            if (allTracks.isNotEmpty()) {
-                playerRepository.setQueue(allTracks, startIndex = 0)
-            }
-        }
-    }
-
-    /**
-     * Loads liked songs from the specified [source] (or both if null) and
-     * begins playback. Fetches actual playlist members from the join table
-     * rather than all downloaded tracks.
-     *
-     * **Play order:** When [source] is null, Spotify liked songs are queued
-     * first, then YouTube Music liked songs. Within each source, tracks are
-     * ordered by the liked-playlist's insertion order. Duplicates (same track
-     * ID appearing in both sources) are removed via `distinctBy`, keeping the
-     * first occurrence (Spotify wins).
-     *
-     * @param source Specific source to play from, or null for combined
-     *   Spotify + YouTube liked songs.
-     */
-    fun playLikedSongs(source: MusicSource? = null) {
-        viewModelScope.launch {
-            val state = uiState.value
-            val playlistsToPlay = when (source) {
-                MusicSource.SPOTIFY -> state.spotifyLikedPlaylists
-                MusicSource.YOUTUBE -> state.youtubeLikedPlaylists
-                else -> state.spotifyLikedPlaylists + state.youtubeLikedPlaylists
-            }
-
-            if (playlistsToPlay.isEmpty()) return@launch
-
-            // Fetch each liked playlist's tracks in parallel and flatten
-            val streamingOn = streamingPreference.current()
-            val allTracks = playlistsToPlay
-                .flatMap { playlist ->
-                    musicRepository.getTracksByPlaylist(playlist.id).first()
-                }
-                .let { tracks -> if (streamingOn) tracks else tracks.filter { it.filePath != null } }
-                .distinctBy { it.id }
-
-            if (allTracks.isNotEmpty()) {
-                playerRepository.setQueue(allTracks, startIndex = 0)
-            }
-        }
+    /** Hide (or unhide) a mix's playlist from the Home rails. */
+    fun setHideFromHome(playlistId: Long, hidden: Boolean) {
+        viewModelScope.launch { playlistDao.setHideFromHome(playlistId, hidden) }
     }
 
     companion object {
+        private const val TAG = "HomeViewModel"
+        /** A custom mix older than this (24h) is refreshed on open. */
+        private const val STALE_MIX_MS = 24L * 60 * 60 * 1000
+
         /** SharedPreferences file backing the one-time streaming disclosure flag. */
         private const val STREAMING_DISCLOSURE_PREFS = "streaming_disclosure"
         /** Boolean flag — true once the user has dismissed the disclosure dialog. */
         private const val STREAMING_DISCLOSURE_SEEN_KEY = "streaming_disclosure_seen"
-        /** A custom mix older than this (24h) is refreshed on open. */
-        private const val STALE_MIX_MS = 24L * 60 * 60 * 1000
     }
 }
-
-/**
- * Internal holder for the Room-backed flows Home reads so the top-level
- * combine treats them as a single positional arg. Track count + disk-
- * walked library size used to live here too; both belonged to the
- * relocated SyncStatusCard pipeline.
- */
-private data class MusicData(
-    val playlists: List<Playlist>,
-    val recentlyAdded: List<Track>,
-    /** Playlist ids backing user-defined (non-builtin) Stash Mix recipes. */
-    val customMixPlaylistIds: Set<Long>,
-    /** Custom-mix playlist ids still populating (show a "Building…" affordance). */
-    val buildingMixIds: Set<Long>,
-    /** Custom-mix playlist ids whose discovery finished with no tracks. */
-    val emptyMixIds: Set<Long>,
-)
-

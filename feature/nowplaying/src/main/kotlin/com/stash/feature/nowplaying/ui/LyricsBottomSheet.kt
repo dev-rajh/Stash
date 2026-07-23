@@ -1,5 +1,7 @@
 package com.stash.feature.nowplaying.ui
 
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -9,14 +11,17 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -41,9 +46,17 @@ import androidx.compose.ui.unit.dp
 fun LyricsBottomSheet(
     state: LyricsViewState,
     currentPositionMs: Long,
+    liveLyricsEnabled: Boolean,
+    onLiveLyricsToggle: (Boolean) -> Unit,
     onSeek: (Long) -> Unit,
     onRetry: () -> Unit,
     onDismiss: () -> Unit,
+    // "Save with song file" footer (writes the .lrc beside the downloaded
+    // audio so external players pick the lyrics up). Shown only for
+    // downloaded tracks while lyrics are actually on screen.
+    canSaveToFile: Boolean = false,
+    savingToFile: Boolean = false,
+    onSaveToFile: () -> Unit = {},
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
@@ -59,7 +72,11 @@ fun LyricsBottomSheet(
                 .fillMaxWidth()
                 .navigationBarsPadding(),
         ) {
-            LyricsHeader(onClose = onDismiss)
+            LyricsHeader(
+                liveEnabled = liveLyricsEnabled,
+                onLiveToggle = onLiveLyricsToggle,
+                onClose = onDismiss,
+            )
 
             // Fixed-height body region so the renderers (which all use
             // fillMaxSize) have a bounded parent. 70% of screen leaves
@@ -92,17 +109,53 @@ fun LyricsBottomSheet(
                     )
                 }
             }
+
+            // Quiet footer action: only when the track is downloaded AND
+            // lyrics are actually showing — you save what you can see.
+            val lyricsOnScreen =
+                state is LyricsViewState.Synced || state is LyricsViewState.Plain
+            if (canSaveToFile && lyricsOnScreen) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 2.dp),
+                    horizontalArrangement = Arrangement.Center,
+                ) {
+                    TextButton(
+                        enabled = !savingToFile,
+                        onClick = onSaveToFile,
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Download,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            text = if (savingToFile) "Saving…" else "Save with song file",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
         }
     }
 }
 
 /**
- * Compact header — title on the left, close button on the right. Matches
- * QueueBottomSheet's header proportions so the two sheets share their
- * silhouette when stacked in the Now Playing UI.
+ * Compact header — title on the left; the "Live" toggle (the live
+ * synced-line bar opt-in) sits seamlessly beside the close button.
+ * Matches QueueBottomSheet's header proportions so the two sheets share
+ * their silhouette when stacked in the Now Playing UI.
  */
 @Composable
-private fun LyricsHeader(onClose: () -> Unit) {
+private fun LyricsHeader(
+    liveEnabled: Boolean,
+    onLiveToggle: (Boolean) -> Unit,
+    onClose: () -> Unit,
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -115,8 +168,20 @@ private fun LyricsHeader(onClose: () -> Unit) {
             style = MaterialTheme.typography.titleLarge,
             fontWeight = FontWeight.Bold,
         )
-        IconButton(onClick = onClose) {
-            Icon(Icons.Default.Close, contentDescription = "Close")
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = "Live",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.width(6.dp))
+            com.stash.core.ui.components.StashSwitch(
+                checked = liveEnabled,
+                onCheckedChange = onLiveToggle,
+            )
+            IconButton(onClick = onClose) {
+                Icon(Icons.Default.Close, contentDescription = "Close")
+            }
         }
     }
 }

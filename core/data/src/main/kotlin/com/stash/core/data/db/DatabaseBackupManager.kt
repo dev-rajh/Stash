@@ -12,6 +12,7 @@ import java.io.FileInputStream
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
+import java.nio.file.Path
 import javax.inject.Inject
 import javax.inject.Singleton
 import androidx.core.net.toUri
@@ -152,25 +153,30 @@ class DatabaseBackupManager @Inject constructor(
                         }
 
                         val outFile = when {
-                            entry.name == "stash.db" -> {
-                                dbFile.parentFile?.mkdirs()
-                                dbFile
-                            }
+                            entry.name == "stash.db" -> dbFile
                             entry.name.startsWith("datastore/") -> {
-                                val file = File(datastoreDir, entry.name.substringAfter("datastore/"))
-                                file.parentFile?.mkdirs()
-                                file
+                                val relativeName = entry.name.substringAfter("datastore/")
+                                if (relativeName.isBlank() || Path.of(relativeName).isAbsolute) {
+                                    throw SecurityException("Invalid datastore entry path: ${entry.name}")
+                                }
+
+                                val datastoreRoot = datastoreDir.toPath().normalize()
+                                val resolved = datastoreRoot.resolve(relativeName).normalize()
+                                if (!resolved.startsWith(datastoreRoot)) {
+                                    throw SecurityException("Entry escapes target directory: ${entry.name}")
+                                }
+
+                                resolved.toFile()
                             }
                             else -> null
                         }
 
                         if (outFile != null) {
-                            // Zip Slip Guard: ensure entry doesn't escape target directory
-                            val canonicalTargetDir = datastoreDir.canonicalPath + File.separator
-                            if (!outFile.canonicalPath.startsWith(canonicalTargetDir) && 
-                                outFile.canonicalPath != dbFile.canonicalPath) {
-                                throw SecurityException("Entry escapes target directory: ${entry.name}")
+                            if (entry.name == "stash.db" && outFile.canonicalFile.path != dbFile.canonicalFile.path) {
+                                throw SecurityException("Invalid DB entry target: ${entry.name}")
                             }
+
+                            outFile.parentFile?.mkdirs()
 
                             android.util.Log.d("BackupManager", "Restoring ${entry.name} to ${outFile.absolutePath}")
 

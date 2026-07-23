@@ -76,6 +76,10 @@ fun SettingsLibraryStorageScreen(
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val extendedColors = StashTheme.extendedColors
 
+    LaunchedEffect(viewModel) {
+        viewModel.refreshStorageUsage()
+    }
+
     SettingsScaffold(title = "Library & Storage", onBack = onBack, modifier = modifier) {
         val context = LocalContext.current
         val contentResolver = context.contentResolver
@@ -184,6 +188,18 @@ fun SettingsLibraryStorageScreen(
                         },
                         checked = uiState.stashMixesEnabled,
                         onCheckedChange = viewModel::onStashMixesEnabledChanged,
+                    )
+                },
+                {
+                    SettingsToggleRow(
+                        title = "Qobuz discovery on Home",
+                        subtitle = if (uiState.qobuzDiscoveryEnabled) {
+                            "New Releases, Qobuz Playlists, and Top Albums show on Home."
+                        } else {
+                            "Home keeps only your mixes and imported music."
+                        },
+                        checked = uiState.qobuzDiscoveryEnabled,
+                        onCheckedChange = viewModel::onQobuzDiscoveryEnabledChanged,
                     )
                 },
             ),

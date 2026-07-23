@@ -24,8 +24,12 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavGraph.Companion.findStartDestination
+import com.stash.core.ui.theme.StashElevation
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.stash.app.RequestNotificationPermissionOnce
@@ -88,6 +92,14 @@ fun StashScaffold(
                     launchSingleTop = true
                 }
                 navController.navigate(SquidWtfCaptchaRoute) {
+                    launchSingleTop = true
+                }
+                onDeepLinkConsumed()
+            }
+            com.stash.app.MainActivity.DEEP_LINK_SHARED_TRACK -> {
+                // Shared stash://track link: land on Search — SearchViewModel
+                // consumes the pre-deposited query from SharedTrackLinkHolder.
+                navController.navigate(SearchRoute) {
                     launchSingleTop = true
                 }
                 onDeepLinkConsumed()
@@ -183,9 +195,24 @@ private fun StashBottomBar(
     onNavigate: (TopLevelDestination) -> Unit,
 ) {
     val extendedColors = StashTheme.extendedColors
+    val hairline = extendedColors.glassBorderBright
 
     NavigationBar(
-        containerColor = MaterialTheme.colorScheme.surface,
+        // Premium Crisp §3.3: the nav is the one depth cue — a translucent
+        // frosted surface with a soft shadow and a top hairline. (Edge-to-edge
+        // "scroll behind the nav" + true blur are deferred to the Home rewrite;
+        // this is the purely-additive frosting that's safe on every tab.)
+        modifier = Modifier
+            .shadow(StashElevation.Chrome)
+            .drawBehind {
+                drawLine(
+                    color = hairline,
+                    start = Offset(0f, 0f),
+                    end = Offset(size.width, 0f),
+                    strokeWidth = 1.dp.toPx(),
+                )
+            },
+        containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
         contentColor = MaterialTheme.colorScheme.onSurface,
         tonalElevation = 0.dp,
         windowInsets = WindowInsets(0.dp),

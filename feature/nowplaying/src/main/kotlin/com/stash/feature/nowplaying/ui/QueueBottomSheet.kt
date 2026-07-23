@@ -38,12 +38,19 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.withFrameNanos
+import androidx.compose.ui.platform.LocalDensity
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -78,20 +85,29 @@ fun QueueBottomSheet(
 
     // Local mutable copy of upcoming tracks for drag reordering.
     // Swaps happen here visually during drag; committed to player on drag end.
+    // Each entry carries a uid assigned at sync time. LazyColumn keys MUST NOT
+    // include the position: index-based keys change identity on every swap,
+    // which recreates the dragged row and cancels its pointerInput mid-gesture
+    // (the original "can't reorder" bug). uids stay glued to their entries
+    // across swaps and are only reassigned on resync, when no drag is active.
     val upcomingSource = queue.drop(currentIndex + 1)
-    val localQueue = remember { mutableStateListOf<Track>() }
+    val localQueue = remember { mutableStateListOf<QueueEntry>() }
 
     // Sync local queue with source when not dragging
     var draggedIdx by remember { mutableIntStateOf(-1) }
     LaunchedEffect(upcomingSource) {
         if (draggedIdx < 0) {
             localQueue.clear()
-            localQueue.addAll(upcomingSource)
+            upcomingSource.forEachIndexed { i, t -> localQueue.add(QueueEntry(i, t)) }
         }
     }
 
-    // Track cumulative moves during a drag so we can commit them
-    val pendingMoves = remember { mutableStateListOf<Pair<Int, Int>>() }
+    // Where the dragged row started, in local upcoming-list index space.
+    var dragStartIdx by remember { mutableIntStateOf(-1) }
+    // Commit closures live inside pointerInput and outlast recompositions;
+    // read currentIndex through updated-state so a track advancing while
+    // the sheet is open can't stale the committed absolute indices.
+    val liveCurrentIndex by rememberUpdatedState(currentIndex)
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -128,6 +144,58 @@ fun QueueBottomSheet(
             var dragOffsetY by remember { mutableFloatStateOf(0f) }
             var itemHeight by remember { mutableIntStateOf(0) }
 
+            // Edge auto-scroll (issue #319): holding a dragged row near the
+            // sheet's top/bottom scrolls the list under it, so ONE gesture
+            // can carry a track from deep in the queue to the top.
+            val scope = rememberCoroutineScope()
+            val density = LocalDensity.current
+            val edgePx = with(density) { 64.dp.toPx() }
+            val maxStepPx = with(density) { 6.dp.toPx() }
+            var autoScrollJob by remember { mutableStateOf<Job?>(null) }
+
+            // Swap normalization shared by finger movement AND auto-scroll:
+            // whenever the accumulated offset crosses half a row, swap and
+            // re-anchor. Auto-scroll moves rows under a stationary finger,
+            // so it must normalize too — drag events alone would miss it.
+            val normalizeSwaps = {
+                if (draggedIdx >= 0 && itemHeight > 0) {
+                    val half = itemHeight / 2
+                    while (dragOffsetY < -half && draggedIdx > 0) {
+                        val from = draggedIdx
+                        val to = draggedIdx - 1
+                        Collections.swap(localQueue, from, to)
+                        draggedIdx = to
+                        dragOffsetY += itemHeight
+                    }
+                    while (dragOffsetY > half && draggedIdx < localQueue.lastIndex) {
+                        val from = draggedIdx
+                        val to = draggedIdx + 1
+                        Collections.swap(localQueue, from, to)
+                        draggedIdx = to
+                        dragOffsetY -= itemHeight
+                    }
+                }
+            }
+
+            // The whole drag commits as ONE move: its net effect is "take the
+            // row from where it started to where it was dropped" — exactly the
+            // remove-then-insert the player's moveInQueue performs. Replaying
+            // per-slot swaps as N separate player calls raced the queue
+            // round-trip and could snap the row back to its old place on drop.
+            val commitDrag = {
+                autoScrollJob?.cancel()
+                autoScrollJob = null
+                if (dragStartIdx >= 0 && draggedIdx >= 0 && dragStartIdx != draggedIdx) {
+                    onMoveTrack(
+                        liveCurrentIndex + 1 + dragStartIdx,
+                        liveCurrentIndex + 1 + draggedIdx,
+                    )
+                }
+                dragStartIdx = -1
+                draggedIdx = -1
+                dragOffsetY = 0f
+            }
+
             LazyColumn(
                 state = listState,
                 modifier = Modifier.weight(1f, fill = false),
@@ -135,16 +203,19 @@ fun QueueBottomSheet(
             ) {
                 itemsIndexed(
                     items = localQueue,
-                    key = { idx, track -> "queue-row-$idx-${track.youtubeId ?: track.id}" },
-                ) { idx, track ->
+                    key = { _, entry -> entry.uid },
+                ) { idx, entry ->
+                    val track = entry.track
                     val isDragging = idx == draggedIdx
                     val queueIndex = currentIndex + 1 + idx
-                    val rowKey = "queue-row-$idx-${track.youtubeId ?: track.id}"
+                    // The item's index shifts under an active drag as rows swap;
+                    // pointerInput's coroutine captures values at launch, so it
+                    // reads the live index through this instead.
+                    val currentIdx by rememberUpdatedState(idx)
 
-                    key(rowKey) {
                     // One-shot guard so confirmValueChange can't mass-remove if
                     // Compose's swipe state transitions re-fire during a single
-                    // gesture. Tied to rowKey identity via the surrounding key().
+                    // gesture. Tied to row identity via the LazyColumn item key.
                     val dismissedOnce = remember { mutableStateOf(false) }
 
                     Box(
@@ -244,67 +315,56 @@ fun QueueBottomSheet(
                             Box(
                                 modifier = Modifier
                                     .size(48.dp)
-                                    .pointerInput(idx) {
+                                    .pointerInput(entry.uid) {
                                         detectDragGesturesAfterLongPress(
                                             onDragStart = {
-                                                draggedIdx = idx
+                                                draggedIdx = currentIdx
+                                                dragStartIdx = currentIdx
                                                 dragOffsetY = 0f
-                                                pendingMoves.clear()
                                                 // Measure item height
                                                 val info = listState.layoutInfo.visibleItemsInfo
-                                                    .firstOrNull { it.index == idx }
+                                                    .firstOrNull { it.index == currentIdx }
                                                 if (info != null) itemHeight = info.size
+                                                // Frame loop for the whole drag; step is 0
+                                                // while the row rides mid-viewport.
+                                                autoScrollJob?.cancel()
+                                                autoScrollJob = scope.launch {
+                                                    while (isActive) {
+                                                        withFrameNanos { }
+                                                        val layout = listState.layoutInfo
+                                                        val dragged = layout.visibleItemsInfo
+                                                            .firstOrNull { it.index == draggedIdx }
+                                                            ?: continue
+                                                        val viewportPx = (layout.viewportEndOffset -
+                                                            layout.viewportStartOffset).toFloat()
+                                                        val step = autoScrollStep(
+                                                            visualTop = dragged.offset + dragOffsetY,
+                                                            visualBottom = dragged.offset + dragOffsetY + dragged.size,
+                                                            viewportPx = viewportPx,
+                                                            edgePx = edgePx,
+                                                            maxStepPx = maxStepPx,
+                                                        )
+                                                        if (step != 0f) {
+                                                            // scrollBy returns what actually moved —
+                                                            // at the list bounds it tapers to zero.
+                                                            val consumed = listState.scrollBy(step)
+                                                            dragOffsetY += consumed
+                                                            normalizeSwaps()
+                                                        }
+                                                    }
+                                                }
                                             },
                                             onDrag = { change, amount ->
                                                 change.consume()
                                                 dragOffsetY += amount.y
-
-                                                if (draggedIdx < 0 || itemHeight <= 0) return@detectDragGesturesAfterLongPress
-
-                                                val half = itemHeight / 2
-
-                                                // Move up
-                                                while (dragOffsetY < -half && draggedIdx > 0) {
-                                                    val from = draggedIdx
-                                                    val to = draggedIdx - 1
-                                                    Collections.swap(localQueue, from, to)
-                                                    pendingMoves.add(Pair(
-                                                        currentIndex + 1 + from,
-                                                        currentIndex + 1 + to,
-                                                    ))
-                                                    draggedIdx = to
-                                                    dragOffsetY += itemHeight
-                                                }
-                                                // Move down
-                                                while (dragOffsetY > half && draggedIdx < localQueue.lastIndex) {
-                                                    val from = draggedIdx
-                                                    val to = draggedIdx + 1
-                                                    Collections.swap(localQueue, from, to)
-                                                    pendingMoves.add(Pair(
-                                                        currentIndex + 1 + from,
-                                                        currentIndex + 1 + to,
-                                                    ))
-                                                    draggedIdx = to
-                                                    dragOffsetY -= itemHeight
-                                                }
+                                                normalizeSwaps()
                                             },
-                                            onDragEnd = {
-                                                // Commit all moves to the actual player queue
-                                                pendingMoves.forEach { (from, to) ->
-                                                    onMoveTrack(from, to)
-                                                }
-                                                pendingMoves.clear()
-                                                draggedIdx = -1
-                                                dragOffsetY = 0f
-                                            },
-                                            onDragCancel = {
-                                                // Revert: resync local queue from source
-                                                localQueue.clear()
-                                                localQueue.addAll(upcomingSource)
-                                                pendingMoves.clear()
-                                                draggedIdx = -1
-                                                dragOffsetY = 0f
-                                            },
+                                            onDragEnd = { commitDrag() },
+                                            // A stolen pointer (sheet grab, palm
+                                            // rejection) commits the row where it
+                                            // visibly sits instead of silently
+                                            // snapping the whole drag back.
+                                            onDragCancel = { commitDrag() },
                                         )
                                     },
                                 contentAlignment = Alignment.Center,
@@ -320,7 +380,6 @@ fun QueueBottomSheet(
                         }
                         } // SwipeToDismissBox
                     }
-                    } // key(rowKey)
                 }
             }
 
@@ -345,6 +404,14 @@ fun QueueBottomSheet(
 }
 
 // ---------------------------------------------------------------------------
+
+/**
+ * A queue row with a drag-stable identity. [uid] is assigned when the local
+ * queue syncs from the player and never changes while rows are swapped, so
+ * LazyColumn item identity (and the active drag gesture) survives reordering.
+ * Also makes duplicate tracks in the queue naturally unique.
+ */
+private class QueueEntry(val uid: Int, val track: Track)
 
 @Composable
 private fun QueueHeader(trackCount: Int, currentIndex: Int, onClose: () -> Unit) {
@@ -432,5 +499,32 @@ private fun QueueTrackArt(track: Track) {
         } else {
             Icon(Icons.Default.MusicNote, null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(24.dp))
         }
+    }
+}
+
+/**
+ * Auto-scroll velocity for a drag near the viewport edges (issue #319):
+ * zero while the dragged row rides mid-viewport, ramping linearly toward
+ * ±[maxStepPx] per frame as the row's edge sinks into the top or bottom
+ * [edgePx] zone. Negative scrolls toward the start of the list.
+ */
+internal fun autoScrollStep(
+    visualTop: Float,
+    visualBottom: Float,
+    viewportPx: Float,
+    edgePx: Float,
+    maxStepPx: Float,
+): Float {
+    if (edgePx <= 0f || viewportPx <= 0f) return 0f
+    return when {
+        visualTop < edgePx -> {
+            val depth = ((edgePx - visualTop) / edgePx).coerceIn(0f, 1f)
+            -maxStepPx * depth
+        }
+        visualBottom > viewportPx - edgePx -> {
+            val depth = ((visualBottom - (viewportPx - edgePx)) / edgePx).coerceIn(0f, 1f)
+            maxStepPx * depth
+        }
+        else -> 0f
     }
 }

@@ -7,6 +7,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -18,11 +19,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Radio
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -55,6 +56,8 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -73,6 +76,7 @@ import kotlin.math.abs
 import com.stash.core.model.RepeatMode
 import com.stash.core.model.isFlac
 import com.stash.core.ui.components.SaveToPlaylistSheet
+import com.stash.core.ui.theme.LocalIsAmoledTheme
 import com.stash.feature.nowplaying.ui.AmbientBackground
 import com.stash.feature.nowplaying.ui.GlowingProgressBar
 import com.stash.feature.nowplaying.ui.LiveLyricsBar
@@ -80,11 +84,38 @@ import com.stash.feature.nowplaying.ui.LyricsBottomSheet
 import com.stash.feature.nowplaying.ui.NowPlayingOptionsSheet
 import com.stash.feature.nowplaying.ui.QueueBottomSheet
 
+/** Light-ground ink for the pastel-wash Now Playing (the app's plum-black). */
+private val NpInkLight = Color(0xFF241C36)
+
+/**
+ * Foreground ink for the Now Playing surface: white on the dark ambient,
+ * plum-black on the light pastel wash. Reads the *resolved* theme background
+ * (not the system setting) so manual/AMOLED overrides pick the right ink.
+ */
+@Composable
+private fun npInk(): Color =
+    if (MaterialTheme.colorScheme.background.luminance() < 0.5f) Color.White else NpInkLight
+
+/**
+ * Album palettes can be too pale to hold contrast on the light wash — darken
+ * toward ink until they do. Dark theme passes the raw palette through.
+ */
+@Composable
+private fun npAccent(raw: Color): Color =
+    if (MaterialTheme.colorScheme.background.luminance() >= 0.5f && raw.luminance() > 0.55f) {
+        lerp(raw, NpInkLight, 0.35f)
+    } else {
+        raw
+    }
+
 /**
  * Full-screen Now Playing screen with premium visual design.
  *
  * Displays album art with ambient background, playback controls, progress bar,
  * and track information. Colors are extracted from album art via Palette API.
+ * The ambient ground + inks follow the app theme: near-black with drifting
+ * art-derived orbs in dark, the same orbs as a pastel wash over lavender
+ * paper in light.
  *
  * @param onDismiss Callback invoked when the user taps the dismiss (down arrow) button.
  * @param onNavigateToPlaylist Callback invoked with a playlist id when the user taps
@@ -104,13 +135,16 @@ fun NowPlayingScreen(
     val track = uiState.currentTrack
     val resolvingArtist by viewModel.resolvingArtist.collectAsStateWithLifecycle()
     val isDownloadingCurrent by viewModel.isDownloadingCurrent.collectAsStateWithLifecycle()
+    val exportingLyricsTrackId by viewModel.exportingLyricsTrackId.collectAsStateWithLifecycle()
     val radioLabel by viewModel.radioSeedLabel.collectAsStateWithLifecycle()
+    val ambientAnimationEnabled = viewModel.ambientAnimationEnabled.collectAsStateWithLifecycle().value ?: return
     var showQueue by remember { mutableStateOf(false) }
     var showSaveSheet by remember { mutableStateOf(false) }
     // Overflow ("…") options sheet — holds the per-track actions that used to
     // live as inline icons in the top bar (like, add to playlist, sleep timer,
     // download, flag).
     var showOptions by remember { mutableStateOf(false) }
+    val shareTrack by viewModel.shareTrack.collectAsStateWithLifecycle()
     // "This song is wrong" dialog — shown when the flag icon is tapped.
     // Decouples the Flag button (which is just "there's a problem") from
     // the action (find a replacement / delete / delete + block).
@@ -120,7 +154,6 @@ fun NowPlayingScreen(
     // content doesn't overflow so scroll stays at 0; on narrow screens the
     // user's scroll position aligns with controls and we want it preserved
     // across track changes.
-    val scrollState = rememberScrollState()
 
     // One-shot Toast confirmation for the "wrong match" flag action. Toast
     // instead of Snackbar so we don't have to restructure the screen into
@@ -141,12 +174,26 @@ fun NowPlayingScreen(
         }
     }
 
+    // Share sheet (fork issue ParaliyzedEvo/Stash#40) — VM-driven with the
+    // FULL DB track: the player-state Track is a slim media-session
+    // reconstruction whose spotifyUri/youtubeId are null, which is why the
+    // link rows never appeared when this read uiState.currentTrack.
+    shareTrack?.let { full ->
+        com.stash.core.ui.components.ShareTrackSheet(
+            title = full.title,
+            artist = full.artist,
+            spotifyUri = full.spotifyUri,
+            youtubeId = full.youtubeId,
+            onDismiss = viewModel::onShareDismissed,
+        )
+    }
+
     // Queue bottom sheet
     if (showQueue) {
         QueueBottomSheet(
             queue = uiState.queue,
             currentIndex = uiState.currentIndex,
-            accentColor = uiState.vibrantColor,
+            accentColor = npAccent(uiState.vibrantColor),
             onDismiss = { showQueue = false },
             onTrackClick = { index ->
                 viewModel.onSkipToQueueIndex(index)
@@ -185,11 +232,17 @@ fun NowPlayingScreen(
     val showLyrics by viewModel.lyricsSheetOpen.collectAsStateWithLifecycle()
     val lyricsState by viewModel.lyricsViewState.collectAsStateWithLifecycle()
     val lyricsPositionMs by viewModel.currentPositionMs.collectAsStateWithLifecycle()
+    val liveLyricsEnabled by viewModel.liveLyricsBarEnabled.collectAsStateWithLifecycle()
     if (showLyrics) {
         LyricsBottomSheet(
             state = lyricsState,
             currentPositionMs = lyricsPositionMs,
+            liveLyricsEnabled = liveLyricsEnabled,
+            onLiveLyricsToggle = viewModel::setLiveLyricsBarEnabled,
             onSeek = viewModel::onLyricsLineSeek,
+            canSaveToFile = track?.isDownloaded == true,
+            savingToFile = exportingLyricsTrackId != null,
+            onSaveToFile = viewModel::exportLyricsForCurrentTrack,
             onRetry = viewModel::onLyricsRetry,
             onDismiss = viewModel::onDismissLyrics,
         )
@@ -288,22 +341,35 @@ fun NowPlayingScreen(
         )
     }
 
-    Box(modifier = Modifier.fillMaxSize()) {
-        // Ambient animated background behind everything.
-        AmbientBackground(
+    Box(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+        // Ambient animated background behind everything — dark canvas, the
+        // light pastel wash, or a dead-black AMOLED ground, following the
+        // resolved app theme.
+        if (ambientAnimationEnabled) AmbientBackground(
             dominantColor = uiState.dominantColor,
             vibrantColor = uiState.vibrantColor,
             mutedColor = uiState.mutedColor,
+            lightMode = MaterialTheme.colorScheme.background.luminance() >= 0.5f,
+            amoledMode = LocalIsAmoledTheme.current,
             modifier = Modifier.fillMaxSize(),
         )
 
         Column(modifier = Modifier.fillMaxSize()) {
+            // #333 v2 — the slot system. No estimated heights, no thresholds:
+            // the title/progress/controls stack is FIXED and anchors to the
+            // bottom of the column (directly above the lyrics bar when it's
+            // present), while the album art lives in a weight(1f) slot that
+            // absorbs exactly whatever height this phone/scale/bar
+            // combination leaves over. The art sizes to its slot (capped by
+            // width and the 300dp design ceiling) and centers in it, so any
+            // slack splits evenly around the art instead of pooling anywhere.
+            // Every phone renders the same anatomy, scaled — nothing clips,
+            // nothing crowds, nothing pools.
             Column(
                 modifier = Modifier
-                    .fillMaxWidth()
+                    .fillMaxSize()
                     .weight(1f)
                     .statusBarsPadding()
-                    .verticalScroll(scrollState)
                     .padding(horizontal = 24.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
@@ -365,7 +431,7 @@ fun NowPlayingScreen(
                                 CircularProgressIndicator(
                                     modifier = Modifier.size(16.dp),
                                     strokeWidth = 2.dp,
-                                    color = Color.White,
+                                    color = npInk(),
                                 )
                                 Spacer(modifier = Modifier.width(8.dp))
                             }
@@ -423,6 +489,42 @@ fun NowPlayingScreen(
                             overflow = TextOverflow.Ellipsis,
                             textAlign = TextAlign.Center,
                             modifier = Modifier.weight(1f, fill = false).basicMarquee(),
+                            }
+                        },
+                        fontSize = 14.sp,
+                        color = npInk().copy(alpha = 0.7f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                    // Share — on the track itself (leading edge), mirroring the
+                    // heart. Loads the FULL DB row before opening the sheet so
+                    // the Spotify/YouTube link rows actually have identities.
+                    if (track != null) {
+                        IconButton(
+                            onClick = viewModel::onShareCurrent,
+                            modifier = Modifier.align(Alignment.CenterStart),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Share,
+                                contentDescription = "Share song",
+                                tint = npInk().copy(alpha = 0.7f),
+                                modifier = Modifier.size(22.dp),
+                            )
+                        }
+                    }
+                    // Like heart — relocated from the top icon row to a cleaner
+                    // primary spot, floated to the trailing edge and vertically
+                    // centred against the title/artist block.
+                    if (track != null) {
+                        com.stash.core.ui.components.LikeButton(
+                            isLiked = uiState.currentTrack?.stashLikedAt != null,
+                            onTap = viewModel::onLikeTap,
+                            unlikedTint = npInk().copy(alpha = 0.7f),
+                            size = 26.dp,
+                            modifier = Modifier.align(Alignment.CenterEnd),
                         )
 //                    if (track != null) {
 //                        Spacer(modifier = Modifier.width(8.dp))
@@ -487,7 +589,7 @@ fun NowPlayingScreen(
                 // -- Progress bar --
                 GlowingProgressBar(
                     progress = uiState.progressFraction,
-                    accentColor = uiState.vibrantColor,
+                    accentColor = npAccent(uiState.vibrantColor),
                     elapsedMs = uiState.currentPositionMs,
                     totalMs = uiState.durationMs,
                     onSeek = viewModel::onSeekTo,
@@ -502,7 +604,7 @@ fun NowPlayingScreen(
                     isBuffering = uiState.isBuffering,
                     shuffleEnabled = uiState.shuffleEnabled,
                     repeatMode = uiState.repeatMode,
-                    accentColor = uiState.vibrantColor,
+                    accentColor = npAccent(uiState.vibrantColor),
                     onPlayPauseClick = viewModel::onPlayPauseClick,
                     onSkipNext = viewModel::onSkipNext,
                     onSkipPrevious = viewModel::onSkipPrevious,
@@ -644,6 +746,17 @@ private fun PlaylistsSection(
                 )
             }
             Spacer(modifier = Modifier.height(8.dp))
+            // Live-lyrics bar — sits exactly where the MiniPlayer is on other
+            // screens (the scaffold hides MiniPlayer on this route), directly
+            // above the nav bar. Zero-height when Hidden, so the content
+            // column keeps the full screen for lyric-less tracks.
+            LiveLyricsBar(
+                state = lyricsState,
+                currentPositionMs = lyricsPositionMs,
+                accentColor = npAccent(uiState.vibrantColor),
+                liveEnabled = liveLyricsEnabled,
+                onTap = viewModel::onShowLyrics,
+            )
         }
     }
 }
@@ -695,7 +808,7 @@ private fun TopBar(
             Icon(
                 imageVector = Icons.Default.KeyboardArrowDown,
                 contentDescription = "Dismiss",
-                tint = Color.White,
+                tint = npInk(),
                 modifier = Modifier.size(28.dp),
             )
         }
@@ -822,6 +935,7 @@ private fun AlbumArtSection(
     albumArtUrl: String?,
     albumArtPath: String?,
     accentColor: Color,
+    artSize: androidx.compose.ui.unit.Dp = 280.dp,
     onBitmapLoaded: (android.graphics.Bitmap?) -> Unit,
     onSwipeNext: () -> Unit = {},
     onSwipePrevious: () -> Unit = {},
@@ -870,7 +984,7 @@ private fun AlbumArtSection(
         // Glow behind the artwork.
         Box(
             modifier = Modifier
-                .size(260.dp)
+                .size(artSize - 20.dp)
                 .shadow(
                     elevation = 40.dp,
                     shape = RoundedCornerShape(20.dp),
@@ -895,7 +1009,7 @@ private fun AlbumArtSection(
                 }
             },
             modifier = Modifier
-                .size(280.dp)
+                .size(artSize)
                 .clip(RoundedCornerShape(20.dp)),
         )
     }
@@ -931,7 +1045,7 @@ private fun PlaybackControls(
             Icon(
                 imageVector = Icons.Default.Shuffle,
                 contentDescription = "Shuffle",
-                tint = if (shuffleEnabled) accentColor else Color.White.copy(alpha = 0.6f),
+                tint = if (shuffleEnabled) accentColor else npInk().copy(alpha = 0.6f),
                 modifier = Modifier.size(24.dp),
             )
         }
@@ -941,7 +1055,7 @@ private fun PlaybackControls(
             Icon(
                 imageVector = Icons.Default.SkipPrevious,
                 contentDescription = "Previous",
-                tint = Color.White,
+                tint = npInk(),
                 modifier = Modifier.size(36.dp),
             )
         }
@@ -962,6 +1076,8 @@ private fun PlaybackControls(
                     shape = CircleShape,
                 ),
         ) {
+            // On the accent-gradient circle, not the ambient ground — stays
+            // white in both themes (the accent is contrast-adjusted instead).
             if (isBuffering) {
                 CircularProgressIndicator(
                     color = Color.White,
@@ -983,7 +1099,7 @@ private fun PlaybackControls(
             Icon(
                 imageVector = Icons.Default.SkipNext,
                 contentDescription = "Next",
-                tint = Color.White,
+                tint = npInk(),
                 modifier = Modifier.size(36.dp),
             )
         }
@@ -997,7 +1113,7 @@ private fun PlaybackControls(
                 },
                 contentDescription = "Repeat",
                 tint = when (repeatMode) {
-                    RepeatMode.OFF -> Color.White.copy(alpha = 0.6f)
+                    RepeatMode.OFF -> npInk().copy(alpha = 0.6f)
                     else -> accentColor
                 },
                 modifier = Modifier.size(24.dp),
@@ -1153,7 +1269,7 @@ private fun QualityLine(
             Text(
                 text = qualityText,
                 style = MaterialTheme.typography.bodySmall,
-                color = Color.White.copy(alpha = 0.5f),
+                color = npInk().copy(alpha = 0.5f),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -1162,7 +1278,7 @@ private fun QualityLine(
         Text(
             text = qualityText,
             style = MaterialTheme.typography.bodySmall,
-            color = Color.White.copy(alpha = 0.5f),
+            color = npInk().copy(alpha = 0.5f),
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             textAlign = TextAlign.Center,

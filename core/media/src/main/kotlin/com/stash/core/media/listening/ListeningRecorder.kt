@@ -7,8 +7,11 @@ import com.stash.core.data.lastfm.LastFmScrobbler
 import com.stash.core.data.db.dao.TrackSkipEventDao
 import com.stash.core.data.db.entity.ListeningEventEntity
 import com.stash.core.data.db.entity.TrackSkipEventEntity
+import com.stash.core.data.repository.MusicRepository
 import com.stash.core.media.PlayerRepository
 import com.stash.core.model.RepeatMode
+import com.stash.core.model.Track
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -46,6 +49,7 @@ import javax.inject.Singleton
 @Singleton
 class ListeningRecorder @VisibleForTesting internal constructor(
     private val playerRepository: PlayerRepository,
+    private val musicRepository: MusicRepository,
     private val listeningEventDao: ListeningEventDao,
     private val trackSkipEventDao: TrackSkipEventDao,
     private val scrobbler: LastFmScrobbler,
@@ -55,11 +59,13 @@ class ListeningRecorder @VisibleForTesting internal constructor(
     @Inject
     constructor(
         playerRepository: PlayerRepository,
+        musicRepository: MusicRepository,
         listeningEventDao: ListeningEventDao,
         trackSkipEventDao: TrackSkipEventDao,
         scrobbler: LastFmScrobbler,
     ) : this(
         playerRepository = playerRepository,
+        musicRepository = musicRepository,
         listeningEventDao = listeningEventDao,
         trackSkipEventDao = trackSkipEventDao,
         scrobbler = scrobbler,
@@ -67,18 +73,14 @@ class ListeningRecorder @VisibleForTesting internal constructor(
     )
 
     /**
-     * Pending threshold-fire metadata. We keep the [firedFlag] alongside
-     * the [job] because [Job.cancel] completes the job synchronously —
-     * `isCompleted` cannot distinguish "delay body ran" from "delay was
-     * cancelled mid-flight". The flag is set inside the delay body
-     * BEFORE the listening_events insert, so a track-change collector
-     * reading `firedFlag.get()` after `cancel()` sees the truthful state.
+     * [claimed] is a one-shot handoff between the threshold job and a
+     * transition. Only the side that atomically claims it may act.
      */
     private data class PendingFire(
-        val trackId: Long,
+        val track: Track,
         val sessionStart: Long,
         val job: Job,
-        val firedFlag: AtomicBoolean,
+        val claimed: AtomicBoolean,
         val positionAtScheduleMs: Long,
     )
 
@@ -86,7 +88,21 @@ class ListeningRecorder @VisibleForTesting internal constructor(
 
     /** Must be called exactly once from Application.onCreate. */
     fun start() {
-        // ── Collector 1: track-change transitions ─────────────────────
+        scope.launch {
+            try {
+                listeningEventDao.backfillMissingTrackStats()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to backfill track play stats", e)
+            }
+            startTrackChangeCollector()
+            startRepeatCollector()
+        }
+    }
+
+    // ── Collector 1: track-change transitions ─────────────────────
+    private fun startTrackChangeCollector() {
         scope.launch {
             // Drop repeats on the SAME track id so we only react to track
             // transitions. Pause/resume mid-track re-emits the same state
@@ -95,15 +111,13 @@ class ListeningRecorder @VisibleForTesting internal constructor(
             playerRepository.playerState
                 .distinctUntilChangedBy { it.currentTrack?.id }
                 .collect { state ->
-                    // 1. Snapshot previous pending and record a skip if
-                    //    its delayed-fire never completed (cancellation
-                    //    completes the Job either way, so isCompleted is
-                    //    unreliable — we use an AtomicBoolean flag set
-                    //    inside the delay block right before the insert).
+                    // 1. Claim the previous session for this transition.
+                    //    If completion already claimed it, leave its job
+                    //    alive so persistence + listen recording can finish.
                     val previousPending = pending
                     if (previousPending != null) {
-                        previousPending.job.cancel()
-                        if (!previousPending.firedFlag.get()) {
+                        if (previousPending.claimed.compareAndSet(false, true)) {
+                            previousPending.job.cancel()
                             val skipAt = System.currentTimeMillis()
                             val position = previousPending.positionAtScheduleMs
                             // Inline (rather than `scope.launch { ... }`) so
@@ -115,7 +129,7 @@ class ListeningRecorder @VisibleForTesting internal constructor(
                             runCatching {
                                 trackSkipEventDao.insert(
                                     TrackSkipEventEntity(
-                                        trackId = previousPending.trackId,
+                                        trackId = previousPending.track.id,
                                         skippedAt = skipAt,
                                         positionMs = position,
                                     ),
@@ -127,11 +141,13 @@ class ListeningRecorder @VisibleForTesting internal constructor(
 
                     // 2. Schedule the new track's threshold-fire.
                     val track = state.currentTrack ?: return@collect
-                    schedulePendingFire(track.id, track.artist, track.title, track.album, track.durationMs)
+                    schedulePendingFire(track)
                 }
         }
+    }
 
-        // ── Collector 2: repeat-one loop detection ────────────────────
+    // ── Collector 2: repeat-one loop detection ────────────────────
+    private fun startRepeatCollector() {
         scope.launch {
             var lastPositionMs = 0L
             var lastTrackId = -1L
@@ -161,12 +177,9 @@ class ListeningRecorder @VisibleForTesting internal constructor(
 
                     if (isRepeatOne && positionJumpedBack) {
                         Log.d(TAG, "repeat detected for track ${track.id} — scheduling new fire")
-                        pending?.job?.cancel()
+                        pending?.takeIf { it.claimed.compareAndSet(false, true) }?.job?.cancel()
                         pending = null
-                        schedulePendingFire(
-                            track.id, track.artist, track.title,
-                            track.album, track.durationMs,
-                        )
+                        schedulePendingFire(track)
                     }
 
                     lastPositionMs = positionMs
@@ -179,50 +192,46 @@ class ListeningRecorder @VisibleForTesting internal constructor(
      * track-change collector and the repeat-one loop detector so the
      * insert + now-playing logic stays in one place.
      */
-    private fun schedulePendingFire(
-        trackId: Long,
-        artist: String,
-        title: String,
-        album: String,
-        durationMs: Long,
-    ) {
+    private fun schedulePendingFire(track: Track) {
         val sessionStart = System.currentTimeMillis()
-        val threshold = thresholdFor(durationMs)
-        val firedFlag = AtomicBoolean(false)
+        val threshold = thresholdFor(track.durationMs)
+        val claimed = AtomicBoolean(false)
         val job = scope.launch {
             delay(threshold)
             val nowPlaying = playerRepository.playerState.value.currentTrack?.id
-            // Mark fired BEFORE the insert so a race with
-            // the next track-change collector observes
-            // the correct state when it reads .get().
-            if (nowPlaying == trackId) {
-                firedFlag.set(true)
-                runCatching {
-                    listeningEventDao.insert(
+            if (nowPlaying == track.id && claimed.compareAndSet(false, true)) {
+                try {
+                    val persistedTrackId = musicRepository.ensureTrackPersisted(track)
+                    val completedAt = System.currentTimeMillis()
+                    listeningEventDao.recordCompletedListen(
                         ListeningEventEntity(
-                            trackId = trackId,
+                            trackId = persistedTrackId,
                             startedAt = sessionStart,
                             scrobbled = false,
                             // v0.9.13: insert IS the completion event — recorder only fires
                             // after threshold delay. AutoSaveScrobbler reads completed_at.
-                            completedAt = sessionStart,
+                            completedAt = completedAt,
                         ),
                     )
-                }.onFailure { Log.w(TAG, "Failed to insert listening event", it) }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to record completed listen", e)
+                }
             }
         }
         pending = PendingFire(
-            trackId = trackId,
+            track = track,
             sessionStart = sessionStart,
             job = job,
-            firedFlag = firedFlag,
+            claimed = claimed,
             positionAtScheduleMs = playerRepository.playerState.value.positionMs,
         )
         scope.launch {
             scrobbler.notifyNowPlaying(
-                artist = artist,
-                track = title,
-                album = album.takeIf { it.isNotBlank() },
+                artist = track.artist,
+                track = track.title,
+                album = track.album.takeIf { it.isNotBlank() },
             )
         }
     }

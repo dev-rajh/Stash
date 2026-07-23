@@ -81,6 +81,7 @@ class SettingsViewModel @Inject constructor(
     private val librarySizeHolder: LibrarySizeHolder,
     private val qualityPreference: QualityPreference,
     private val themePreference: ThemePreference,
+    private val sleepTimerController: com.stash.core.media.SleepTimerController,
     private val storagePreference: StoragePreference,
     private val downloadNetworkPreference: DownloadNetworkPreference,
     private val moveLibraryCoordinator: MoveLibraryCoordinator,
@@ -92,6 +93,9 @@ class SettingsViewModel @Inject constructor(
     private val lastFmScrobbler: LastFmScrobbler,
     private val youTubeHistoryPreference: YouTubeHistoryPreference,
     private val stashMixPreference: com.stash.core.data.prefs.StashMixPreference,
+    private val homeDiscoveryPreference: com.stash.core.data.prefs.HomeDiscoveryPreference,
+    private val nowPlayingPreference: com.stash.core.data.prefs.NowPlayingPreference,
+    private val homeSectionsPreference: com.stash.core.data.prefs.HomeSectionsPreference,
     private val youTubeHistoryScrobbler: YouTubeHistoryScrobbler,
     private val youTubeScrobblerState: YouTubeScrobblerState,
     private val losslessPrefs: LosslessSourcePreferences,
@@ -345,6 +349,11 @@ class SettingsViewModel @Inject constructor(
         streamingQualityPrefs.wifiTier,
         streamingQualityPrefs.cellularTier,
         streamingQualityPrefs.saveData,
+        themePreference.amoledDark,
+        homeDiscoveryPreference.enabled,
+        nowPlayingPreference.ambientAnimationEnabled,
+        homeSectionsPreference.order,
+        homeSectionsPreference.hidden,
     ) { values ->
         @Suppress("UNCHECKED_CAST")
         val spotifyAuth = values[0] as AuthState
@@ -380,6 +389,13 @@ class SettingsViewModel @Inject constructor(
         val streamingWifiTier = values[30] as LosslessQualityTier
         val streamingCellularTier = values[31] as LosslessQualityTier
         val streamingSaveData = values[32] as Boolean
+        val amoledDark = values[33] as Boolean
+        val qobuzDiscoveryEnabled = values[34] as Boolean
+        val ambientAnimationEnabled = values[35] as Boolean
+        @Suppress("UNCHECKED_CAST")
+        val homeSectionOrder = values[36] as List<com.stash.core.data.prefs.HomeSection>
+        @Suppress("UNCHECKED_CAST")
+        val homeSectionsHidden = values[37] as Set<com.stash.core.data.prefs.HomeSection>
 
         val lastFmState: LastFmAuthState = local.lastFmAuthOverride
             ?: when {
@@ -396,6 +412,7 @@ class SettingsViewModel @Inject constructor(
             youTubeAuthState = youTubeAuth,
             audioQuality = quality,
             themeMode = theme,
+            amoledDark = amoledDark,
             downloadNetworkMode = downloadNetworkMode,
             totalStorageBytes = storageBytes,
             totalTracks = trackCount,
@@ -415,6 +432,10 @@ class SettingsViewModel @Inject constructor(
             scrobbleDrainResult = local.lastScrobbleDrainResult,
             ytHistoryEnabled = ytHistoryEnabled,
             stashMixesEnabled = stashMixesEnabled,
+            qobuzDiscoveryEnabled = qobuzDiscoveryEnabled,
+            ambientAnimationEnabled = ambientAnimationEnabled,
+            homeSectionOrder = homeSectionOrder,
+            homeSectionsHidden = homeSectionsHidden,
             ytHistoryHealth = ytHistoryHealth,
             ytPendingCount = ytPendingCount,
             losslessEnabled = losslessEnabled,
@@ -446,6 +467,11 @@ class SettingsViewModel @Inject constructor(
     )
 
     // -- Storage actions ------------------------------------------------------
+
+    /** Recomputes storage usage from the configured library filesystem. */
+    fun refreshStorageUsage() {
+        librarySizeHolder.refresh()
+    }
 
     /**
      * Persists the user's chosen SAF tree URI (or null to revert to
@@ -952,6 +978,19 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
+    // ── Sleep timer (fork issue ParaliyzedEvo/Stash#26) ─────────────────
+    val sleepTimerState = sleepTimerController.state
+    fun onSleepTimerMinutes(minutes: Int) = sleepTimerController.startMinutes(minutes)
+    fun onSleepTimerEndOfTrack() = sleepTimerController.stopAtEndOfTrack()
+    fun onSleepTimerCancel() = sleepTimerController.cancel()
+
+    /** Persists the pure-black (AMOLED) dark preference. */
+    fun onAmoledDarkChanged(enabled: Boolean) {
+        viewModelScope.launch {
+            themePreference.setAmoledDark(enabled)
+        }
+    }
+
     /**
      * Persists a new download-network mode AND re-schedules the two
      * workers that depend on it ([StashDiscoveryWorker],
@@ -992,6 +1031,30 @@ class SettingsViewModel @Inject constructor(
                     android.util.Log.e("SettingsVM", "applyStashMixesEnabled failed: ${e.message}", e)
                 }
         }
+    }
+
+    /**
+     * Hide/show the Qobuz discovery sections on Home (New Releases, Qobuz
+     * Playlists, Top Albums + the genre chips). Pref-only — Home's
+     * discovery flow gates its own catalog fetches off this.
+     */
+    fun onQobuzDiscoveryEnabledChanged(enabled: Boolean) {
+        viewModelScope.launch { homeDiscoveryPreference.setEnabled(enabled) }
+    }
+
+    /** Ambient animated background on Now Playing (Settings > Appearance). */
+    fun onAmbientAnimationEnabledChanged(enabled: Boolean) {
+        viewModelScope.launch { nowPlayingPreference.setAmbientAnimationEnabled(enabled) }
+    }
+
+    /** Move a Home section one slot up/down (Settings > Appearance > Home layout). */
+    fun onHomeSectionMoved(section: com.stash.core.data.prefs.HomeSection, up: Boolean) {
+        viewModelScope.launch { homeSectionsPreference.move(section, up) }
+    }
+
+    /** Show/hide a Home section without forgetting its position. */
+    fun onHomeSectionHiddenChanged(section: com.stash.core.data.prefs.HomeSection, hide: Boolean) {
+        viewModelScope.launch { homeSectionsPreference.setHidden(section, hide) }
     }
 
     /** Clear the kill-switch after PROTOCOL_BROKEN. Exposed to the Settings

@@ -9,24 +9,35 @@ on:
   push:
     branches: [master]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   unit-tests:
+    if: ${{ github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip test]') }}
     name: core:media unit tests
     runs-on: ubuntu-latest
+    # The :core:media suite contains a known flaky network test that can
+    # HANG (no test-level timeout). Without a job cap each hung run squats
+    # on a concurrency slot for the 6h default — 20 pushes in a day froze
+    # the entire account's Actions queue (observed 2026-07-19, blocked the
+    # v0.9.78 release build). Bound the damage.
+    timeout-minutes: 20
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
 
       - name: Set up Gradle cache
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
 
       - name: Fix gradlew permission
         run: chmod +x gradlew
@@ -36,7 +47,7 @@ jobs:
 
       - name: Upload test report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: core-media-test-results
           path: |
@@ -44,26 +55,30 @@ jobs:
             core/media/build/reports/tests/testDebugUnitTest/
 
   build-debug-apk:
+    if: ${{ github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip test]') }}
     name: Build debug APK
     runs-on: ubuntu-latest
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
 
       - name: Set up Gradle cache
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
 
       - name: Fix gradlew permission
         run: chmod +x gradlew
 
       - name: Assemble debug APK
+        env:
+          LASTFM_API_KEY: ${{ secrets.LASTFM_API_KEY }}
+          LASTFM_API_SECRET: ${{ secrets.LASTFM_API_SECRET }}
         run: ./gradlew :app:assembleDebug --no-daemon
 
       - name: Locate debug APK
@@ -78,7 +93,7 @@ jobs:
           echo "Built: $APK ($(du -h "$APK" | cut -f1))"
 
       - name: Upload debug APK
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: stash-debug-apk
           path: ${{ steps.find_apk.outputs.apk_path }}

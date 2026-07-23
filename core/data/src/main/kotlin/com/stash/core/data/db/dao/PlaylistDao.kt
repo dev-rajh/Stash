@@ -54,6 +54,23 @@ interface PlaylistDao {
     """)
     suspend fun getCrossRef(playlistId: Long, trackId: Long): PlaylistTrackCrossRef?
 
+    /**
+     * Bulk counterpart to [insertCrossRef] — one INSERT statement covering
+     * every row instead of N round-trips. Used by DiffWorker's batched
+     * sync-diff pass to link (or re-link) many tracks to a playlist at once.
+     */
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertAllCrossRefs(crossRefs: List<PlaylistTrackCrossRef>)
+
+    /**
+     * Every current cross-ref row for a playlist (including soft-deleted
+     * ones). Used by DiffWorker to preload addedAt-preservation and
+     * soft-delete state for the WHOLE playlist in one query instead of one
+     * [getCrossRef] SELECT per track.
+     */
+    @Query("SELECT * FROM playlist_tracks WHERE playlist_id = :playlistId")
+    suspend fun getCrossRefsForPlaylist(playlistId: Long): List<PlaylistTrackCrossRef>
+
     // ── Update / Delete ─────────────────────────────────────────────────
 
     /** Update an existing playlist entity. */
@@ -288,7 +305,7 @@ interface PlaylistDao {
      * so manual additions to imported Spotify/YT Music playlists persist.
      * See issue #42.
      */
-    @Query("DELETE FROM playlist_tracks WHERE playlist_id = :playlistId AND locally_added = 0")
+    @Query("DELETE FROM playlist_tracks WHERE playlist_id = :playlistId AND locally_added = 0 AND removed_at IS NULL")
     suspend fun clearSyncedPlaylistTracks(playlistId: Long)
 
     /**
@@ -323,6 +340,10 @@ interface PlaylistDao {
     /** Toggle sync_enabled for a specific playlist. */
     @Query("UPDATE playlists SET sync_enabled = :enabled WHERE id = :playlistId")
     suspend fun updateSyncEnabled(playlistId: Long, enabled: Boolean)
+
+    /** Toggle whether a playlist is hidden from the Home rails. */
+    @Query("UPDATE playlists SET hide_from_home = :hidden WHERE id = :playlistId")
+    suspend fun setHideFromHome(playlistId: Long, hidden: Boolean)
 
     /**
      * v0.9.26 — flip `is_active` on every playlist materialized by a
@@ -461,6 +482,19 @@ interface PlaylistDao {
     suspend fun deactivateMissingForSource(
         source: MusicSource,
         currentSourceIds: List<String>,
+    ): Int
+
+    /** Soft-deactivate only Spotify CUSTOM playlists absent from a complete inventory. */
+    @Query(
+        """
+        UPDATE playlists SET is_active = 0
+        WHERE source = 'SPOTIFY' AND type = 'CUSTOM' AND is_active = 1
+          AND (:hasCurrentIds = 0 OR source_id NOT IN (:currentSourceIds))
+        """
+    )
+    suspend fun deactivateMissingSpotifyCustomPlaylists(
+        currentSourceIds: List<String>,
+        hasCurrentIds: Boolean,
     ): Int
 
     /** Flip [is_active] back to 1 for a specific playlist id. Paired with

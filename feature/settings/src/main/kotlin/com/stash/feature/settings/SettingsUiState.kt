@@ -28,6 +28,8 @@ data class SettingsUiState(
     val youTubeAuthState: AuthState = AuthState.NotConnected,
     val audioQuality: QualityTier = QualityTier.MAX,
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
+    /** Pure-black (AMOLED) backgrounds whenever the effective theme is dark. */
+    val amoledDark: Boolean = false,
     /**
      * Network + power conditions under which Stash runs background
      * downloads (Stash Discover, tag enrichment). Changing this in
@@ -42,6 +44,16 @@ data class SettingsUiState(
      * built-in mix playlists from Home / Library. See issues #56, #57.
      */
     val stashMixesEnabled: Boolean = true,
+    /** Qobuz discovery sections on Home (New Releases / Qobuz Playlists /
+     * Top Albums + genre chips). False = Home keeps only mixes + imports. */
+    val qobuzDiscoveryEnabled: Boolean = true,
+    /** Ambient animated background on the Now Playing screen. */
+    val ambientAnimationEnabled: Boolean = true,
+    /** Full Home-section order (including hidden) + the hidden set —
+     * drives the Settings > Appearance > Home layout editor. */
+    val homeSectionOrder: List<com.stash.core.data.prefs.HomeSection> =
+        com.stash.core.data.prefs.HomeSection.entries.toList(),
+    val homeSectionsHidden: Set<com.stash.core.data.prefs.HomeSection> = emptySet(),
     val ytHistoryHealth: YouTubeScrobblerHealth = YouTubeScrobblerHealth.DISABLED,
     val ytPendingCount: Int = 0,
     /**
