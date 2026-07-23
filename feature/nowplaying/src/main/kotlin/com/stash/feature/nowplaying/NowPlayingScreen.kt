@@ -1,5 +1,7 @@
 package com.stash.feature.nowplaying
 
+import android.graphics.Bitmap
+import android.widget.Toast
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.basicMarquee
@@ -40,13 +42,18 @@ import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Wifi
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -62,12 +69,15 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -77,18 +87,25 @@ import coil3.compose.AsyncImagePainter
 import coil3.request.ImageRequest
 import coil3.request.allowHardware
 import coil3.toBitmap
+import com.stash.core.model.MusicSource
+import com.stash.core.model.Playlist
 import kotlin.math.abs
 import com.stash.core.model.RepeatMode
+import com.stash.core.model.Track
 import com.stash.core.model.isFlac
+import com.stash.core.ui.components.LikeButton
 import com.stash.core.ui.components.SaveToPlaylistSheet
 import com.stash.core.ui.components.SheetOptionRow
+import com.stash.core.ui.components.ShareTrackSheet
 import com.stash.core.ui.theme.LocalIsAmoledTheme
+import com.stash.core.ui.theme.StashTheme
 import com.stash.feature.nowplaying.ui.AmbientBackground
 import com.stash.feature.nowplaying.ui.GlowingProgressBar
 import com.stash.feature.nowplaying.ui.LiveLyricsBar
 import com.stash.feature.nowplaying.ui.LyricsBottomSheet
 import com.stash.feature.nowplaying.ui.NowPlayingOptionsSheet
 import com.stash.feature.nowplaying.ui.QueueBottomSheet
+import java.net.URLDecoder
 
 /** Light-ground ink for the pastel-wash Now Playing (the app's plum-black). */
 private val NpInkLight = Color(0xFF241C36)
@@ -186,7 +203,7 @@ fun NowPlayingScreen(
     val toastContext = LocalContext.current
     LaunchedEffect(Unit) {
         viewModel.userMessages.collect { msg ->
-            android.widget.Toast.makeText(toastContext, msg, android.widget.Toast.LENGTH_LONG).show()
+            Toast.makeText(toastContext, msg, Toast.LENGTH_LONG).show()
         }
     }
 
@@ -209,7 +226,7 @@ fun NowPlayingScreen(
     // reconstruction whose spotifyUri/youtubeId are null, which is why the
     // link rows never appeared when this read uiState.currentTrack.
     shareTrack?.let { full ->
-        com.stash.core.ui.components.ShareTrackSheet(
+        ShareTrackSheet(
             title = full.title,
             artist = full.artist,
             spotifyUri = full.spotifyUri,
@@ -325,75 +342,75 @@ fun NowPlayingScreen(
     // covers three very different outcomes: mark for replacement, delete
     // the file, delete + permanently block.
     if (showWrongMatchDialog && track != null) {
-        androidx.compose.material3.AlertDialog(
+        AlertDialog(
             onDismissRequest = { showWrongMatchDialog = false },
             title = {
-                androidx.compose.material3.Text(
+                Text(
                     text = "What's wrong with this song?",
-                    style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
-                    fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
                 )
             },
             text = {
-                androidx.compose.foundation.layout.Column(
-                    verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp),
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    androidx.compose.material3.Text(
+                    Text(
                         text = "Pick what should happen to '${track.title}'.",
-                        style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
-                        color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    androidx.compose.foundation.layout.Spacer(
+                    Spacer(
                         modifier = Modifier.height(4.dp),
                     )
                     if (!track.isFlac) {
-                        androidx.compose.material3.OutlinedButton(
+                        OutlinedButton(
                             onClick = {
                                 viewModel.findInFlacForCurrentTrack()
                                 showWrongMatchDialog = false
                             },
                             modifier = Modifier.fillMaxWidth(),
                         ) {
-                            androidx.compose.material3.Text("Find in FLAC")
+                            Text("Find in FLAC")
                         }
                     }
-                    androidx.compose.material3.OutlinedButton(
+                    OutlinedButton(
                         onClick = {
                             viewModel.flagCurrentTrackAsWrongMatch()
                             showWrongMatchDialog = false
                         },
                         modifier = Modifier.fillMaxWidth(),
                     ) {
-                        androidx.compose.material3.Text("Find a better match")
+                        Text("Find a better match")
                     }
-                    androidx.compose.material3.OutlinedButton(
+                    OutlinedButton(
                         onClick = {
                             viewModel.deleteCurrentTrack(alsoBlock = false)
                             showWrongMatchDialog = false
                         },
                         modifier = Modifier.fillMaxWidth(),
                     ) {
-                        androidx.compose.material3.Text("Delete from library")
+                        Text("Delete from library")
                     }
-                    androidx.compose.material3.Button(
+                    Button(
                         onClick = {
                             viewModel.deleteCurrentTrack(alsoBlock = true)
                             showWrongMatchDialog = false
                         },
                         modifier = Modifier.fillMaxWidth(),
-                        colors = androidx.compose.material3.ButtonDefaults.buttonColors(
-                            containerColor = androidx.compose.material3.MaterialTheme.colorScheme.error,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.error,
                         ),
                     ) {
-                        androidx.compose.material3.Text("Delete and block forever")
+                        Text("Delete and block forever")
                     }
                 }
             },
             confirmButton = {
-                androidx.compose.material3.TextButton(
+                TextButton(
                     onClick = { showWrongMatchDialog = false },
                 ) {
-                    androidx.compose.material3.Text("Cancel")
+                    Text("Cancel")
                 }
             },
         )
@@ -646,7 +663,7 @@ fun NowPlayingScreen(
  */
 @Composable
 private fun PlaylistsSection(
-    playlists: List<com.stash.core.model.Playlist>,
+    playlists: List<Playlist>,
     accentColor: Color,
     onPlaylistClick: (Long) -> Unit,
 ) {
@@ -725,12 +742,12 @@ private fun PlaylistsSection(
 }
 
 /** Source + track-count subtitle for an "Appears in" playlist row. */
-private fun playlistSubtitle(playlist: com.stash.core.model.Playlist): String {
+private fun playlistSubtitle(playlist: Playlist): String {
     val source = when (playlist.source) {
-        com.stash.core.model.MusicSource.SPOTIFY -> "Spotify"
-        com.stash.core.model.MusicSource.YOUTUBE -> "YouTube Music"
-        com.stash.core.model.MusicSource.LOCAL -> "Local"
-        com.stash.core.model.MusicSource.BOTH -> "Stash"
+        MusicSource.SPOTIFY -> "Spotify"
+        MusicSource.YOUTUBE -> "YouTube Music"
+        MusicSource.LOCAL -> "Local"
+        MusicSource.BOTH -> "Stash"
     }
     val count = playlist.trackCount
     return if (count > 0) "$source • $count songs" else source
@@ -855,7 +872,7 @@ private fun TopBar(
 /** A single filled quick-action chip (icon + label). */
 @Composable
 private fun QuickActionChip(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    icon: ImageVector,
     label: String,
     contentDescription: String,
     onClick: () -> Unit,
@@ -898,8 +915,8 @@ private fun AlbumArtSection(
     albumArtUrl: String?,
     albumArtPath: String?,
     accentColor: Color,
-    artSize: androidx.compose.ui.unit.Dp = 280.dp,
-    onBitmapLoaded: (android.graphics.Bitmap?) -> Unit,
+    artSize: Dp = 280.dp,
+    onBitmapLoaded: (Bitmap?) -> Unit,
     onSwipeNext: () -> Unit = {},
     onSwipePrevious: () -> Unit = {},
     onSwipeDownDismiss: () -> Unit = {},
@@ -1096,7 +1113,7 @@ private fun PlaybackControls(
  * Returns null only when the codec is blank — in that case the caller
  * should render no line at all.
  */
-private fun trackQualityText(track: com.stash.core.model.Track, fileSizeBytes: Long): String? {
+private fun trackQualityText(track: Track, fileSizeBytes: Long): String? {
     // v0.9.13 fix: tracks downloaded before format-tracking was wired (pre-v0.9.11)
     // default to file_format = "opus" regardless of the actual codec — so a FLAC
     // file would render "OPUS · 4233 kbps", which is the source of "every track says
@@ -1166,7 +1183,7 @@ private fun displayPath(rawPath: String): String {
     val encoded = rawPath.substringAfterLast("/document/", "")
         .ifEmpty { rawPath.substringAfterLast("/tree/", "") }
         .ifEmpty { return rawPath }
-    val decoded = runCatching { java.net.URLDecoder.decode(encoded, "UTF-8") }
+    val decoded = runCatching { URLDecoder.decode(encoded, "UTF-8") }
         .getOrDefault(encoded)
     // Drop the "primary:" / "<volume>:" storage prefix, keep the relative path.
     return decoded.substringAfter(':', decoded)
@@ -1250,14 +1267,14 @@ private fun QualityLine(
     }
 }
 
-@androidx.compose.ui.tooling.preview.Preview(
+@Preview(
     name = "QualityLine — streaming",
     showBackground = true,
     backgroundColor = 0xFF101012,
 )
 @Composable
 private fun PreviewQualityLineStreaming() {
-    com.stash.core.ui.theme.StashTheme {
+    StashTheme {
         QualityLine(
             qualityText = "OPUS \u00B7 160 kbps",
             isStreaming = true,
@@ -1265,7 +1282,7 @@ private fun PreviewQualityLineStreaming() {
     }
 }
 
-@androidx.compose.ui.tooling.preview.Preview(
+@Preview(
     name = "QualityLine — local",
     showBackground = true,
     backgroundColor = 0xFF101012,
