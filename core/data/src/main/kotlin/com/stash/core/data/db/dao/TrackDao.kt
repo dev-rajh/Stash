@@ -548,6 +548,41 @@ interface TrackDao {
     suspend fun setFormatAndQuality(trackId: Long, fileFormat: String, qualityKbps: Int)
 
     /**
+     * Re-points a downloaded track at a replacement file the user swapped in
+     * out-of-band — e.g. they deleted the Stash-downloaded `song.m4a` and
+     * dropped a `song.flac` of the same base name into the same folder. The
+     * relink scan finds the sibling file and writes the new path + freshly
+     * read quality metadata here in one statement.
+     *
+     * `quality_kbps` and `file_size_bytes` are overwritten unconditionally
+     * (the new file is a different encode, so the old values are stale).
+     * `sample_rate_hz` / `bits_per_sample` use COALESCE so a read that
+     * couldn't recover them leaves any existing value intact rather than
+     * nulling it.
+     */
+    @Query(
+        """
+        UPDATE tracks
+        SET file_path = :filePath,
+            file_format = :fileFormat,
+            file_size_bytes = :sizeBytes,
+            quality_kbps = :qualityKbps,
+            sample_rate_hz = COALESCE(:sampleRateHz, sample_rate_hz),
+            bits_per_sample = COALESCE(:bitsPerSample, bits_per_sample)
+        WHERE id = :trackId
+        """
+    )
+    suspend fun relinkReplacedFile(
+        trackId: Long,
+        filePath: String,
+        fileFormat: String,
+        sizeBytes: Long,
+        qualityKbps: Int,
+        sampleRateHz: Int?,
+        bitsPerSample: Int?,
+    )
+
+    /**
      * Unconditionally overwrites `duration_ms`. Distinct from the older
      * [fillMissingDuration] which guards on `duration_ms = 0`. Used by the
      * download path to reconcile cases where Spotify's track length and

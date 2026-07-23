@@ -52,6 +52,10 @@ fun StashScaffold(
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = navBackStackEntry?.destination?.route
 
+    // The full-screen Now Playing screen owns the bottom edge, so hide app-level
+    // bottom chrome while that route is on top.
+    val onNowPlaying = currentRoute == NowPlayingRoute::class.qualifiedName
+
     // Whether a detail screen is currently in multi-select mode. Detail screens
     // signal this via `onSelectionModeChanged`; while it is true we hide the
     // whole bottom chrome (mini-player AND nav bar) so the screen's own bottom
@@ -114,16 +118,11 @@ fun StashScaffold(
         // 15+ where edge-to-edge is enforced. Reported via Twitter
         // (https://x.com/tekno_deha1/status/...).
         bottomBar = {
-            // While a screen is selecting, render no bottom chrome at all — the
-            // screen's own selection action bar (which handles its own nav insets)
-            // takes the bottom edge. This drops innerPadding.bottom to 0 so the
-            // content extends full-height behind that action bar.
-            if (!selectionActive) {
+            // While a screen owns the bottom edge, render no bottom chrome at all.
+            // This drops innerPadding.bottom to 0 so content can extend full-height
+            // behind that screen's own bottom UI.
+            if (!selectionActive && !onNowPlaying) {
                 Column(modifier = Modifier.windowInsetsPadding(WindowInsets.navigationBars)) {
-                    // On Now Playing the LiveLyricsBar (rendered inside the
-                    // screen itself) takes the MiniPlayer's spot — the full
-                    // player already shows all transport controls, so the
-                    // duplicate mini transport hides on this route only.
                     AnimatedVisibility(
                         visible = currentRoute != NowPlayingRoute::class.qualifiedName,
                         enter = fadeIn(),

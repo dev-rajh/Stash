@@ -9,6 +9,7 @@ import androidx.work.WorkManager
 import com.stash.core.data.audio.AudioDurationExtractor
 import com.stash.core.data.db.dao.LibraryHealthBucket
 import com.stash.core.data.db.dao.TrackDao
+import com.stash.core.data.files.LocalFileOps
 import com.stash.core.data.sync.workers.QualityInfoBackfillWorker
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -38,6 +39,7 @@ class LibraryHealthViewModel @Inject constructor(
     @ApplicationContext private val appContext: Context,
     private val trackDao: TrackDao,
     private val metadataExtractor: AudioDurationExtractor,
+    private val localFileOps: LocalFileOps,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(LibraryHealthState())
@@ -152,6 +154,97 @@ class LibraryHealthViewModel @Inject constructor(
     }
 
     /**
+     * Scans for files the user replaced out-of-band and re-points the DB at
+     * them. Scenario: Stash downloaded `song.m4a`, the user found a better
+     * FLAC elsewhere, deleted the m4a and dropped `song.flac` into the same
+     * folder under the same base name. The recorded `file_path` now points at
+     * a file that no longer exists, so the track is effectively broken.
+     *
+     * For every downloaded track whose stored path is missing on disk, this
+     * looks in the same directory for a sibling with the same base name but a
+     * different (audio) extension. When it finds one it rewrites `file_path`,
+     * `file_format`, `file_size_bytes`, `quality_kbps`, and — when readable —
+     * `sample_rate_hz` / `bits_per_sample`, so the swapped-in file plays and
+     * its quality badge reflects the new encode.
+     *
+     * Runs inline (not as a worker) so the user gets immediate progress; the
+     * candidate set is only the missing-file rows, so it's cheap. SAF-aware
+     * via [LocalFileOps] — `content://` external-storage libraries are walked
+     * with [android.provider.DocumentsContract], not java.io.File.
+     */
+    fun runRelinkScan() {
+        if (_state.value.relink is RelinkStatus.Running) return
+        // Flip to Running synchronously, before the IO work, so the button
+        // gives instant feedback. The existence-check phase below is the slow
+        // part (each SAF file is a content-resolver round-trip), so without
+        // this the UI sat on "Scan" for seconds before anything happened.
+        _state.update { it.copy(relink = RelinkStatus.Running(processed = 0, total = 0)) }
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                val refs = runCatching { trackDao.getDownloadedFileRefs() }
+                    .onFailure { Log.w(TAG, "getDownloadedFileRefs failed", it) }
+                    .getOrDefault(emptyList())
+
+                // Phase 1: find downloaded rows whose recorded file is gone
+                // (the user replaced it with a different-format file). Progress
+                // is reported across this loop since it's where the time goes.
+                _state.update { it.copy(relink = RelinkStatus.Running(processed = 0, total = refs.size)) }
+                val missing = mutableListOf<Pair<Long, String>>()
+                refs.forEachIndexed { i, ref ->
+                    val path = ref.filePath
+                    if (path != null && !localFileOps.exists(path)) missing += ref.id to path
+                    if ((i + 1) % 25 == 0) {
+                        _state.update { it.copy(relink = RelinkStatus.Running(processed = i + 1, total = refs.size)) }
+                    }
+                }
+
+                // Phase 2: relink each missing file to a same-name replacement.
+                val relinkedNames = mutableListOf<String>()
+                for ((id, oldPath) in missing) {
+                    val newPath = localFileOps.findReplacementSibling(oldPath, AUDIO_EXTENSIONS) ?: continue
+                    val meta = metadataExtractor.extract(newPath)
+                    val format = meta?.format?.takeIf { it.isNotBlank() && it != "unknown" }
+                        ?: newPath.substringAfterLast('.', "").lowercase()
+                    runCatching {
+                        trackDao.relinkReplacedFile(
+                            trackId = id,
+                            filePath = newPath,
+                            fileFormat = format,
+                            sizeBytes = localFileOps.sizeBytes(newPath),
+                            qualityKbps = meta?.bitrateKbps ?: 0,
+                            sampleRateHz = meta?.sampleRateHz,
+                            bitsPerSample = meta?.bitsPerSample,
+                        )
+                        relinkedNames += fileNameOf(newPath)
+                    }.onFailure { e -> Log.w(TAG, "relinkReplacedFile failed for trackId=$id", e) }
+                }
+
+                Log.i(TAG, "relink scan complete: scanned=${refs.size} relinked=${relinkedNames.size}")
+                _state.update {
+                    it.copy(
+                        relink = RelinkStatus.Done(
+                            relinked = relinkedNames.size,
+                            scanned = missing.size,
+                            relinkedNames = relinkedNames,
+                        ),
+                    )
+                }
+            }
+            refresh()
+        }
+    }
+
+    /**
+     * Readable file name from a stored path for the post-scan "what changed"
+     * list. Handles SAF `content://` document URIs (percent-decoded, then the
+     * last path segment) and plain file paths alike.
+     */
+    private fun fileNameOf(path: String): String {
+        val decoded = runCatching { java.net.URLDecoder.decode(path, "UTF-8") }.getOrDefault(path)
+        return decoded.substringAfterLast('/').substringAfterLast(':')
+    }
+
+    /**
      * Enqueues [QualityInfoBackfillWorker] without WorkManager constraints
      * — the user explicitly opted in by tapping the row, so we don't gate
      * on battery state. The worker self-re-enqueues if the library has
@@ -165,6 +258,17 @@ class LibraryHealthViewModel @Inject constructor(
 
     companion object {
         private const val TAG = "LibraryHealthVM"
+
+        /**
+         * Audio extensions the relink scan will accept as a replacement,
+         * ordered best-first: lossless codecs ahead of lossy ones. The order
+         * is also the preference ranking when a folder holds more than one
+         * candidate for the same base name.
+         */
+        private val AUDIO_EXTENSIONS = listOf(
+            "flac", "alac", "wav", "aiff", "ape", "tta", "wv",
+            "m4a", "aac", "mp3", "ogg", "opus",
+        )
     }
 }
 
@@ -176,6 +280,7 @@ class LibraryHealthViewModel @Inject constructor(
 data class LibraryHealthState(
     val buckets: List<LibraryHealthBucket> = emptyList(),
     val backfill: BackfillStatus = BackfillStatus.Idle,
+    val relink: RelinkStatus = RelinkStatus.Idle,
 )
 
 /**
@@ -188,4 +293,20 @@ sealed interface BackfillStatus {
     data object Idle : BackfillStatus
     data class Running(val processed: Int, val total: Int) : BackfillStatus
     data class Done(val processed: Int, val total: Int) : BackfillStatus
+}
+
+/**
+ * Lifecycle of the "relink replaced files" scan. [Running] drives the
+ * progress bar over the missing-file candidate set; [Done.relinked] is how
+ * many rows were successfully re-pointed at a same-name replacement file,
+ * [Done.scanned] the number of missing-file rows examined.
+ */
+sealed interface RelinkStatus {
+    data object Idle : RelinkStatus
+    data class Running(val processed: Int, val total: Int) : RelinkStatus
+    data class Done(
+        val relinked: Int,
+        val scanned: Int,
+        val relinkedNames: List<String> = emptyList(),
+    ) : RelinkStatus
 }

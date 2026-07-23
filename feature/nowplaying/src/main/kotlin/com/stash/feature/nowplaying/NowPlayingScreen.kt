@@ -1,6 +1,10 @@
 package com.stash.feature.nowplaying
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.basicMarquee
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -22,11 +26,8 @@ import androidx.compose.material.icons.filled.Radio
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
-import androidx.compose.material.icons.filled.BookmarkBorder
-import androidx.compose.material.icons.filled.Download
-import androidx.compose.material.icons.filled.DownloadDone
-import androidx.compose.material.icons.filled.Flag
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Repeat
@@ -35,6 +36,7 @@ import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Wifi
+import androidx.compose.material.icons.outlined.Lyrics
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.CircularProgressIndicator
@@ -53,6 +55,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.layout.ContentScale
@@ -69,6 +72,7 @@ import coil3.compose.AsyncImagePainter
 import coil3.request.ImageRequest
 import coil3.request.allowHardware
 import coil3.toBitmap
+import kotlin.math.abs
 import com.stash.core.model.RepeatMode
 import com.stash.core.model.isFlac
 import com.stash.core.ui.components.SaveToPlaylistSheet
@@ -77,6 +81,7 @@ import com.stash.feature.nowplaying.ui.AmbientBackground
 import com.stash.feature.nowplaying.ui.GlowingProgressBar
 import com.stash.feature.nowplaying.ui.LiveLyricsBar
 import com.stash.feature.nowplaying.ui.LyricsBottomSheet
+import com.stash.feature.nowplaying.ui.NowPlayingOptionsSheet
 import com.stash.feature.nowplaying.ui.QueueBottomSheet
 
 /** Light-ground ink for the pastel-wash Now Playing (the app's plum-black). */
@@ -113,16 +118,20 @@ private fun npAccent(raw: Color): Color =
  * paper in light.
  *
  * @param onDismiss Callback invoked when the user taps the dismiss (down arrow) button.
+ * @param onNavigateToPlaylist Callback invoked with a playlist id when the user taps
+ *   one of the "Appears in" playlists; opens that playlist's track list.
  * @param viewModel The [NowPlayingViewModel] provided by Hilt.
  */
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun NowPlayingScreen(
     onDismiss: () -> Unit,
+    onNavigateToPlaylist: (Long) -> Unit = {},
     onNavigateToArtist: (id: String, name: String, avatarUrl: String?, focusAlbum: String?) -> Unit,
     viewModel: NowPlayingViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val sleepTimerState by viewModel.sleepTimerState.collectAsStateWithLifecycle()
     val track = uiState.currentTrack
     val resolvingArtist by viewModel.resolvingArtist.collectAsStateWithLifecycle()
     val isDownloadingCurrent by viewModel.isDownloadingCurrent.collectAsStateWithLifecycle()
@@ -131,6 +140,10 @@ fun NowPlayingScreen(
     val ambientAnimationEnabled = viewModel.ambientAnimationEnabled.collectAsStateWithLifecycle().value ?: return
     var showQueue by remember { mutableStateOf(false) }
     var showSaveSheet by remember { mutableStateOf(false) }
+    // Overflow ("…") options sheet — holds the per-track actions that used to
+    // live as inline icons in the top bar (like, add to playlist, sleep timer,
+    // download, flag).
+    var showOptions by remember { mutableStateOf(false) }
     val shareTrack by viewModel.shareTrack.collectAsStateWithLifecycle()
     // "This song is wrong" dialog — shown when the flag icon is tapped.
     // Decouples the Flag button (which is just "there's a problem") from
@@ -191,15 +204,32 @@ fun NowPlayingScreen(
         )
     }
 
-    // Lyrics bottom sheet — opened by tapping the LiveLyricsBar pinned at
-    // the screen's bottom edge (`onShowLyrics`); the bar and the sheet share
-    // the one subscription collected just below.
+    // Overflow options sheet — opened from the top-bar "…" button. Only
+    // shown when a track is loaded (the actions all operate on the current
+    // track). Add-to-playlist and Flag hand off to their own sheet/dialog,
+    // which is why those open after the options sheet dismisses.
+    if (showOptions && track != null) {
+        NowPlayingOptionsSheet(
+            track = track,
+            isLiked = track.stashLikedAt != null,
+            isDownloaded = track.isDownloaded,
+            accentColor = uiState.vibrantColor,
+            sleepTimerState = sleepTimerState,
+            radioActive = radioLabel != null,
+            onToggleLike = viewModel::onLikeTap,
+            onAddToPlaylist = { showSaveSheet = true },
+            onSetSleepTimer = viewModel::setSleepTimer,
+            onCancelSleepTimer = viewModel::cancelSleepTimer,
+            onToggleDownload = viewModel::toggleDownloadForCurrentTrack,
+            onStartRadio = viewModel::startRadioFromCurrent,
+            onStopRadio = viewModel::stopRadio,
+            onFlag = { showWrongMatchDialog = true },
+            onDismiss = { showOptions = false },
+        )
+    }
+
+    // Lyrics bottom sheet — opened by tapping the Lyrics quick-action chip.
     val showLyrics by viewModel.lyricsSheetOpen.collectAsStateWithLifecycle()
-    // Collected unconditionally (not just while the sheet is open): the bar
-    // needs the state, and this subscription is what arms the ViewModel's
-    // WhileSubscribed fetch trigger from screen-open onward. The screen
-    // already recomposes every 250ms from uiState position ticks, so the
-    // extra position collect adds no new recomposition pressure.
     val lyricsState by viewModel.lyricsViewState.collectAsStateWithLifecycle()
     val lyricsPositionMs by viewModel.currentPositionMs.collectAsStateWithLifecycle()
     val liveLyricsEnabled by viewModel.liveLyricsBarEnabled.collectAsStateWithLifecycle()
@@ -343,43 +373,29 @@ fun NowPlayingScreen(
                     .padding(horizontal = 24.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                // -- Top bar: dismiss, radio, flag, download, save, queue --
+                // -- Top bar: dismiss, "NOW PLAYING" + album context, overflow "…" --
                 TopBar(
                     onDismiss = onDismiss,
-                    onFlagWrongMatch = { showWrongMatchDialog = true },
-                    onSaveClick = { showSaveSheet = true },
-                    onQueueClick = { showQueue = true },
+                    onOptionsClick = { showOptions = true },
                     hasTrack = uiState.hasTrack,
-                    queueSize = uiState.queueSize,
-                    onDownloadTap = viewModel::toggleDownloadForCurrentTrack,
-                    isDownloaded = uiState.currentTrack?.isDownloaded == true,
-                    isDownloading = isDownloadingCurrent,
-                    // Radio toggle: start a station seeded from this song, or stop
-                    // the active one. Lives in the TopBar icon row (no vertical
-                    // footprint); accented while a station is running.
-                    radioActive = radioLabel != null,
-                    onStartRadio = viewModel::startRadioFromCurrent,
-                    onStopRadio = viewModel::stopRadio,
-                    accentColor = npAccent(uiState.vibrantColor),
+                    contextTitle = track?.album?.takeIf { it.isNotBlank() },
                 )
 
-                // -- Album art slot: absorbs all flexible height --
-                BoxWithConstraints(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f)
-                        .padding(vertical = 8.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    val artSize = minOf(this.maxHeight, this.maxWidth, 300.dp)
-                    AlbumArtSection(
-                        albumArtUrl = track?.albumArtUrl,
-                        albumArtPath = track?.albumArtPath,
-                        accentColor = npAccent(uiState.vibrantColor),
-                        artSize = artSize,
-                        onBitmapLoaded = viewModel::onAlbumArtLoaded,
-                    )
-                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // -- Album art --
+                AlbumArtSection(
+                    albumArtUrl = track?.albumArtUrl,
+                    albumArtPath = track?.albumArtPath,
+                    accentColor = uiState.vibrantColor,
+                    onBitmapLoaded = viewModel::onAlbumArtLoaded,
+                    onSwipeNext = viewModel::onSkipNext,
+                    onSwipePrevious = viewModel::onSkipPrevious,
+                    onSwipeDownDismiss = onDismiss,
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
 
                 // -- Track info -- (tap the title/artist to open the artist
                 // profile; the trailing chevron signals it's actionable, and
@@ -388,73 +404,91 @@ fun NowPlayingScreen(
                 // crowded top icon row); symmetric horizontal padding keeps the
                 // title/artist block optically centred under the album art.
                 Box(modifier = Modifier.fillMaxWidth()) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 40.dp)
-                        .then(
-                            if (track != null) {
-                                Modifier.clickable(enabled = !resolvingArtist) {
-                                    viewModel.onTrackInfoTapped()
-                                }
-                            } else {
-                                Modifier
-                            },
-                        ),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.Center,
-                        verticalAlignment = Alignment.CenterVertically,
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 40.dp)
+                            .then(
+                                if (track != null) {
+                                    Modifier.clickable(enabled = !resolvingArtist) {
+                                        viewModel.onTrackInfoTapped()
+                                    }
+                                } else {
+                                    Modifier
+                                },
+                            ),
+                        horizontalAlignment = Alignment.CenterHorizontally,
                     ) {
-                        Text(
-                            text = track?.title ?: "Not Playing",
-                            fontSize = 22.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = npInk(),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            textAlign = TextAlign.Center,
-                            modifier = Modifier.weight(1f, fill = false),
-                        )
-                        if (track != null) {
-                            Spacer(modifier = Modifier.width(8.dp))
-                            com.stash.core.ui.components.FlacBadge(
-                                fileFormat = track.fileFormat,
-                                bitsPerSample = track.bitsPerSample,
-                                sampleRateHz = track.sampleRateHz,
-                                size = 18.dp,
-                                tint = npInk(),
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            if (resolvingArtist) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            // Download progress spinner — shown in front of the title
+                            // while a download is in flight, replacing the old top-bar
+                            // spinner so the user sees progress right next to the song name.
+                            if (track != null && isDownloadingCurrent) {
                                 CircularProgressIndicator(
                                     modifier = Modifier.size(16.dp),
                                     strokeWidth = 2.dp,
                                     color = npInk(),
                                 )
-                            } else {
-                                Icon(
-                                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                                    contentDescription = "Open artist",
-                                    tint = npInk().copy(alpha = 0.6f),
-                                    modifier = Modifier.size(18.dp),
+                                Spacer(modifier = Modifier.width(8.dp))
+                            }
+                            Text(
+                                text = track?.title ?: "Not Playing",
+                                fontSize = 22.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier.weight(1f, fill = false),
+                            )
+                            if (track != null) {
+                                Spacer(modifier = Modifier.width(6.dp))
+                                com.stash.core.ui.components.LikeButton(
+                                    isLiked = track.stashLikedAt != null,
+                                    onTap = viewModel::onLikeTap,
+                                    unlikedTint = Color.White.copy(alpha = 0.7f),
+                                    size = 24.dp,
                                 )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                if (resolvingArtist) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(16.dp),
+                                        strokeWidth = 2.dp,
+                                        color = Color.White,
+                                    )
+                                } else {
+                                    Icon(
+                                        imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                                        contentDescription = "Open artist",
+                                        tint = Color.White.copy(alpha = 0.6f),
+                                        modifier = Modifier.size(18.dp),
+                                    )
+                                }
                             }
                         }
-                    }
 
-                    Spacer(modifier = Modifier.height(4.dp))
+                        Spacer(modifier = Modifier.height(4.dp))
 
-                    Text(
-                        text = buildString {
-                            if (track != null) {
-                                append(track.artist)
-                                if (track.album.isNotBlank()) {
-                                    append(" \u2022 ")
-                                    append(track.album)
+                        Text(
+                            text = buildString {
+                                if (track != null) {
+                                    append(track.artist)
+                                    if (track.album.isNotBlank()) {
+                                        append(" \u2022 ")
+                                        append(track.album)
+                                    }
                                 }
+                            },
+                            fontSize = 14.sp,
+                            color = Color.White.copy(alpha = 0.7f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.weight(1f, fill = false).basicMarquee(),
                             }
                         },
                         fontSize = 14.sp,
@@ -492,8 +526,39 @@ fun NowPlayingScreen(
                             size = 26.dp,
                             modifier = Modifier.align(Alignment.CenterEnd),
                         )
+//                    if (track != null) {
+//                        Spacer(modifier = Modifier.width(8.dp))
+//                        com.stash.core.ui.components.FlacBadge(
+//                            fileFormat = track.fileFormat,
+//                            bitsPerSample = track.bitsPerSample,
+//                            sampleRateHz = track.sampleRateHz,
+//                            size = 18.dp,
+//                            tint = Color.White,
+//                        )
+//                    }
                     }
                 }
+
+                Spacer(modifier = Modifier.height(4.dp))
+
+                Text(
+                    text = buildString {
+                        if (track != null) {
+                            append(track.artist)
+//                            if (track.album.isNotBlank()) {
+//                                append(" \u2022 ")
+//                                append(track.album)
+//                            }
+                        }
+                    },
+                    fontSize = 14.sp,
+                    color = Color.White.copy(alpha = 0.7f),
+                    maxLines = 1,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .basicMarquee(),
+                )
 
                 // Quality line — codec + bit-depth/sample-rate + bitrate, when known.
                 // Sized smaller than the artist/album line; degrades gracefully when
@@ -502,7 +567,12 @@ fun NowPlayingScreen(
                 // stream rather than a local file), a small wifi glyph prefixes
                 // the line so the user knows playback is using their connection.
                 if (track != null) {
-                    val qualityText = trackQualityText(track)
+                    // Prefer the DB's file size; fall back to the size the
+                    // ViewModel resolved from disk/SAF for the current track
+                    // (SAF content:// rows never get file_size_bytes backfilled).
+                    val effectiveSize = track.fileSizeBytes.takeIf { it > 0 }
+                        ?: uiState.currentFileSizeBytes
+                    val qualityText = trackQualityText(track, effectiveSize)
                     if (qualityText != null) {
                         Spacer(modifier = Modifier.height(2.dp))
                         QualityLine(
@@ -512,7 +582,9 @@ fun NowPlayingScreen(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(20.dp))
+
+
+                Spacer(modifier = Modifier.height(8.dp))
 
                 // -- Progress bar --
                 GlowingProgressBar(
@@ -524,7 +596,7 @@ fun NowPlayingScreen(
                     modifier = Modifier.fillMaxWidth(),
                 )
 
-                Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(10.dp))
 
                 // -- Playback controls --
                 PlaybackControls(
@@ -540,9 +612,140 @@ fun NowPlayingScreen(
                     onCycleRepeatMode = viewModel::onCycleRepeatMode,
                 )
 
-                Spacer(modifier = Modifier.height(16.dp))
-            }
+                Spacer(modifier = Modifier.height(12.dp))
+            
 
+                // Live-lyrics bar — sits exactly where the MiniPlayer is on other
+                // screens (the scaffold hides MiniPlayer on this route), directly
+                // above the nav bar. Zero-height when Hidden, so the content
+                // column keeps the full screen for lyric-less tracks.
+                LiveLyricsBar(
+                    state = lyricsState,
+                    currentPositionMs = lyricsPositionMs,
+                    accentColor = uiState.vibrantColor,
+                    onTap = viewModel::onShowLyrics,
+                )
+
+                // -- Quick actions: Queue / Lyrics --
+                // The two "playback context" surfaces, surfaced as a pair of
+                // filled chips below the transport controls (per the redesign).
+                // Hidden when no track is loaded so they don't open empty sheets.
+                if (uiState.hasTrack) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    QuickActionsRow(
+                        queueSize = uiState.queueSize,
+                        onQueueClick = { showQueue = true },
+                        onLyricsClick = viewModel::onShowLyrics,
+                    )
+                }
+
+                // -- Song file path on disk (cleaned for display) --
+                val displayedPath = track?.filePath
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let(::displayPath)
+                if (displayedPath != null) {
+                    Spacer(modifier = Modifier.height(32.dp))
+                    FilePathSection(path = displayedPath)
+                }
+
+                // -- "Appears in" playlists for the current track --
+                if (uiState.containingPlaylists.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(if (displayedPath != null) 24.dp else 36.dp))
+                    PlaylistsSection(
+                        playlists = uiState.containingPlaylists,
+                        accentColor = uiState.vibrantColor,
+                        onPlaylistClick = onNavigateToPlaylist,
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(48.dp))
+
+            }
+        }
+    }
+}
+
+/**
+ * "Appears in" — the list of synced/imported/custom playlists the current
+ * track belongs to. Each row opens that playlist's track list. Hidden by the
+ * caller when the list is empty (e.g. streaming-only tracks).
+ */
+@Composable
+private fun PlaylistsSection(
+    playlists: List<com.stash.core.model.Playlist>,
+    accentColor: Color,
+    onPlaylistClick: (Long) -> Unit,
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Text(
+            text = "Appears in",
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = Color.White.copy(alpha = 0.7f),
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Spacer(modifier = Modifier.height(12.dp))
+        playlists.forEach { playlist ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable { onPlaylistClick(playlist.id) }
+                    .background(Color.White.copy(alpha = 0.06f))
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (!playlist.artUrl.isNullOrBlank()) {
+                    AsyncImage(
+                        model = playlist.artUrl,
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(RoundedCornerShape(8.dp)),
+                    )
+                } else {
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(accentColor.copy(alpha = 0.25f)),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.QueueMusic,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.width(12.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = playlist.name,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = Color.White,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = playlistSubtitle(playlist),
+                        fontSize = 12.sp,
+                        color = Color.White.copy(alpha = 0.6f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                    contentDescription = null,
+                    tint = Color.White.copy(alpha = 0.5f),
+                    modifier = Modifier.size(20.dp),
+                )
+            }
+            Spacer(modifier = Modifier.height(8.dp))
             // Live-lyrics bar — sits exactly where the MiniPlayer is on other
             // screens (the scaffold hides MiniPlayer on this route), directly
             // above the nav bar. Zero-height when Hidden, so the content
@@ -558,35 +761,42 @@ fun NowPlayingScreen(
     }
 }
 
+/** Source + track-count subtitle for an "Appears in" playlist row. */
+private fun playlistSubtitle(playlist: com.stash.core.model.Playlist): String {
+    val source = when (playlist.source) {
+        com.stash.core.model.MusicSource.SPOTIFY -> "Spotify"
+        com.stash.core.model.MusicSource.YOUTUBE -> "YouTube Music"
+        com.stash.core.model.MusicSource.LOCAL -> "Local"
+        com.stash.core.model.MusicSource.BOTH -> "Stash"
+    }
+    val count = playlist.trackCount
+    return if (count > 0) "$source • $count songs" else source
+}
+
 // ---------------------------------------------------------------------------
 // Private composables
 // ---------------------------------------------------------------------------
 
 /**
- * Top bar with dismiss button, "NOW PLAYING" label, save-to-playlist button,
- * and queue button.
+ * Top bar: dismiss arrow on the left, a centered "NOW PLAYING" label with the
+ * album/context title beneath it, and an overflow ("…") button on the right
+ * that opens the [NowPlayingOptionsSheet].
  *
- * @param onDismiss    Callback when the down-arrow is tapped.
- * @param onSaveClick  Callback when the save/bookmark icon is tapped.
- * @param onQueueClick Callback when the queue icon is tapped.
- * @param hasTrack     Whether a track is currently loaded (save button is hidden otherwise).
- * @param queueSize    Number of tracks in the queue, shown as a badge hint.
+ * The per-track actions that used to live here as inline icons (like, save,
+ * download, flag, lyrics, queue) moved into the options sheet and the
+ * quick-actions row as part of the redesign.
+ *
+ * @param onDismiss      Callback when the down-arrow is tapped.
+ * @param onOptionsClick Callback when the overflow "…" button is tapped.
+ * @param hasTrack       Whether a track is loaded (overflow button is hidden otherwise).
+ * @param contextTitle   Secondary line under "NOW PLAYING" — the album, when known.
  */
 @Composable
 private fun TopBar(
     onDismiss: () -> Unit,
-    onFlagWrongMatch: () -> Unit,
-    onSaveClick: () -> Unit,
-    onQueueClick: () -> Unit,
+    onOptionsClick: () -> Unit,
     hasTrack: Boolean,
-    queueSize: Int,
-    onDownloadTap: () -> Unit,
-    isDownloaded: Boolean,
-    isDownloading: Boolean,
-    radioActive: Boolean,
-    onStartRadio: () -> Unit,
-    onStopRadio: () -> Unit,
-    accentColor: Color,
+    contextTitle: String?,
 ) {
     Row(
         modifier = Modifier
@@ -603,87 +813,115 @@ private fun TopBar(
             )
         }
 
-        Spacer(modifier = Modifier.weight(1f))
-
-        // Radio toggle — start a station from the current song, or stop the
-        // running one. Accent tint signals an active station.
-        if (hasTrack) {
-            IconButton(onClick = { if (radioActive) onStopRadio() else onStartRadio() }) {
-                Icon(
-                    imageVector = Icons.Default.Radio,
-                    contentDescription = if (radioActive) "Stop radio" else "Start radio",
-                    tint = if (radioActive) accentColor else npInk(),
-                    modifier = Modifier.size(24.dp),
-                )
-            }
-        }
-
-        // Flag as wrong match — only shown when a track is loaded. Lives
-        // here (not in the Playlist Detail row menu) because Now Playing
-        // is where the user actually realises "this isn't the right song"
-        // — their ears are the ground truth.
-        if (hasTrack) {
-            IconButton(onClick = onFlagWrongMatch) {
-                Icon(
-                    imageVector = Icons.Default.Flag,
-                    contentDescription = "Flag as wrong match",
-                    tint = npInk(),
-                    modifier = Modifier.size(24.dp),
-                )
-            }
-        }
-
-        // Download / Remove-download toggle — single button that flips
-        // based on the current track's on-disk state. Streaming-mode
-        // users use this to grab the song they're listening to right now
-        // without leaving Now Playing. While a download is in flight a
-        // spinner replaces the icon so it isn't a silent background job.
-        if (hasTrack) {
-            if (isDownloading) {
-                Box(
-                    modifier = Modifier.size(48.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(22.dp),
-                        strokeWidth = 2.5.dp,
-                        color = npInk(),
-                    )
-                }
-            } else {
-                IconButton(onClick = onDownloadTap) {
-                    Icon(
-                        imageVector = if (isDownloaded) Icons.Default.DownloadDone else Icons.Default.Download,
-                        contentDescription = if (isDownloaded) "Remove download" else "Download",
-                        tint = npInk(),
-                        modifier = Modifier.size(24.dp),
-                    )
-                }
-            }
-        }
-
-        // Save to playlist — only shown when a track is loaded.
-        if (hasTrack) {
-            IconButton(onClick = onSaveClick) {
-                Icon(
-                    imageVector = Icons.Default.BookmarkBorder,
-                    contentDescription = "Save to Playlist",
-                    tint = npInk(),
-                    modifier = Modifier.size(24.dp),
-                )
-            }
-        }
-
-        IconButton(onClick = onQueueClick) {
-            Icon(
-                imageVector = Icons.AutoMirrored.Filled.QueueMusic,
-                contentDescription = "Queue ($queueSize tracks)",
-                tint = npInk(),
-                modifier = Modifier.size(24.dp),
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .padding(horizontal = 8.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Text(
+                text = "NOW PLAYING",
+                fontSize = 11.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = Color.White.copy(alpha = 0.6f),
+                letterSpacing = 1.5.sp,
             )
+            if (contextTitle != null) {
+                Text(
+                    text = contextTitle,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = Color.White,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    textAlign = TextAlign.Center,
+                )
+            }
+        }
+
+        // Overflow "…" — opens the per-track options sheet. Hidden when no
+        // track is loaded (an empty options sheet would have nothing to act
+        // on). A spacer keeps the title centred when the button is absent.
+        if (hasTrack) {
+            IconButton(onClick = onOptionsClick) {
+                Icon(
+                    imageVector = Icons.Default.MoreHoriz,
+                    contentDescription = "More options",
+                    tint = Color.White,
+                    modifier = Modifier.size(24.dp),
+                )
+            }
+        } else {
+            Spacer(modifier = Modifier.width(48.dp))
         }
     }
 }
+
+        /**
+         * The Queue / Lyrics quick-action chips shown beneath the transport controls.
+         * Both open a "playback context" surface — what's coming up next, and what
+         * the singer is saying right now.
+         */
+        @Composable
+        private fun QuickActionsRow(
+            queueSize: Int,
+            onQueueClick: () -> Unit,
+            onLyricsClick: () -> Unit,
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                QuickActionChip(
+                    icon = Icons.AutoMirrored.Filled.QueueMusic,
+                    label = "Queue",
+                    contentDescription = "Queue ($queueSize tracks)",
+                    onClick = onQueueClick,
+                    modifier = Modifier.weight(1f),
+                )
+                QuickActionChip(
+                    icon = Icons.Outlined.Lyrics,
+                    label = "Lyrics",
+                    contentDescription = "Lyrics",
+                    onClick = onLyricsClick,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+        }
+
+        /** A single filled quick-action chip (icon + label). */
+        @Composable
+        private fun QuickActionChip(
+            icon: androidx.compose.ui.graphics.vector.ImageVector,
+            label: String,
+            contentDescription: String,
+            onClick: () -> Unit,
+            modifier: Modifier = Modifier,
+        ) {
+            Row(
+                modifier = modifier
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable(onClick = onClick)
+                    .background(Color.White.copy(alpha = 0.08f))
+                    .padding(vertical = 14.dp),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = contentDescription,
+                    tint = Color.White,
+                    modifier = Modifier.size(20.dp),
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = label,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Color.White,
+                )
+            }
+        }
 
 /**
  * Album art with a colored glow shadow behind it.
@@ -699,6 +937,9 @@ private fun AlbumArtSection(
     accentColor: Color,
     artSize: androidx.compose.ui.unit.Dp = 280.dp,
     onBitmapLoaded: (android.graphics.Bitmap?) -> Unit,
+    onSwipeNext: () -> Unit = {},
+    onSwipePrevious: () -> Unit = {},
+    onSwipeDownDismiss: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val artModel = albumArtPath ?: albumArtUrl
@@ -712,7 +953,34 @@ private fun AlbumArtSection(
             .build()
     }
 
-    Box(contentAlignment = Alignment.Center) {
+    // Swipe the artwork to drive playback: left/right changes track, a
+    // downward swipe collapses Now Playing back to the mini player. The
+    // dominant axis + a distance threshold decide which action fires on
+    // release, so a small wobble while tapping never triggers anything.
+    Box(
+        contentAlignment = Alignment.Center,
+        modifier = Modifier.pointerInput(Unit) {
+            val threshold = 64.dp.toPx()
+            var totalX = 0f
+            var totalY = 0f
+            detectDragGestures(
+                onDragStart = { totalX = 0f; totalY = 0f },
+                onDrag = { change, drag ->
+                    totalX += drag.x
+                    totalY += drag.y
+                    change.consume()
+                },
+                onDragEnd = {
+                    when {
+                        abs(totalX) > abs(totalY) && abs(totalX) > threshold ->
+                            if (totalX < 0) onSwipeNext() else onSwipePrevious()
+                        totalY > threshold && totalY > abs(totalX) ->
+                            onSwipeDownDismiss()
+                    }
+                },
+            )
+        },
+    ) {
         // Glow behind the artwork.
         Box(
             modifier = Modifier
@@ -749,6 +1017,10 @@ private fun AlbumArtSection(
 
 /**
  * Playback controls row: shuffle, previous, play/pause, next, repeat.
+ *
+ * The sleep timer moved into the overflow options sheet as part of the
+ * redesign, so this row is back to the five core transport controls, spread
+ * edge-to-edge with shuffle and repeat anchoring the ends.
  */
 @Composable
 private fun PlaybackControls(
@@ -765,7 +1037,7 @@ private fun PlaybackControls(
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceEvenly,
+        horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
         // Shuffle
@@ -861,7 +1133,7 @@ private fun PlaybackControls(
  * Returns null only when the codec is blank — in that case the caller
  * should render no line at all.
  */
-private fun trackQualityText(track: com.stash.core.model.Track): String? {
+private fun trackQualityText(track: com.stash.core.model.Track, fileSizeBytes: Long): String? {
     // v0.9.13 fix: tracks downloaded before format-tracking was wired (pre-v0.9.11)
     // default to file_format = "opus" regardless of the actual codec — so a FLAC
     // file would render "OPUS · 4233 kbps", which is the source of "every track says
@@ -880,12 +1152,16 @@ private fun trackQualityText(track: com.stash.core.model.Track): String? {
     val bitDepth = track.bitsPerSample
     val sampleRateKHz = track.sampleRateHz?.let { it / 1000.0 }
     val bitrate = track.qualityKbps.takeIf { it > 0 }
+    val fileSize = fileSizeBytes.takeIf { it > 0 }?.let(::humanReadableSize)
     return buildList {
         add(codec)
         if (bitDepth != null && sampleRateKHz != null) {
             add("${bitDepth}-bit/${"%.1f".format(sampleRateKHz)} kHz")
         }
         if (bitrate != null) add("$bitrate kbps")
+        // File size sits right after the bitrate so the two on-disk metrics
+        // read together. Only present for downloaded tracks (streams = 0).
+        if (fileSize != null) add(fileSize)
         // Flag the YouTube fallback so the user can tell when a track is
         // playing from yt-dlp/InnerTube extraction rather than Qobuz. The
         // codec ("AAC") alone doesn't convey this — Qobuz also serves AAC
@@ -895,6 +1171,68 @@ private fun trackQualityText(track: com.stash.core.model.Track): String? {
         // deserves a callout.
         if (track.streamOrigin == "youtube") add("via YT")
     }.joinToString(" · ")
+}
+
+/**
+ * Formats a byte count as a compact human-readable size for the quality
+ * line, e.g. `28.4 MB` / `912 KB`. Uses binary (1024) units to match what
+ * file managers report for the same files on disk.
+ */
+private fun humanReadableSize(bytes: Long): String = when {
+    bytes >= 1024L * 1024L * 1024L -> "%.1f GB".format(bytes / (1024.0 * 1024.0 * 1024.0))
+    bytes >= 1024L * 1024L -> "%.1f MB".format(bytes / (1024.0 * 1024.0))
+    bytes >= 1024L -> "%d KB".format(bytes / 1024L)
+    else -> "$bytes B"
+}
+
+/**
+ * Turns the stored file path into something readable. Absolute file paths
+ * pass through unchanged. SAF `content://` document URIs are decoded down
+ * to just the storage-relative path:
+ *
+ *   content://com.android.externalstorage.documents/tree/primary%3ASongs/
+ *     document/primary%3ASongs%2Fanurag-kulkarni%2F…%2Fpillaa-raa.m4a
+ *
+ * becomes `Songs/anurag-kulkarni/…/pillaa-raa.m4a` — the `content://…/document/`
+ * wrapper and the `primary:` volume prefix are dropped and `%2F`/`%3A` are
+ * decoded to `/` and `:`.
+ */
+private fun displayPath(rawPath: String): String {
+    if (!rawPath.startsWith("content://")) return rawPath
+    // The document id is the authoritative full path; fall back to the tree id.
+    val encoded = rawPath.substringAfterLast("/document/", "")
+        .ifEmpty { rawPath.substringAfterLast("/tree/", "") }
+        .ifEmpty { return rawPath }
+    val decoded = runCatching { java.net.URLDecoder.decode(encoded, "UTF-8") }
+        .getOrDefault(encoded)
+    // Drop the "primary:" / "<volume>:" storage prefix, keep the relative path.
+    return decoded.substringAfter(':', decoded)
+}
+
+/**
+ * Bottom-area "File" block showing the cleaned on-disk path in full. No
+ * truncation or ellipsis — the path wraps across as many lines as it needs
+ * so the user can read all of it.
+ */
+@Composable
+private fun FilePathSection(path: String) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Text(
+            text = "File",
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = Color.White.copy(alpha = 0.7f),
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        Text(
+            text = path,
+            style = MaterialTheme.typography.labelMedium,
+            color = Color.White.copy(alpha = 0.6f),
+            softWrap = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
 }
 
 /**

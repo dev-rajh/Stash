@@ -240,6 +240,28 @@ interface PlaylistDao {
     )
     suspend fun isTrackInStashMix(trackId: Long): Boolean
 
+    /**
+     * All active playlists the track is currently a member of, for the
+     * Now Playing "Appears in" section. Joins through [PlaylistTrackCrossRef],
+     * excluding soft-deleted memberships (`removed_at IS NULL`) and inactive
+     * playlists. The internal `DOWNLOADS_MIX` system bucket is filtered out —
+     * it's plumbing for one-off downloads, not a user-facing playlist. Covers
+     * imported Spotify / YT Music playlists, Stash Mixes, custom and liked
+     * playlists alike. Ordered by name for a stable list.
+     */
+    @Query(
+        """
+        SELECT p.* FROM playlists p
+        INNER JOIN playlist_tracks pt ON p.id = pt.playlist_id
+        WHERE pt.track_id = :trackId
+          AND pt.removed_at IS NULL
+          AND p.is_active = 1
+          AND p.type != 'DOWNLOADS_MIX'
+        ORDER BY p.name ASC
+        """
+    )
+    fun observePlaylistsContainingTrack(trackId: Long): Flow<List<PlaylistEntity>>
+
     // ── Metadata updates ────────────────────────────────────────────────
 
     /** Update the cached track count for a playlist. */

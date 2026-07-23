@@ -9,6 +9,7 @@ import com.stash.core.data.prefs.NowPlayingPreference
 import com.stash.core.data.repository.MusicRepository
 import com.stash.core.data.social.LikeCoordinator
 import com.stash.core.media.PlayerRepository
+import com.stash.core.media.sleep.SleepTimerManager
 import com.stash.core.model.PlayerState
 import com.stash.core.model.Track
 import com.stash.core.model.UpgradeResult
@@ -215,6 +216,7 @@ class NowPlayingViewModelFindInFlacTest {
         likeCoordinator = likeCoordinator,
         losslessUpgrader = upgrader,
         lyricsRepository = lyricsRepository,
+        sleepTimerManager = mockk(relaxed = true),
         lyricsPreference = mockk(relaxed = true),
         nowPlayingPreference = nowPlayingPreference,
         lyricsSidecarWriter = mockk(relaxed = true),
@@ -361,6 +363,7 @@ class NowPlayingViewModelLikeRoutingTest {
         likeCoordinator = likeCoordinator,
         losslessUpgrader = upgrader,
         lyricsRepository = lyricsRepository,
+        sleepTimerManager = mockk(relaxed = true),
         lyricsPreference = mockk(relaxed = true),
         nowPlayingPreference = mockk(relaxed = true),
         lyricsSidecarWriter = mockk(relaxed = true),
