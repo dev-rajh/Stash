@@ -395,6 +395,7 @@ interface DownloadQueueDao {
         """
         DELETE FROM download_queue
         WHERE status = 'PENDING'
+          AND sync_id IS NOT NULL
           AND track_id NOT IN (
             SELECT DISTINCT pt.track_id
             FROM playlist_tracks pt
@@ -565,6 +566,7 @@ interface DownloadQueueDao {
     @Query("""
         DELETE FROM download_queue
         WHERE status IN ('PENDING', 'FAILED', 'WAITING_FOR_LOSSLESS')
+          AND sync_id IS NOT NULL
           AND track_id NOT IN (
               SELECT pt.track_id FROM playlist_tracks pt
               INNER JOIN playlists p ON p.id = pt.playlist_id

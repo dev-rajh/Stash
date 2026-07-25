@@ -40,6 +40,7 @@ class LibraryHealthViewModel @Inject constructor(
     private val trackDao: TrackDao,
     private val metadataExtractor: AudioDurationExtractor,
     private val localFileOps: LocalFileOps,
+    private val musicRepository: com.stash.core.data.repository.MusicRepository,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(LibraryHealthState())
@@ -200,8 +201,18 @@ class LibraryHealthViewModel @Inject constructor(
 
                 // Phase 2: relink each missing file to a same-name replacement.
                 val relinkedNames = mutableListOf<String>()
+                var clearedCount = 0
                 for ((id, oldPath) in missing) {
-                    val newPath = localFileOps.findReplacementSibling(oldPath, AUDIO_EXTENSIONS) ?: continue
+                    val newPath = localFileOps.findReplacementSibling(oldPath, AUDIO_EXTENSIONS)
+                    if (newPath == null) {
+                        runCatching {
+                            trackDao.clearDownloadState(id)
+                            musicRepository.queueDownload(id)
+                        }
+                            .onSuccess { clearedCount++ }
+                            .onFailure { e -> Log.w(TAG, "clearDownloadState failed for trackId=$id", e) }
+                        continue
+                    }
                     val meta = metadataExtractor.extract(newPath)
                     val format = meta?.format?.takeIf { it.isNotBlank() && it != "unknown" }
                         ?: newPath.substringAfterLast('.', "").lowercase()
@@ -224,6 +235,7 @@ class LibraryHealthViewModel @Inject constructor(
                     it.copy(
                         relink = RelinkStatus.Done(
                             relinked = relinkedNames.size,
+                            cleared = clearedCount,
                             scanned = missing.size,
                             relinkedNames = relinkedNames,
                         ),
@@ -306,6 +318,7 @@ sealed interface RelinkStatus {
     data class Running(val processed: Int, val total: Int) : RelinkStatus
     data class Done(
         val relinked: Int,
+        val cleared: Int = 0,
         val scanned: Int,
         val relinkedNames: List<String> = emptyList(),
     ) : RelinkStatus

@@ -497,7 +497,7 @@ private fun LibraryContent(
         Spacer(modifier = Modifier.height(4.dp))
 
         // -- Sort & filter sheet (toggled by the header ⇅) --
-        
+
 
         // -- Content area --
         val anyServiceConnected = state.spotifyConnected || state.youTubeConnected
