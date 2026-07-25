@@ -399,8 +399,8 @@ private fun RelinkSection(
                             "No missing files found — everything in your library is where " +
                                 "Stash expects it."
                         } else {
-                            "Relinked ${status.relinked} of ${status.scanned} missing " +
-                                "track(s) to a replacement file."
+                            "Relinked ${status.relinked} and cleared ${status.cleared} of ${status.scanned} missing " +
+                                "track(s)."
                         },
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurface,

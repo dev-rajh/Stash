@@ -34,6 +34,7 @@ import androidx.compose.material.icons.filled.Flag
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.outlined.Lyrics
 import androidx.compose.material.icons.filled.Repeat
@@ -293,6 +294,7 @@ fun NowPlayingScreen(
             onStartRadio = viewModel::startRadioFromCurrent,
             onStopRadio = viewModel::stopRadio,
             onFlag = { showWrongMatchDialog = true },
+            onShare = viewModel::onShareCurrent,
             onDismiss = { showOptions = false },
             onViewAlbum = viewModel::onViewAlbumTapped,
         )
@@ -438,7 +440,7 @@ fun NowPlayingScreen(
                 modifier = Modifier
                     .weight(1f)
                     .verticalScroll(scrollState)
-                    .padding(horizontal = 24.dp),
+                    .padding(horizontal = 15.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 // -- Top bar: dismiss, "NOW PLAYING" + album context, overflow "..." --
@@ -468,19 +470,10 @@ fun NowPlayingScreen(
                 // profile; the trailing chevron signals it's actionable, and
                 // swaps to a spinner while the artist name is being resolved).
                 // Long titles marquee-scroll instead of truncating; same for
-                // the artist line.
+                // the artist line. Tapping the title opens the album; tapping
+                // the artist/album line below opens the artist profile.
                 Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .then(
-                            if (track != null) {
-                                Modifier.clickable(enabled = !resolvingArtist) {
-                                    viewModel.onTrackInfoTapped()
-                                }
-                            } else {
-                                Modifier
-                            },
-                        ),
+                    modifier = Modifier.fillMaxWidth(),
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     Row(
@@ -508,7 +501,10 @@ fun NowPlayingScreen(
                             textAlign = TextAlign.Center,
                             modifier = Modifier
                                 .weight(1f, fill = false)
-                                .basicMarquee(),
+                                .basicMarquee()
+                                .clickable(enabled = track != null && track.album.isNotBlank()) {
+                                    viewModel.onViewAlbumTapped()
+                                },
                         )
                         if (track != null) {
                             Spacer(modifier = Modifier.width(6.dp))
@@ -552,7 +548,10 @@ fun NowPlayingScreen(
                         textAlign = TextAlign.Center,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .basicMarquee(),
+                            .basicMarquee()
+                            .clickable(enabled = track != null && !resolvingArtist) {
+                                viewModel.onTrackInfoTapped()
+                            },
                     )
                 }
 
@@ -587,7 +586,8 @@ fun NowPlayingScreen(
                     elapsedMs = uiState.currentPositionMs,
                     totalMs = uiState.durationMs,
                     onSeek = viewModel::onSeekTo,
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp),
+
                 )
 
                 Spacer(modifier = Modifier.height(10.dp))
@@ -615,7 +615,7 @@ fun NowPlayingScreen(
                     QuickActionsRow(
                         queueSize = uiState.queueSize,
                         onQueueClick = { showQueue = true },
-                        onLyricsClick = viewModel::onShowLyrics,
+                        onArtistClick = viewModel::onTrackInfoTapped,
                     )
                 }
 
@@ -672,7 +672,7 @@ private fun PlaylistsSection(
             text = "Appears in",
             fontSize = 13.sp,
             fontWeight = FontWeight.SemiBold,
-            color = Color.White.copy(alpha = 0.7f),
+            color = npInk().copy(alpha = 0.7f),
             modifier = Modifier.fillMaxWidth(),
         )
         Spacer(modifier = Modifier.height(12.dp))
@@ -682,7 +682,7 @@ private fun PlaylistsSection(
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(12.dp))
                     .clickable { onPlaylistClick(playlist.id) }
-                    .background(Color.White.copy(alpha = 0.06f))
+                    .background(npInk().copy(alpha = 0.06f))
                     .padding(horizontal = 12.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -706,7 +706,7 @@ private fun PlaylistsSection(
                         Icon(
                             imageVector = Icons.AutoMirrored.Filled.QueueMusic,
                             contentDescription = null,
-                            tint = Color.White,
+                            tint = npInk().copy(alpha = 0.7f),
                             modifier = Modifier.size(20.dp),
                         )
                     }
@@ -717,14 +717,14 @@ private fun PlaylistsSection(
                         text = playlist.name,
                         fontSize = 14.sp,
                         fontWeight = FontWeight.Medium,
-                        color = Color.White,
+                        color = npInk(),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
                     Text(
                         text = playlistSubtitle(playlist),
                         fontSize = 12.sp,
-                        color = Color.White.copy(alpha = 0.6f),
+                        color = npInk().copy(alpha = 0.6f),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
@@ -732,7 +732,7 @@ private fun PlaylistsSection(
                 Icon(
                     imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
                     contentDescription = null,
-                    tint = Color.White.copy(alpha = 0.5f),
+                    tint = npInk().copy(alpha = 0.5f),
                     modifier = Modifier.size(20.dp),
                 )
             }
@@ -846,7 +846,7 @@ private fun TopBar(
         private fun QuickActionsRow(
             queueSize: Int,
             onQueueClick: () -> Unit,
-            onLyricsClick: () -> Unit,
+            onArtistClick: () -> Unit,
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -860,10 +860,10 @@ private fun TopBar(
                     modifier = Modifier.weight(1f),
                 )
                 QuickActionChip(
-                    icon = Icons.Outlined.Lyrics,
-                    label = "Lyrics",
-                    contentDescription = "Lyrics",
-                    onClick = onLyricsClick,
+                    icon = Icons.Default.Person,
+                    label = "More on Artist",
+                    contentDescription = "More on Artist",
+                    onClick = onArtistClick,
                     modifier = Modifier.weight(1f),
                 )
             }
@@ -890,7 +890,7 @@ private fun QuickActionChip(
         Icon(
             imageVector = icon,
             contentDescription = contentDescription,
-            tint = npInk(),
+            tint = npInk().copy(alpha = 0.7f),
             modifier = Modifier.size(20.dp),
         )
         Spacer(modifier = Modifier.width(8.dp))
@@ -898,7 +898,7 @@ private fun QuickActionChip(
             text = label,
             fontSize = 14.sp,
             fontWeight = FontWeight.SemiBold,
-            color = npInk(),
+            color = npInk().copy(alpha = 0.7f),
         )
     }
 }
@@ -1201,14 +1201,14 @@ private fun FilePathSection(path: String) {
             text = "File",
             fontSize = 13.sp,
             fontWeight = FontWeight.SemiBold,
-            color = Color.White.copy(alpha = 0.7f),
+            color = npInk().copy(alpha = 0.7f),
             modifier = Modifier.fillMaxWidth(),
         )
         Spacer(modifier = Modifier.height(8.dp))
         Text(
             text = path,
             style = MaterialTheme.typography.labelMedium,
-            color = Color.White.copy(alpha = 0.6f),
+            color = npInk().copy(alpha = 0.7f),
             softWrap = true,
             modifier = Modifier.fillMaxWidth(),
         )
