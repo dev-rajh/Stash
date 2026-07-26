@@ -207,6 +207,7 @@ fun LibraryScreen(
             onStartImport = viewModel::startLocalImport,
             onCancelImport = viewModel::cancelLocalImport,
             onDismissImport = viewModel::dismissLocalImport,
+            onUpgradeDownloadedNonFlac = viewModel::upgradeDownloadedNonFlacToFlac,
             selection = selection,
             // Single-track sheet actions reuse the batch VM methods with
             // one-element lists — no separate single-track VM surface.
@@ -454,6 +455,7 @@ private fun LibraryContent(
     onStartImport: (List<Uri>) -> Unit,
     onCancelImport: () -> Unit,
     onDismissImport: () -> Unit,
+    onUpgradeDownloadedNonFlac: () -> Unit,
     selection: SelectionState,
     userPlaylists: List<com.stash.core.ui.components.PlaylistInfo>,
     onSaveToPlaylist: (trackId: Long, playlistId: Long) -> Unit,
@@ -559,6 +561,20 @@ private fun LibraryContent(
             onFilterSelected = onSourceFilterChanged,
             modifier = Modifier.padding(horizontal = 20.dp),
         )
+
+        if (
+            state.activeTab == LibraryTab.TRACKS &&
+            state.sourceFilter == SourceFilter.NON_FLAC &&
+            (state.downloadedNonFlacCount > 0 || state.flacUpgrade.isRunning)
+        ) {
+            Spacer(modifier = Modifier.height(10.dp))
+            BulkFlacUpgradeStrip(
+                count = state.downloadedNonFlacCount,
+                progress = state.flacUpgrade,
+                onUpgrade = onUpgradeDownloadedNonFlac,
+                modifier = Modifier.padding(horizontal = 20.dp),
+            )
+        }
 
         Spacer(modifier = Modifier.height(12.dp))
 
@@ -678,6 +694,75 @@ private fun RecentlyDownloadedRail(
                     isLossless = track.fileFormat.equals("flac", ignoreCase = true),
                     onClick = { onTrackClick(track) },
                 )
+            }
+        }
+    }
+}
+
+@Composable
+private fun BulkFlacUpgradeStrip(
+    count: Int,
+    progress: FlacUpgradeUiState,
+    onUpgrade: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val extendedColors = StashTheme.extendedColors
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        color = extendedColors.glassBackground,
+        shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(1.dp, extendedColors.glassBorder),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = if (progress.isRunning) {
+                        "Finding FLAC ${progress.progressText}"
+                    } else {
+                        "$count downloaded non-FLAC ${if (count == 1) "song" else "songs"}"
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = if (progress.isRunning) {
+                        "Existing files are replaced as matches finish."
+                    } else {
+                        "Redownload all existing lossy downloads through Find in FLAC."
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+
+            androidx.compose.material3.FilledTonalButton(
+                onClick = onUpgrade,
+                enabled = !progress.isRunning && count > 0,
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+            ) {
+                if (progress.isRunning) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        strokeWidth = 2.dp,
+                    )
+                } else {
+                    Icon(
+                        imageVector = Icons.Default.Download,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("Find FLAC")
             }
         }
     }

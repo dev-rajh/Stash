@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.stash.core.auth.TokenManager
 import com.stash.core.auth.model.AuthState
+import com.stash.core.data.lossless.LosslessUpgrader
 import com.stash.core.data.prefs.StreamingPreference
 import com.stash.core.data.repository.MusicRepository
 import com.stash.core.data.sync.FlacUpgradeEnqueuer
@@ -11,6 +12,7 @@ import com.stash.core.media.PlayerRepository
 import com.stash.core.model.AlbumNavTarget
 import com.stash.core.model.MusicSource
 import com.stash.core.model.PlaylistType
+import com.stash.core.model.UpgradeResult
 import com.stash.data.download.files.LocalImportCoordinator
 import com.stash.data.download.files.LocalImportState
 import com.stash.core.model.Playlist
@@ -96,6 +98,7 @@ class LibraryViewModel @Inject constructor(
     private val streamingPreference: StreamingPreference,
     private val ytMusicApiClient: com.stash.data.ytmusic.YTMusicApiClient,
     private val flacUpgradeEnqueuer: FlacUpgradeEnqueuer,
+    private val losslessUpgrader: LosslessUpgrader,
 ) : ViewModel() {
 
     /** Live progress for "Import from device". Observed by LibraryScreen. */
@@ -139,6 +142,9 @@ class LibraryViewModel @Inject constructor(
      */
     private val _searchQuery = MutableStateFlow("")
     val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
+
+    /** Progress for the bulk existing-download FLAC upgrade action. */
+    private val _flacUpgradeState = MutableStateFlow(FlacUpgradeUiState())
 
     /**
      * Derives a pair of (spotifyConnected, youTubeConnected) from TokenManager.
@@ -286,6 +292,7 @@ class LibraryViewModel @Inject constructor(
             searchQuery = controls.searchQuery,
             sortOrder = controls.sortOrder,
             sourceFilter = controls.sourceFilter,
+            downloadedNonFlacCount = allTracks.count { it.isDownloaded && !it.isLosslessDownload() },
             tracks = sortedTracks,
             playlists = sortedPlaylists,
             recentlyAdded = libraryData.recentlyAdded,
@@ -311,6 +318,9 @@ class LibraryViewModel @Inject constructor(
         // was dropped frames on Main (audit finding). Pure list work — run it
         // on Default and hand only the finished state to the UI.
         .flowOn(Dispatchers.Default)
+        .combine(_flacUpgradeState) { libraryState, flacUpgrade ->
+            libraryState.copy(flacUpgrade = flacUpgrade)
+        }
         .stateIn(
             scope = viewModelScope,
             started = SharingStarted.WhileSubscribed(5_000),
@@ -410,6 +420,53 @@ class LibraryViewModel @Inject constructor(
     /** Filter tracks by source (All / YouTube / Spotify). */
     fun setSourceFilter(filter: SourceFilter) {
         _controls.update { it.copy(sourceFilter = filter) }
+    }
+
+    /**
+     * Upgrade every already-downloaded non-lossless track through the same
+     * forced lossless path used by Now Playing's "Find in FLAC" action.
+     */
+    fun upgradeDownloadedNonFlacToFlac() {
+        if (_flacUpgradeState.value.isRunning) return
+        viewModelScope.launch {
+            val targets = musicRepository.getAllTracks().first()
+                .filter { it.isDownloaded && !it.isLosslessDownload() }
+            if (targets.isEmpty()) {
+                _userMessages.tryEmit("No non-FLAC downloads to upgrade.")
+                return@launch
+            }
+
+            _flacUpgradeState.value = FlacUpgradeUiState(
+                isRunning = true,
+                completed = 0,
+                total = targets.size,
+            )
+            _userMessages.tryEmit("Looking for FLAC for ${targets.size} ${songs(targets.size)}.")
+
+            var upgraded = 0
+            var noMatch = 0
+            var failed = 0
+            targets.forEachIndexed { index, track ->
+                val result = runCatching { losslessUpgrader.upgradeToLossless(track) }
+                    .onFailure { e -> if (e is CancellationException) throw e }
+                    .getOrElse { UpgradeResult.Error }
+                when (result) {
+                    UpgradeResult.Upgraded -> upgraded++
+                    UpgradeResult.NoMatch -> noMatch++
+                    UpgradeResult.Error -> failed++
+                }
+                _flacUpgradeState.value = FlacUpgradeUiState(
+                    isRunning = true,
+                    completed = index + 1,
+                    total = targets.size,
+                )
+            }
+
+            _flacUpgradeState.value = FlacUpgradeUiState()
+            _userMessages.tryEmit(
+                "FLAC pass done: $upgraded upgraded, $noMatch no match, $failed failed.",
+            )
+        }
     }
 
     /**
@@ -591,6 +648,9 @@ class LibraryViewModel @Inject constructor(
 
     /** "song" / "songs" for [count]-aware roll-up messages. */
     private fun songs(count: Int): String = if (count == 1) "song" else "songs"
+
+    private fun Track.isLosslessDownload(): Boolean =
+        fileFormat.lowercase() in LOSSLESS_CODECS
 
     private val _userMessages = MutableSharedFlow<String>(
         extraBufferCapacity = 1,

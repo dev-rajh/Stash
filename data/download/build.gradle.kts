@@ -37,11 +37,21 @@ val qbdlxProps = Properties().apply {
     val f = rootProject.file("local.properties")
     if (f.exists()) f.inputStream().use { load(it) }
 }
-fun qbdlxProp(key: String, env: String) =
-    qbdlxProps.getProperty(key) ?: System.getenv(env).orEmpty()
+fun qbdlxProp(key: String, env: String): String =
+    sequenceOf(qbdlxProps.getProperty(key), qbdlxProps.getProperty(env), System.getenv(env))
+        .firstOrNull { !it.isNullOrBlank() }
+        .orEmpty()
 val qbdlxAppId = qbdlxProp("qbdlx.appId", "QBDLX_APP_ID")
 val qbdlxAppSecret = qbdlxProp("qbdlx.appSecret", "QBDLX_APP_SECRET")
-val qbdlxTokenPool = qbdlxProp("qbdlx.tokenPool", "QBDLX_TOKEN_POOL")
+val qbdlxTokenPoolFromList = qbdlxProp("qbdlx.tokenPool", "QBDLX_TOKEN_POOL")
+val qbdlxSingleToken = qbdlxProp("qbdlx.token", "QBDLX_TOKEN")
+val qbdlxSingleTokenCountry = qbdlxProp("qbdlx.tokenCountry", "QBDLX_TOKEN_COUNTRY")
+val qbdlxTokenPool =
+    qbdlxTokenPoolFromList.ifBlank {
+        qbdlxSingleToken.takeIf { it.isNotBlank() }
+            ?.let { token -> if (qbdlxSingleTokenCountry.isBlank()) token else "$token:$qbdlxSingleTokenCountry" }
+            .orEmpty()
+    }
 
 // AES-256-GCM encrypt the pool at build time (mirrors the runtime
 // QbdlxPoolCipher — keep the two in sync). The fixture test guards the RUNTIME
