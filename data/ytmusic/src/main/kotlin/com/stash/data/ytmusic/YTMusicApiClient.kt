@@ -463,8 +463,9 @@ class YTMusicApiClient @Inject constructor(
             ?.firstOrNull()?.asObject()?.get("text")?.asString() ?: ""
         // Pick the largest thumbnail by explicit width — InnerTube's ordering
         // isn't guaranteed across locales — then run it through the shared
-        // [ArtUrlUpgrader] so lh3 CDN URLs are bumped to 544×544 (matching
-        // every other art surface in the app).
+        // [ArtUrlUpgrader] so lh3 CDN URLs are normalized to its target size
+        // (currently 1024×1024, matching every other art surface in the app —
+        // don't restate the number here, it has already moved once).
         val avatarUrl = header?.navigatePath(
             "thumbnail", "musicThumbnailRenderer", "thumbnail", "thumbnails",
         )?.asArray()
@@ -793,7 +794,7 @@ class YTMusicApiClient @Inject constructor(
             ?.asObject()?.get("text")?.asString()
 
         // Extract thumbnail — pick the largest available by width, then
-        // upgrade the CDN URL to request high-res (544px for lh3).
+        // upgrade the CDN URL to request high-res (see ArtUrlUpgrader).
         val thumbnails = renderer.navigatePath("thumbnail", "musicThumbnailRenderer", "thumbnail", "thumbnails")
             ?.firstArray()
         val thumbnailUrl = com.stash.core.common.ArtUrlUpgrader.upgrade(

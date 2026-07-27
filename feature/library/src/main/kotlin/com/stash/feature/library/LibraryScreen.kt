@@ -132,6 +132,11 @@ fun LibraryScreen(
     viewModel: LibraryViewModel = hiltViewModel(),
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    // Bound to the search field directly. NOT state.searchQuery — that value
+    // round-trips through the off-Main filter pipeline and arrives too late to
+    // render the keystroke, which made typing drop characters (see
+    // LibraryViewModel.searchQuery).
+    val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
     val importState by viewModel.localImportState.collectAsStateWithLifecycle()
     val userPlaylists by viewModel.userPlaylists.collectAsStateWithLifecycle(initialValue = emptyList())
     val likedTracks by viewModel.likedTracks.collectAsStateWithLifecycle()
@@ -168,6 +173,7 @@ fun LibraryScreen(
     Box(modifier = modifier.fillMaxSize()) {
         LibraryContent(
             state = state,
+            searchQuery = searchQuery,
             importState = importState,
             onShuffleLibrary = viewModel::shuffleLibrary,
             onTabSelected = viewModel::selectTab,
@@ -412,6 +418,8 @@ fun LibraryScreen(
 @Composable
 private fun LibraryContent(
     state: LibraryUiState,
+    /** Field-facing query — updates this frame; see LibraryViewModel.searchQuery. */
+    searchQuery: String,
     importState: com.stash.data.download.files.LocalImportState,
     onShuffleLibrary: () -> Unit,
     onTabSelected: (LibraryTab) -> Unit,
@@ -529,7 +537,7 @@ private fun LibraryContent(
         // -- Inline search (toggled by the header 🔍) — no permanent bar --
         if (searchOpen) {
             GlassSearchBar(
-                query = state.searchQuery,
+                query = searchQuery,
                 onQueryChange = onSearchQueryChanged,
                 modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
             )

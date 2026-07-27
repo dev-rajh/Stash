@@ -24,10 +24,16 @@ import javax.inject.Singleton
  *      still streams lossless before dropping to lossy YouTube. Its resolver
  *      decrypts the whole file client-side (slow), so it sits LAST among the
  *      lossless sources and is foreground-only too.
+ *   3. [ArcodStreamResolver]   — ARCOD, an authenticated per-user-account
+ *      lossless fallback. NOT parked, but conditional: [resolve] only adds it
+ *      when the build bundles the private stream base
+ *      (`BuildConfig.ARCOD_CONFIGURED`), so an unconfigured build skips it
+ *      entirely. Foreground/next-up only. Its participation is therefore
+ *      build-dependent — tests must not assert it unconditionally.
  *   PARKED (2026-07-01, hosts down for us — commented out of the chain in
  *   [resolve], kept for re-enablement): [KennyyStreamResolver] (`kennyy.com.br`),
- *   [QobuzStreamResolver] (`qobuz.squid.wtf`), [ArcodStreamResolver] (ARCOD).
- *   3. [YouTubeStreamResolver] — yt-dlp / InnerTube extraction. Last
+ *   [QobuzStreamResolver] (`qobuz.squid.wtf`).
+ *   4. [YouTubeStreamResolver] — yt-dlp / InnerTube extraction. Last
  *      resort, reached only when the track genuinely isn't in the Qobuz
  *      catalog (Bandcamp re-uploads, region-exclusive, underground
  *      releases). Lossy quality (AAC/Opus ~128-160 kbps), surfaced as a

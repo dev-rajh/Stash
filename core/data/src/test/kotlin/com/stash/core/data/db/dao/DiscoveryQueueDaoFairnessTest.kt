@@ -143,8 +143,19 @@ class DiscoveryQueueDaoFairnessTest {
         assertEquals(listOf(recipeB), recipes)
     }
 
-    @Test fun `getPendingForRecipe returns up to limit oldest-first`() = runTest {
-        // 5 PENDING for recipeA across spread queued_at timestamps.
+    /**
+     * NEWEST-first, not FIFO. #287 deliberately changed this from oldest-first:
+     * with a deep backlog, the daily completion budget was spent on candidates
+     * from weeks-old seeds while TODAY's recent-listening candidates waited days
+     * at the back of the line (observed on device as Motown-era completions while
+     * fresh Panda Bear / Dan Deacon candidates sat pending). The stale tail drains
+     * with leftover budget and ages out via the 30-day PENDING TTL.
+     *
+     * This test asserted the pre-#287 FIFO order and had been failing on master
+     * ever since. Do not "fix" it back to ascending — that reopens #287.
+     */
+    @Test fun `getPendingForRecipe returns up to limit newest-first`() = runTest {
+        // 5 PENDING for recipeA across spread queued_at timestamps (100..500).
         for (i in 1..5) {
             dao.insertIfNew(pendingRow(recipeA, trackId = null, queuedAt = i * 100L))
         }
@@ -153,10 +164,8 @@ class DiscoveryQueueDaoFairnessTest {
 
         val pending = dao.getPendingForRecipe(recipeA, limit = 3)
 
-        assertEquals(3, pending.size)
-        // FIFO within a recipe: oldest queued_at first.
-        assertTrue(pending[0].queuedAt < pending[1].queuedAt)
-        assertTrue(pending[1].queuedAt < pending[2].queuedAt)
+        // The three NEWEST seeds, newest first — and none of recipeB's.
+        assertEquals(listOf(500L, 400L, 300L), pending.map { it.queuedAt })
         assertEquals(recipeA, pending[0].recipeId)
     }
 

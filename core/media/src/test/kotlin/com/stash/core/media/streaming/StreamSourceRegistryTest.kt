@@ -3,13 +3,38 @@ package com.stash.core.media.streaming
 import com.google.common.truth.Truth.assertThat
 import com.stash.core.data.db.entity.TrackEntity
 import com.stash.core.data.prefs.StreamingPreference
+import com.stash.data.download.BuildConfig
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.mockk
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.runTest
+import org.junit.Assume.assumeTrue
 import org.junit.Test
 
+/**
+ * ⚠️ Two resolvers in [StreamSourceRegistry.resolve] are gated on COMPILE-TIME
+ * build config, not on anything a test can inject:
+ *
+ *   qbdlx → `BuildConfig.QBDLX_CONFIGURED`   (local.properties qbdlx creds)
+ *   arcod → `BuildConfig.ARCOD_CONFIGURED`   (local.properties arcod.streamBase)
+ *
+ * A maintainer machine has both, so both are in the chain. CI has neither, so
+ * neither is. That makes any UNCONDITIONAL assertion about those two sources
+ * environment-dependent — it will pass in one place and fail in the other, which
+ * is exactly what happened here: `arcod never called` passed in CI and failed
+ * locally, while `qbdlx.resolve was called` passed locally and failed in CI. It
+ * went unnoticed for months only because the whole :core:media suite hung before
+ * reaching this class (see LoudnessGainProcessorTest).
+ *
+ * So: guard every qbdlx/arcod expectation with its flag. Use `assumeTrue` when a
+ * test's whole premise needs the source (skips), and an `if` when the test still
+ * means something without it (narrows). Assertions about amz/youtube/kennyy/qobuz
+ * are unconditional — those aren't build-gated.
+ *
+ * If this gets tiresome, the real fix is to have `resolve()` take the chain
+ * composition as an injected value instead of reading BuildConfig inline.
+ */
 @OptIn(ExperimentalCoroutinesApi::class)
 class StreamSourceRegistryTest {
 
@@ -93,12 +118,18 @@ class StreamSourceRegistryTest {
 
         registry().resolve(track, allowYouTube = true)
 
-        coVerify { qbdlx.resolve(track) }
+        // The premise still holds without qbdlx (amz misses → youtube), so only
+        // the qbdlx leg is conditional. See the class KDoc on build-gated sources.
+        if (BuildConfig.QBDLX_CONFIGURED) coVerify { qbdlx.resolve(track) }
         coVerify { amz.resolve(track) }
         coVerify { youtube.resolve(track, allowYtDlp = true) }
         coVerify(exactly = 0) { kennyy.resolve(any()) } // parked
         coVerify(exactly = 0) { qobuz.resolve(any()) } // parked
-        coVerify(exactly = 0) { arcod.resolve(any()) } // parked
+        // ARCOD is NOT parked — resolve() adds it whenever the build bundles the
+        // private stream base, and this is the one case that walks the WHOLE chain
+        // (nothing short-circuits before arcod), so "never called" only holds for
+        // an unconfigured build.
+        if (!BuildConfig.ARCOD_CONFIGURED) coVerify(exactly = 0) { arcod.resolve(any()) }
     }
 
     /**
@@ -108,6 +139,10 @@ class StreamSourceRegistryTest {
      */
     @Test
     fun resolve_uses_qbdlx_before_amz_and_youtube() = runTest {
+        // This test's entire premise is "qbdlx serves it", which is impossible on a
+        // build that doesn't bundle qbdlx creds — resolve() skips the source
+        // outright. Assume rather than assert, so it SKIPS on CI instead of failing.
+        assumeTrue("needs a qbdlx-configured build", BuildConfig.QBDLX_CONFIGURED)
         coEvery { streamingPreference.isForceYouTubeFallback() } returns false
         coEvery { qbdlx.resolve(any()) } returns stubStreamUrl("qbdlx")
         coEvery { amz.resolve(any()) } returns null
@@ -147,7 +182,10 @@ class StreamSourceRegistryTest {
 
         assertThat(result).isNotNull()
         assertThat(result!!.origin).isEqualTo("amz")
-        coVerify { qbdlx.resolve(track) }
+        // Only the qbdlx leg is build-gated; "amz serves it, youtube never runs"
+        // holds either way. Resolution short-circuits at amz, which precedes arcod
+        // in the chain, so the arcod assertion below is safe unconditionally.
+        if (BuildConfig.QBDLX_CONFIGURED) coVerify { qbdlx.resolve(track) }
         coVerify { amz.resolve(track) }
         coVerify(exactly = 0) { youtube.resolve(any(), any()) }
         coVerify(exactly = 0) { kennyy.resolve(any()) } // parked

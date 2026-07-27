@@ -27,6 +27,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.mockito.kotlin.any
+import org.mockito.kotlin.anyOrNull
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.whenever
 
@@ -55,7 +56,15 @@ class YTMusicApiClientTest {
     private fun fakeClient(responseJson: String): YTMusicApiClient {
         val inner = mock<InnerTubeClient>()
         val parsed = Json.parseToJsonElement(responseJson).jsonObject
-        runBlocking { whenever(inner.search(any())).thenReturn(parsed) }
+        // BOTH params must be matchers. `search(query, params = null)` takes two
+        // args, so stubbing with a single `any()` throws
+        // InvalidUseOfMatchersException ("2 matchers expected, 1 recorded") — and
+        // because Mockito's matcher stack is global, that leak cascades into
+        // whatever test runs next, which is why this one bad stub used to fail 22
+        // tests with a count that moved around with execution order.
+        // `anyOrNull()` for params: callers omit it, so it arrives as null, and
+        // mockito-kotlin's typed `any()` does NOT match null.
+        runBlocking { whenever(inner.search(any(), anyOrNull())).thenReturn(parsed) }
         return YTMusicApiClient(inner)
     }
 
@@ -68,7 +77,8 @@ class YTMusicApiClientTest {
     private fun fakeBrowseClient(responseJson: String): YTMusicApiClient {
         val inner = mock<InnerTubeClient>()
         val parsed = Json.parseToJsonElement(responseJson).jsonObject
-        runBlocking { whenever(inner.browse(any())).thenReturn(parsed) }
+        // Two matchers — see the note in [fakeClient]. `browse(browseId, params = null)`.
+        runBlocking { whenever(inner.browse(any(), anyOrNull())).thenReturn(parsed) }
         return YTMusicApiClient(inner)
     }
 
@@ -164,17 +174,23 @@ class YTMusicApiClientTest {
             "avatarUrl should start with https://, was ${profile.avatarUrl}",
             profile.avatarUrl!!.startsWith("https://"),
         )
-        // Lock in "largest thumbnail wins" for the avatar: the fixture ships
-        // both a 48×48 and a 544×544 variant. ArtUrlUpgrader additionally
-        // normalizes lh3 URLs to `=w544-h544`, so "544" must appear regardless
-        // of which variant was picked — but the picker must NOT have chosen
-        // the 48 variant and then had its size token stripped (which would
-        // still contain "544" via the upgrader). We assert on the original
-        // `artist-avatar-large` path token to pin the picker to the 544 src.
+        // Two independent properties, asserted separately so a failure says which
+        // one broke:
+        //  1. PICKER — "largest thumbnail wins". The fixture ships a small and a
+        //     large variant; the path token is the only thing that distinguishes
+        //     which source was chosen, since the upgrader rewrites the size token
+        //     on both.
+        //  2. UPGRADER — ran and left a normalized `=wN-hN` token.
+        // Deliberately NOT asserting a specific pixel count: this used to demand
+        // "544" and silently rotted when ArtUrlUpgrader.LH3_TARGET_SIZE was raised
+        // to 1024. The contract is "largest variant, size-normalized", not a number.
         assertTrue(
-            "avatar should be the 544 variant, was ${profile.avatarUrl}",
-            profile.avatarUrl!!.contains("artist-avatar-large") &&
-                profile.avatarUrl!!.contains("544"),
+            "picker must choose the large variant, was ${profile.avatarUrl}",
+            profile.avatarUrl!!.contains("artist-avatar-large"),
+        )
+        assertTrue(
+            "ArtUrlUpgrader must normalize the lh3 size token, was ${profile.avatarUrl}",
+            Regex("""=w\d+-h\d+""").containsMatchIn(profile.avatarUrl!!),
         )
         assertTrue(
             "popular.size should be in 5..10, was ${profile.popular.size}",
@@ -592,7 +608,7 @@ class YTMusicApiClientTest {
         val page2 = loadFixture("playlist_long_page2.json")
         val inner = mock<InnerTubeClient>()
         runBlocking {
-            whenever(inner.browse(any<String>())).thenReturn(Json.parseToJsonElement(page1).jsonObject)
+            whenever(inner.browse(any(), anyOrNull())).thenReturn(Json.parseToJsonElement(page1).jsonObject)
             whenever(inner.browseWithStatus(any())).thenReturn(
                 RequestOutcome(body = Json.parseToJsonElement(page2).jsonObject, statusCode = 200)
             )
@@ -621,7 +637,7 @@ class YTMusicApiClientTest {
         }""".trimIndent()
         val inner = mock<InnerTubeClient>()
         runBlocking {
-            whenever(inner.browse(any<String>())).thenReturn(Json.parseToJsonElement(synthetic).jsonObject)
+            whenever(inner.browse(any(), anyOrNull())).thenReturn(Json.parseToJsonElement(synthetic).jsonObject)
         }
         val client = YTMusicApiClient(inner)
         val result = client.getPlaylistTracks("X")

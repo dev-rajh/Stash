@@ -112,7 +112,13 @@ class StashDiscoveryWorkerStreamOnlyTest {
         coEvery {
             discoveryQueueDao.findRecipesAtWeeklyCap(any(), any())
         } returns emptyList()
-        coEvery { discoveryQueueDao.getPending(any()) } returns listOf(pending)
+        // #287 fairness path: the worker asks which recipes have PENDING rows
+        // (passing a -1L sentinel when nothing is capped, since Room rejects an
+        // empty `IN ()`), then drains a per-recipe quota. It no longer calls the
+        // flat getPending() — stubbing that left activeRecipes empty, so doWork()
+        // returned before reaching any of the assertions below.
+        coEvery { discoveryQueueDao.getRecipesWithPending(any()) } returns listOf(1L)
+        coEvery { discoveryQueueDao.getPendingForRecipe(1L, any()) } returns listOf(pending)
         coEvery {
             discoveryQueueDao.countRecentCompletedForRecipe(1L, any())
         } returns 0
@@ -187,7 +193,13 @@ class StashDiscoveryWorkerStreamOnlyTest {
         coEvery {
             discoveryQueueDao.findRecipesAtWeeklyCap(any(), any())
         } returns emptyList()
-        coEvery { discoveryQueueDao.getPending(any()) } returns listOf(pending)
+        // #287 fairness path: the worker asks which recipes have PENDING rows
+        // (passing a -1L sentinel when nothing is capped, since Room rejects an
+        // empty `IN ()`), then drains a per-recipe quota. It no longer calls the
+        // flat getPending() — stubbing that left activeRecipes empty, so doWork()
+        // returned before reaching any of the assertions below.
+        coEvery { discoveryQueueDao.getRecipesWithPending(any()) } returns listOf(1L)
+        coEvery { discoveryQueueDao.getPendingForRecipe(1L, any()) } returns listOf(pending)
         coEvery {
             discoveryQueueDao.countRecentCompletedForRecipe(1L, any())
         } returns 0

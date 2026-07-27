@@ -146,16 +146,45 @@ class TrackDaoStreamableTest {
         assertEquals(setOf(1L, 2L), tracks.map { it.id }.toSet())
     }
 
-    @Test fun `getByPlaylist excludes unavailable even when streamable true`() = runTest {
+    /**
+     * getByPlaylist deliberately does NOT filter on `is_streamable` the way
+     * getAllAlbums/getAllArtists/search/getTotalCount do. Those are library-wide
+     * aggregates, where an unplayable row is noise. A playlist is different:
+     * **membership is the source of truth**, and availability is decided at play
+     * time.
+     *
+     * This is load-bearing. Sync inserts every new track with `is_streamable = 0`
+     * and `is_streamable_checked_at = null` (see [TrackEntity.isStreamable] —
+     * "not yet known streamable until the worker drains them"). If this query
+     * filtered to `is_streamable = 1`, every freshly synced playlist would render
+     * EMPTY in Online mode until the streamability worker caught up — i.e. the
+     * "playlists sync as empty shells with cover art and 0 songs" symptom that
+     * v0.9.82 shipped a hotfix for.
+     *
+     * This test previously asserted the opposite (`excludes unavailable even when
+     * streamable true`) and had been failing on master for weeks. Making the query
+     * satisfy it would have reintroduced the empty-playlist bug, so the assertion
+     * was inverted to pin the behaviour we actually want.
+     *
+     * Hiding only PROBED-unavailable rows (`is_streamable = 0 AND checked_at IS
+     * NOT NULL`) while keeping unprobed ones is defensible, but deliberately not
+     * done: a probe can fail transiently (host down, region-locked) and silently
+     * dropping a synced track from its playlist is worse than a track that fails
+     * on tap.
+     */
+    @Test fun `getByPlaylist keeps unprobed and unavailable rows when streamable true`() = runTest {
         val downloaded = insertDownloaded(id = 1L, album = "A", artist = "Drake")
         val unavailable = insertUnavailable(id = 2L, album = "C", artist = "Drake")
+        val unchecked = insertUnchecked(id = 3L, album = "D", artist = "Drake")
         val playlistId = playlistDao.insert(customPlaylist())
         playlistDao.insertCrossRef(crossRef(playlistId, downloaded, position = 0))
         playlistDao.insertCrossRef(crossRef(playlistId, unavailable, position = 1))
+        playlistDao.insertCrossRef(crossRef(playlistId, unchecked, position = 2))
 
         val tracks = dao.getByPlaylist(playlistId, includeStreamable = true).first()
 
-        assertEquals(listOf(1L), tracks.map { it.id })
+        // All three: a synced playlist shows its whole tracklist in Online mode.
+        assertEquals(listOf(1L, 2L, 3L), tracks.map { it.id })
     }
 
     // ── getByPlaylist: STASH_MIX offline exemption ──────────────────────

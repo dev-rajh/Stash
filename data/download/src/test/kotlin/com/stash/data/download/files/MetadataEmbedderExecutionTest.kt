@@ -13,6 +13,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
+import org.junit.Assume.assumeTrue
 import org.junit.Test
 import java.io.File
 import java.io.IOException
@@ -170,7 +171,25 @@ class MetadataEmbedderExecutionTest {
         )
     }
 
+    /**
+     * Installs a stub `libffmpeg.so` that is really a `#!/bin/sh` script, which
+     * the embedder then EXECUTES. That only works on a POSIX host: Windows has no
+     * shebang handling, so `CreateProcess` fails with error=193.
+     *
+     * Every test that installs a stub is therefore POSIX-only and is SKIPPED
+     * elsewhere rather than failed. Note this also skips the two
+     * expect-a-failure tests that used to "pass" on Windows for the wrong reason
+     * — the process failed to start, so they never exercised the exit-code or
+     * missing-output path they claim to cover. A skip states that honestly.
+     *
+     * The tests that don't install a stub (`missing ffmpeg binary`,
+     * `process start exception`) are OS-independent and still run everywhere.
+     */
     private fun installFfmpeg(script: String) {
+        assumeTrue(
+            "stub ffmpeg is a #!/bin/sh script — POSIX-only (Windows: CreateProcess error=193)",
+            !System.getProperty("os.name").orEmpty().startsWith("Windows", ignoreCase = true),
+        )
         val binary = File(nativeDir, "libffmpeg.so").apply { writeText(script) }
         assertTrue("test ffmpeg must be executable", binary.setExecutable(true))
     }

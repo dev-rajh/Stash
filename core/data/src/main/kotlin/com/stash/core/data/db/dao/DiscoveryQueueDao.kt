@@ -17,44 +17,13 @@ interface DiscoveryQueueDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertAllIfNew(entries: List<DiscoveryQueueEntity>)
 
-    /** Pending entries for the discovery worker to drain. */
-    @Query(
-        """
-        SELECT * FROM discovery_queue
-        WHERE status = 'PENDING'
-        ORDER BY queued_at ASC
-        LIMIT :limit
-        """
-    )
-    suspend fun getPending(limit: Int): List<DiscoveryQueueEntity>
-
-    /**
-     * Pending entries that aren't in the supplied at-cap recipe set.
-     * Without this fairness filter, a single recipe's deferred-at-cap
-     * backlog (rows that keep getting skipped because their recipe is
-     * over its weekly download budget) sits at the head of the queue and
-     * starves out fresher candidates from under-cap recipes. See
-     * conversation 2026-05-12: First Listen had 100+ deferred PENDING
-     * blocking Deep Cuts' freshly-queued candidates from ever being
-     * processed.
-     *
-     * Pass an empty list to behave like [getPending] — Room rejects
-     * empty `IN ()` SQL so the worker special-cases the empty case
-     * before calling.
-     */
-    @Query(
-        """
-        SELECT * FROM discovery_queue
-        WHERE status = 'PENDING'
-          AND recipe_id NOT IN (:cappedRecipeIds)
-        ORDER BY queued_at ASC
-        LIMIT :limit
-        """
-    )
-    suspend fun getPendingExcludingRecipes(
-        cappedRecipeIds: List<Long>,
-        limit: Int,
-    ): List<DiscoveryQueueEntity>
+    // REMOVED: `getPending(limit)` and `getPendingExcludingRecipes(capped, limit)`.
+    // Both were flat oldest-first drains superseded by the #287 round-robin pair
+    // below ([getRecipesWithPending] + [getPendingForRecipe]), and both had zero
+    // callers. They were not harmless dead code: StashDiscoveryWorkerStreamOnlyTest
+    // went on stubbing `getPending`, so its worker under test always saw an empty
+    // queue and both of its tests failed for months while looking like they
+    // covered the stub-insert path. Deleted so the wrong method can't be stubbed.
 
     /**
      * Distinct recipe ids that currently have at least one PENDING row.

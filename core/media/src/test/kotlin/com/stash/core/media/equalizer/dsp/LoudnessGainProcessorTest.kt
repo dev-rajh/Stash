@@ -13,7 +13,7 @@ import io.mockk.mockk
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
 import org.junit.After
@@ -32,7 +32,16 @@ class LoudnessGainProcessorTest {
   private val rampSamples = sampleRate * 15 / 1000  // 661
 
   @Before fun setUp() {
-    Dispatchers.setMain(StandardTestDispatcher())
+    // UNCONFINED, not Standard: LoudnessController launches its state load on
+    // Dispatchers.Main and awaitInit() spins on `while (!initDone) delay(1)`.
+    // These tests assert on synchronous DSP output, so they use runBlocking
+    // rather than runTest — and runBlocking never advances a Standard
+    // dispatcher's queue, so the init coroutine would never run and awaitInit
+    // would hang the whole :core:media suite forever (it did: every CI run was
+    // killed at the 20-minute cap). Unconfined runs the launch eagerly.
+    // Sibling LoudnessControllerTest/EqControllerTest can keep Standard
+    // because runTest(dispatcher) drives the scheduler for them.
+    Dispatchers.setMain(UnconfinedTestDispatcher())
     store = mockk(relaxed = true)
     // Default: enabled with 0 dB gain. Individual tests override via setCurrentTrackGain.
     coEvery { store.read() } returns LoudnessState(enabled = true, currentTrackGainDb = 0f, currentTargetGainDb = 0f)

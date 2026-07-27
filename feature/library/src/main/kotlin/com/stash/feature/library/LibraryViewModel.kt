@@ -120,6 +120,27 @@ class LibraryViewModel @Inject constructor(
     private val _controls = MutableStateFlow(ControlState())
 
     /**
+     * The query the SEARCH FIELD binds to — deliberately its own StateFlow, NOT
+     * read back off [uiState].
+     *
+     * [uiState] runs the whole filter/sort pipeline behind
+     * `flowOn(Dispatchers.Default)`. A fully-controlled `TextField` bound to a
+     * value that round-trips through that can't get the character you just typed
+     * back inside the frame, so every recomposition stamps the STALE query over
+     * the field: typing lags, characters vanish, and backspace fights you. That
+     * regression shipped in v0.9.83 (f56a6e51 moved the pipeline off Main and
+     * the field went with it).
+     *
+     * This flow is updated synchronously by [setSearchQuery] and touches no list
+     * work, so the field always renders the keystroke immediately while the
+     * filtered lists catch up a frame or two later off-Main. Keep it that way:
+     * never route this through the pipeline, and never add operators that
+     * dispatch. (Mirrors PlaylistDetailViewModel, which has always done this.)
+     */
+    private val _searchQuery = MutableStateFlow("")
+    val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
+
+    /**
      * Derives a pair of (spotifyConnected, youTubeConnected) from TokenManager.
      */
     private val authStateFlow = combine(
@@ -354,8 +375,15 @@ class LibraryViewModel @Inject constructor(
         _controls.update { it.copy(activeTab = tab) }
     }
 
-    /** Update the search query; filtering is applied reactively. */
+    /**
+     * Update the search query; filtering is applied reactively.
+     *
+     * Writes BOTH the fast field-facing flow (rendered this frame) and the
+     * control state that drives the off-Main filter pipeline (catches up). See
+     * [searchQuery] for why the field must not wait on the pipeline.
+     */
     fun setSearchQuery(query: String) {
+        _searchQuery.value = query
         _controls.update { it.copy(searchQuery = query) }
     }
 

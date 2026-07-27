@@ -30,7 +30,11 @@ class PreviewPrefetcherTest {
     @Test
     fun `prefetch calls extractStreamUrl once per id and populates cache`() = runTest {
         val ex = mock<PreviewUrlExtractor> {
-            onBlocking { extractStreamUrl(any()) }
+            // BOTH args need matchers — extractStreamUrl(videoId, allowYtDlp = true)
+            // takes two. A single any() throws InvalidUseOfMatchersException, and
+            // Mockito's matcher stack is global so the leak cascades into whatever
+            // test runs next.
+            onBlocking { extractStreamUrl(any(), any()) }
                 .thenAnswer { inv -> "u/${inv.arguments[0]}" }
         }
         val cache = mutableMapOf<String, String>()
@@ -40,7 +44,7 @@ class PreviewPrefetcherTest {
         pf.prefetch(listOf("a", "b", "c"))
         advanceUntilIdle()
 
-        verify(ex, times(3)).extractStreamUrl(any())
+        verify(ex, times(3)).extractStreamUrl(any(), any())
         assertEquals("u/a", cache["a"])
         assertEquals("u/b", cache["b"])
         assertEquals("u/c", cache["c"])
@@ -49,7 +53,11 @@ class PreviewPrefetcherTest {
     @Test
     fun `prefetch skips ids already in cache`() = runTest {
         val ex = mock<PreviewUrlExtractor> {
-            onBlocking { extractStreamUrl(any()) }
+            // BOTH args need matchers — extractStreamUrl(videoId, allowYtDlp = true)
+            // takes two. A single any() throws InvalidUseOfMatchersException, and
+            // Mockito's matcher stack is global so the leak cascades into whatever
+            // test runs next.
+            onBlocking { extractStreamUrl(any(), any()) }
                 .thenAnswer { inv -> "u/${inv.arguments[0]}" }
         }
         val cache = mutableMapOf("a" to "u/a")
@@ -59,7 +67,7 @@ class PreviewPrefetcherTest {
         pf.prefetch(listOf("a", "b"))
         advanceUntilIdle()
 
-        verify(ex, never()).extractStreamUrl(eq("a"))
-        verify(ex).extractStreamUrl(eq("b"))
+        verify(ex, never()).extractStreamUrl(eq("a"), any())
+        verify(ex).extractStreamUrl(eq("b"), any())
     }
 }
