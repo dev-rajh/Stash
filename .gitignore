@@ -74,6 +74,8 @@ node_modules/
 # Claude Code per-machine local state (the shared .claude/ config stays tracked)
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
+.claude/
+CLAUDE.md
 
 # Local spike/experiment artifacts — never commit (huge binaries, screenshots)
 spike/*.png
@@ -84,3 +86,7 @@ spike/*.xml
 # CLAP sonic-recommendation spike fixtures — 515MB of ONNX models + WAVs that
 # live under androidTest so the on-device spike can read them. Never commit.
 app/src/androidTest/assets/clapspike/
+
+# add .claude
+.claude/
+CLAUDE.md

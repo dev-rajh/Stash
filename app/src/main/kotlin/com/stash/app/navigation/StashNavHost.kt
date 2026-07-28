@@ -418,6 +418,12 @@ fun StashNavHost(
                 onNavigateToAlbum = { _, name, _, artistName ->
                     navController.navigate(AlbumDetailRoute(name, artistName))
                 },
+                onNavigateToOfflineArtist = { artistName ->
+                    navController.navigate(ArtistDetailRoute(artistName))
+                },
+                onNavigateToPlaylist = { playlistId ->
+                    navController.navigate(PlaylistDetailRoute(playlistId))
+                },
             )
         }
     }

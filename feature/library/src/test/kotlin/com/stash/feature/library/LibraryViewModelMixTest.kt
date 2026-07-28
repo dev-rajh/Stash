@@ -143,5 +143,6 @@ class LibraryViewModelMixTest {
         streamingPreference = streamingPreference,
         flacUpgradeEnqueuer = org.mockito.kotlin.mock(),
         ytMusicApiClient = org.mockito.kotlin.mock(),
+        losslessUpgrader = org.mockito.kotlin.mock(),
     )
 }

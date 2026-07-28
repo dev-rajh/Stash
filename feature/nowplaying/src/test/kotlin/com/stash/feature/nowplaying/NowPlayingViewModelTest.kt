@@ -9,6 +9,7 @@ import com.stash.core.data.prefs.NowPlayingPreference
 import com.stash.core.data.repository.MusicRepository
 import com.stash.core.data.social.LikeCoordinator
 import com.stash.core.media.PlayerRepository
+import com.stash.core.media.sleep.SleepTimerManager
 import com.stash.core.model.PlayerState
 import com.stash.core.model.RadioStartResult
 import com.stash.core.model.Track
@@ -219,8 +220,8 @@ class NowPlayingViewModelFindInFlacTest {
         lyricsPreference = mockk(relaxed = true),
         nowPlayingPreference = nowPlayingPreference,
         lyricsSidecarWriter = mockk(relaxed = true),
+        sleepTimerManager = mockk(relaxed = true),
         appContext = appContext,
-        sleepTimerController = mockk(relaxed = true),
         ytMusicApiClient = mockk(relaxed = true),
     )
 
@@ -366,8 +367,8 @@ class NowPlayingViewModelLikeRoutingTest {
         lyricsPreference = mockk(relaxed = true),
         nowPlayingPreference = mockk(relaxed = true),
         lyricsSidecarWriter = mockk(relaxed = true),
+        sleepTimerManager = mockk(relaxed = true),
         appContext = appContext,
-        sleepTimerController = mockk(relaxed = true),
         ytMusicApiClient = mockk(relaxed = true),
     )
 
@@ -441,8 +442,8 @@ class NowPlayingViewModelTrackTapTest {
         lyricsPreference = mockk(relaxed = true),
         nowPlayingPreference = mockk(relaxed = true),
         lyricsSidecarWriter = mockk(relaxed = true),
+        sleepTimerManager = mockk(relaxed = true),
         appContext = appContext,
-        sleepTimerController = mockk(relaxed = true),
         ytMusicApiClient = api,
     )
 
@@ -579,8 +580,8 @@ class NowPlayingViewModelRadioTest {
             lyricsPreference = mockk(relaxed = true),
             nowPlayingPreference = mockk(relaxed = true),
             lyricsSidecarWriter = mockk(relaxed = true),
+            sleepTimerManager = mockk(relaxed = true),
             appContext = mockk(relaxed = true),
-            sleepTimerController = mockk(relaxed = true),
             ytMusicApiClient = mockk(relaxed = true),
         )
     }

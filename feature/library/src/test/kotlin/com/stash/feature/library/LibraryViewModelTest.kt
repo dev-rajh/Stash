@@ -2,6 +2,7 @@ package com.stash.feature.library
 
 import com.stash.core.auth.TokenManager
 import com.stash.core.auth.model.AuthState
+import com.stash.core.data.lossless.LosslessUpgrader
 import com.stash.core.data.prefs.StreamingPreference
 import com.stash.core.data.repository.MusicRepository
 import com.stash.core.media.PlayerRepository
@@ -243,6 +244,7 @@ class LibraryViewModelTest {
             on { state } doReturn MutableStateFlow<LocalImportState>(LocalImportState.Idle)
         },
         streamingPreference: StreamingPreference = mock(),
+        losslessUpgrader: LosslessUpgrader = mock(),
     ): LibraryViewModel = LibraryViewModel(
         musicRepository = musicRepository,
         playerRepository = playerRepository,
@@ -252,5 +254,6 @@ class LibraryViewModelTest {
         streamingPreference = streamingPreference,
         flacUpgradeEnqueuer = org.mockito.kotlin.mock(),
         ytMusicApiClient = org.mockito.kotlin.mock(),
+        losslessUpgrader = losslessUpgrader,
     )
 }

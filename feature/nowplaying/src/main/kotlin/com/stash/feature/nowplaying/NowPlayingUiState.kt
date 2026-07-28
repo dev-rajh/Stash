@@ -1,6 +1,7 @@
 package com.stash.feature.nowplaying
 
 import androidx.compose.ui.graphics.Color
+import com.stash.core.model.Playlist
 import com.stash.core.model.RepeatMode
 import com.stash.core.model.Track
 import com.stash.core.ui.components.PlaylistInfo
@@ -31,6 +32,18 @@ data class NowPlayingUiState(
     val mutedColor: Color = Color(0xFF37474F),
     /** User-created playlists available for the "Save to Playlist" sheet. */
     val userPlaylists: List<PlaylistInfo> = emptyList(),
+    /**
+     * Active playlists the currently-playing track belongs to — rendered as
+     * the tappable "Appears in" list on the Now Playing screen. Empty for
+     * streaming-only tracks (id == 0) that have no library row.
+     */
+    val containingPlaylists: List<Playlist> = emptyList(),
+    /**
+     * File size of the current track resolved from disk/SAF, used when the
+     * Room `file_size_bytes` column is 0 (notably SAF `content://` libraries,
+     * which the on-disk size backfill can't read). 0 when unknown.
+     */
+    val currentFileSizeBytes: Long = 0L,
     /**
      * `true` when the currently-playing MediaItem is sourced from an
      * `http`/`https` URI (i.e. streamed from Kennyy) rather than a

@@ -6,6 +6,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -31,10 +32,12 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import kotlin.math.abs
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
@@ -70,7 +73,25 @@ fun MiniPlayer(
         Surface(
             modifier = modifier
                 .fillMaxWidth()
-                .clickable(onClick = onExpand),
+                .clickable(onClick = onExpand)
+                // Swipe the bar left/right to change track, mirroring the
+                // album-art swipe on the full Now Playing screen.
+                .pointerInput(Unit) {
+                    val threshold = 48.dp.toPx()
+                    var totalX = 0f
+                    detectHorizontalDragGestures(
+                        onDragStart = { totalX = 0f },
+                        onHorizontalDrag = { change, drag ->
+                            totalX += drag
+                            change.consume()
+                        },
+                        onDragEnd = {
+                            if (abs(totalX) > threshold) {
+                                if (totalX < 0) viewModel.onSkipNext() else viewModel.onSkipPrevious()
+                            }
+                        },
+                    )
+                },
             color = MaterialTheme.colorScheme.surface.copy(alpha = 0.95f),
             tonalElevation = 2.dp,
         ) {

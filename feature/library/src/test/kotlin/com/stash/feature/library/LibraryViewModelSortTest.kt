@@ -42,9 +42,9 @@ class LibraryViewModelSortTest {
 
     @Test fun duration_sort_orders_tracks_longest_first() = runTest {
         val vm = buildVm(musicRepoMock(tracks))
-        vm.setSortOrder(SortOrder.DURATION)
+        vm.setSortOrder(SortOrder.LONGEST)
 
-        val state = vm.uiState.first { !it.isLoading && it.sortOrder == SortOrder.DURATION }
+        val state = vm.uiState.first { !it.isLoading && it.sortOrder == SortOrder.LONGEST }
 
         assertThat(state.tracks.map { it.id }).containsExactly(2L, 3L, 1L).inOrder()
     }
@@ -93,5 +93,6 @@ class LibraryViewModelSortTest {
         streamingPreference = mock(),
         flacUpgradeEnqueuer = mock(),
         ytMusicApiClient = mock(),
+        losslessUpgrader = mock(),
     )
 }

@@ -10,7 +10,9 @@ import com.stash.core.data.lossless.LosslessUpgrader
 import com.stash.core.data.prefs.NowPlayingPreference
 import com.stash.core.data.repository.MusicRepository
 import com.stash.core.media.PlayerRepository
-import com.stash.core.media.SleepTimerController
+import com.stash.core.media.sleep.SleepTimerManager
+import com.stash.core.media.sleep.SleepTimerOption
+import com.stash.core.media.sleep.SleepTimerState
 import com.stash.core.model.AlbumNavTarget
 import com.stash.core.model.RadioStartResult
 import com.stash.core.model.UpgradeResult
@@ -70,7 +72,6 @@ data class ArtistNavTarget(
 @HiltViewModel
 class NowPlayingViewModel @Inject constructor(
     private val playerRepository: PlayerRepository,
-    private val sleepTimerController: SleepTimerController,
     private val musicRepository: MusicRepository,
     private val likeCoordinator: com.stash.core.data.social.LikeCoordinator,
     private val losslessUpgrader: LosslessUpgrader,
@@ -82,6 +83,7 @@ class NowPlayingViewModel @Inject constructor(
     private val lyricsPreference: com.stash.core.data.prefs.LyricsPreference,
     private val nowPlayingPreference: NowPlayingPreference,
     private val lyricsSidecarWriter: LyricsSidecarWriter,
+    private val sleepTimerManager: SleepTimerManager,
     @ApplicationContext private val appContext: Context,
     // Tap-to-artist: resolves the playing track's artist NAME to a YT
     // browseId so Now Playing can open the artist profile.
@@ -106,6 +108,15 @@ class NowPlayingViewModel @Inject constructor(
     fun onShareDismissed() {
         _shareTrack.value = null
     }
+
+    /** Sleep-timer status (shared app-wide). Drives the Now Playing timer menu. */
+    val sleepTimerState: StateFlow<SleepTimerState> = sleepTimerManager.state
+
+    /** Arm the sleep timer for [option]. */
+    fun setSleepTimer(option: SleepTimerOption) = sleepTimerManager.schedule(option)
+
+    /** Cancel any running sleep timer. */
+    fun cancelSleepTimer() = sleepTimerManager.cancel()
 
     private val _uiState = MutableStateFlow(NowPlayingUiState())
     val uiState: StateFlow<NowPlayingUiState> = _uiState.asStateFlow()
@@ -148,7 +159,7 @@ class NowPlayingViewModel @Inject constructor(
     private val optimisticLikeState = MutableStateFlow<Map<Long, Boolean>>(emptyMap())
 
     // ------------------------------------------------------------------
-    // Tap-to-album — resolve the playing track's album and navigate to it
+    // Tap-to-album — open the offline (on-device) album for the playing track
     // ------------------------------------------------------------------
 
     /**
@@ -161,73 +172,69 @@ class NowPlayingViewModel @Inject constructor(
     val albumNavEvents: SharedFlow<AlbumNavTarget> = _albumNavEvents.asSharedFlow()
 
     /**
-     * True while an album resolve is in flight. Mirrors [_resolvingArtist] —
-     * the screen can swap the "View Album" row's icon for a spinner and/or
-     * use this as a double-tap guard.
-     */
-    private val _resolvingAlbum = MutableStateFlow(false)
-    val resolvingAlbum: StateFlow<Boolean> = _resolvingAlbum.asStateFlow()
-
-    /**
-     * "View Album" tap. Resolves the playing track's album NAME (scoped to
-     * its artist, to disambiguate same-named albums) to a YT browseId and
-     * emits an [AlbumNavTarget]. No-op when nothing is playing, the track
-     * has no album tag, or a resolve is already in flight. Resolve
-     * miss/failure -> snackbar, no nav. This intentionally does NOT route
-     * through the local Albums library tab — it opens the real remote
-     * album page, same as [onTrackInfoTapped] opens the real artist page.
+     * Title tap / "View Album". Opens the offline Album screen (the local
+     * library view of tracks actually on this device) for the playing
+     * track's album, scoped to its artist to disambiguate same-named
+     * albums. No network involved — no-op when nothing is playing or the
+     * track has no album tag.
      */
     fun onViewAlbumTapped() {
         val track = _uiState.value.currentTrack ?: return
-        if (_resolvingAlbum.value) return
         val albumName = track.album
         if (albumName.isBlank()) {
             _userMessages.tryEmit("This track has no album info")
             return
         }
         val artistName = track.albumArtist.ifBlank { track.artist }
-        _resolvingAlbum.value = true
-        viewModelScope.launch {
-            try {
-                val album = ytMusicApiClient.resolveAlbum(albumName, artistName)
-                if (album != null) {
-                    _albumNavEvents.emit(
-                        AlbumNavTarget(
-                            albumId = album.id,
-                            name = album.title,
-                            artUrl = album.thumbnailUrl,
-                            artistName = artistName,
-                        ),
-                    )
-                } else {
-                    _userMessages.emit("Couldn't find this album")
-                }
-            } catch (t: CancellationException) {
-                throw t
-            } catch (t: Throwable) {
-                _userMessages.emit("Couldn't find this album")
-            } finally {
-                _resolvingAlbum.value = false
-            }
-        }
+        _albumNavEvents.tryEmit(
+            AlbumNavTarget(albumId = "", name = albumName, artUrl = null, artistName = artistName),
+        )
     }
 
     // ------------------------------------------------------------------
-    // Tap-to-artist — resolve the playing artist and navigate to profile
+    // Tap-to-artist-songs — open the offline "Artist tab" songs list
     // ------------------------------------------------------------------
 
     /**
-     * One-shot navigation targets emitted when the user taps the track block.
-     * The screen collects this and forwards to its `onNavigateToArtist`
-     * callback. `extraBufferCapacity = 1` so an emit that lands a hair before
-     * the screen re-subscribes (config change) isn't dropped.
+     * One-shot navigation events emitted when the user taps the artist name
+     * line, carrying just the artist name. The screen forwards this to its
+     * `onNavigateToOfflineArtist` callback, which opens the same local,
+     * aggregated songs-by-artist view as the Library screen's Artist tab.
+     */
+    private val _offlineArtistNavEvents = MutableSharedFlow<String>(extraBufferCapacity = 1)
+    val offlineArtistNavEvents: SharedFlow<String> = _offlineArtistNavEvents.asSharedFlow()
+
+    /**
+     * Artist-name-line tap. Opens the offline songs-by-artist list for the
+     * playing track's artist — no network resolve, unlike [onTrackInfoTapped]
+     * (the "More on Artist" chip), which opens the real online artist
+     * profile page.
+     */
+    fun onViewArtistSongsTapped() {
+        val track = _uiState.value.currentTrack ?: return
+        val name = track.albumArtist.ifBlank { track.artist }
+        if (name.isBlank()) return
+        _offlineArtistNavEvents.tryEmit(name)
+    }
+
+    // ------------------------------------------------------------------
+    // "More on Artist" — resolve the playing artist and navigate to its
+    // real online profile page
+    // ------------------------------------------------------------------
+
+    /**
+     * One-shot navigation targets emitted when the user taps "More on
+     * Artist". The screen collects this and forwards to its
+     * `onNavigateToArtist` callback. `extraBufferCapacity = 1` so an emit
+     * that lands a hair before the screen re-subscribes (config change)
+     * isn't dropped.
      */
     private val _artistNavEvents = MutableSharedFlow<ArtistNavTarget>(extraBufferCapacity = 1)
     val artistNavEvents: SharedFlow<ArtistNavTarget> = _artistNavEvents.asSharedFlow()
 
     /**
-     * True while an artist resolve is in flight. The screen disables the
-     * track block and swaps its chevron for a spinner; also the double-tap
+     * True while an artist resolve is in flight. The screen swaps the
+     * "More on Artist" chip's icon for a spinner; also the double-tap
      * guard in [onTrackInfoTapped].
      */
     private val _resolvingArtist = MutableStateFlow(false)
@@ -306,28 +313,6 @@ class NowPlayingViewModel @Inject constructor(
 
     /** Stop the active radio station. */
     fun stopRadio() = playerRepository.stopRadio()
-
-    // ------------------------------------------------------------------
-    // Sleep timer
-    // ------------------------------------------------------------------
-
-    /** Current sleep-timer state, mirrored from the app-wide singleton. */
-    val sleepTimerState: StateFlow<SleepTimerController.State> = sleepTimerController.state
-
-    /** Arm a countdown timer for [minutes] minutes. */
-    fun onSleepTimerMinutes(minutes: Int) {
-        sleepTimerController.startMinutes(minutes)
-    }
-
-    /** Arm a timer that pauses at the end of the current track. */
-    fun onSleepTimerEndOfTrack() {
-        sleepTimerController.stopAtEndOfTrack()
-    }
-
-    /** Disarm the sleep timer without touching playback. */
-    fun onSleepTimerCancel() {
-        sleepTimerController.cancel()
-    }
 
     fun onTrackInfoTapped() {
         val track = _uiState.value.currentTrack ?: return
@@ -506,6 +491,8 @@ class NowPlayingViewModel @Inject constructor(
     init {
         observePlayerStateLive()
         observeUserPlaylists()
+        observeContainingPlaylists()
+        observeCurrentFileSize()
         observeStreamingHaltedEvents()
         observePlayerUserMessages()
         collectMirrorFailures()
@@ -652,6 +639,67 @@ class NowPlayingViewModel @Inject constructor(
                 }
             }
             .launchIn(viewModelScope)
+    }
+
+    /**
+     * Observes the set of active playlists the currently-playing track
+     * belongs to, for the Now Playing "Appears in" list. Keyed on the
+     * track id (re-queries only when the song changes, not on every 250ms
+     * position tick); streaming-only tracks (id <= 0) have no library row,
+     * so they resolve to an empty list and the section hides itself.
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private fun observeContainingPlaylists() {
+        uiState
+            .map { it.currentTrack?.id }
+            .distinctUntilChanged()
+            .flatMapLatest { id ->
+                if (id == null || id <= 0L) flowOf(emptyList())
+                else musicRepository.getPlaylistsContainingTrack(id)
+            }
+            .onEach { playlists ->
+                _uiState.update { it.copy(containingPlaylists = playlists) }
+            }
+            .launchIn(viewModelScope)
+    }
+
+    /**
+     * Resolves the current track's on-disk file size for the Now Playing
+     * quality line. The Room `file_size_bytes` column is often 0 — legacy
+     * rows, and especially SAF `content://` libraries the size backfill
+     * can't stat via java.io.File. Reading it here (off the main thread,
+     * keyed on the file path so it only runs when the song changes) makes
+     * the size show regardless of whether the column was ever populated.
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private fun observeCurrentFileSize() {
+        uiState
+            .map { it.currentTrack?.filePath }
+            .distinctUntilChanged()
+            .onEach { path ->
+                val size = withContext(Dispatchers.IO) { resolveFileSize(path) }
+                _uiState.update { it.copy(currentFileSizeBytes = size) }
+            }
+            .launchIn(viewModelScope)
+    }
+
+    /**
+     * Reads a file's size in bytes, handling both absolute paths and SAF
+     * `content://` document URIs. Returns 0 on any failure (missing file,
+     * revoked permission, stream-only track with no path).
+     */
+    private fun resolveFileSize(path: String?): Long {
+        if (path.isNullOrBlank()) return 0L
+        return runCatching {
+            if (path.startsWith("content://")) {
+                appContext.contentResolver
+                    .openFileDescriptor(android.net.Uri.parse(path), "r")
+                    ?.use { it.statSize }
+                    ?.takeIf { it > 0 } ?: 0L
+            } else {
+                java.io.File(path).length()
+            }
+        }.getOrDefault(0L)
     }
 
     /**
