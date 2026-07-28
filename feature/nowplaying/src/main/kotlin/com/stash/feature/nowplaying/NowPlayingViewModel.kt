@@ -159,7 +159,7 @@ class NowPlayingViewModel @Inject constructor(
     private val optimisticLikeState = MutableStateFlow<Map<Long, Boolean>>(emptyMap())
 
     // ------------------------------------------------------------------
-    // Tap-to-album — resolve the playing track's album and navigate to it
+    // Tap-to-album — open the offline (on-device) album for the playing track
     // ------------------------------------------------------------------
 
     /**
@@ -172,73 +172,69 @@ class NowPlayingViewModel @Inject constructor(
     val albumNavEvents: SharedFlow<AlbumNavTarget> = _albumNavEvents.asSharedFlow()
 
     /**
-     * True while an album resolve is in flight. Mirrors [_resolvingArtist] —
-     * the screen can swap the "View Album" row's icon for a spinner and/or
-     * use this as a double-tap guard.
-     */
-    private val _resolvingAlbum = MutableStateFlow(false)
-    val resolvingAlbum: StateFlow<Boolean> = _resolvingAlbum.asStateFlow()
-
-    /**
-     * "View Album" tap. Resolves the playing track's album NAME (scoped to
-     * its artist, to disambiguate same-named albums) to a YT browseId and
-     * emits an [AlbumNavTarget]. No-op when nothing is playing, the track
-     * has no album tag, or a resolve is already in flight. Resolve
-     * miss/failure -> snackbar, no nav. This intentionally does NOT route
-     * through the local Albums library tab — it opens the real remote
-     * album page, same as [onTrackInfoTapped] opens the real artist page.
+     * Title tap / "View Album". Opens the offline Album screen (the local
+     * library view of tracks actually on this device) for the playing
+     * track's album, scoped to its artist to disambiguate same-named
+     * albums. No network involved — no-op when nothing is playing or the
+     * track has no album tag.
      */
     fun onViewAlbumTapped() {
         val track = _uiState.value.currentTrack ?: return
-        if (_resolvingAlbum.value) return
         val albumName = track.album
         if (albumName.isBlank()) {
             _userMessages.tryEmit("This track has no album info")
             return
         }
         val artistName = track.albumArtist.ifBlank { track.artist }
-        _resolvingAlbum.value = true
-        viewModelScope.launch {
-            try {
-                val album = ytMusicApiClient.resolveAlbum(albumName, artistName)
-                if (album != null) {
-                    _albumNavEvents.emit(
-                        AlbumNavTarget(
-                            albumId = album.id,
-                            name = album.title,
-                            artUrl = album.thumbnailUrl,
-                            artistName = artistName,
-                        ),
-                    )
-                } else {
-                    _userMessages.emit("Couldn't find this album")
-                }
-            } catch (t: CancellationException) {
-                throw t
-            } catch (t: Throwable) {
-                _userMessages.emit("Couldn't find this album")
-            } finally {
-                _resolvingAlbum.value = false
-            }
-        }
+        _albumNavEvents.tryEmit(
+            AlbumNavTarget(albumId = "", name = albumName, artUrl = null, artistName = artistName),
+        )
     }
 
     // ------------------------------------------------------------------
-    // Tap-to-artist — resolve the playing artist and navigate to profile
+    // Tap-to-artist-songs — open the offline "Artist tab" songs list
     // ------------------------------------------------------------------
 
     /**
-     * One-shot navigation targets emitted when the user taps the track block.
-     * The screen collects this and forwards to its `onNavigateToArtist`
-     * callback. `extraBufferCapacity = 1` so an emit that lands a hair before
-     * the screen re-subscribes (config change) isn't dropped.
+     * One-shot navigation events emitted when the user taps the artist name
+     * line, carrying just the artist name. The screen forwards this to its
+     * `onNavigateToOfflineArtist` callback, which opens the same local,
+     * aggregated songs-by-artist view as the Library screen's Artist tab.
+     */
+    private val _offlineArtistNavEvents = MutableSharedFlow<String>(extraBufferCapacity = 1)
+    val offlineArtistNavEvents: SharedFlow<String> = _offlineArtistNavEvents.asSharedFlow()
+
+    /**
+     * Artist-name-line tap. Opens the offline songs-by-artist list for the
+     * playing track's artist — no network resolve, unlike [onTrackInfoTapped]
+     * (the "More on Artist" chip), which opens the real online artist
+     * profile page.
+     */
+    fun onViewArtistSongsTapped() {
+        val track = _uiState.value.currentTrack ?: return
+        val name = track.albumArtist.ifBlank { track.artist }
+        if (name.isBlank()) return
+        _offlineArtistNavEvents.tryEmit(name)
+    }
+
+    // ------------------------------------------------------------------
+    // "More on Artist" — resolve the playing artist and navigate to its
+    // real online profile page
+    // ------------------------------------------------------------------
+
+    /**
+     * One-shot navigation targets emitted when the user taps "More on
+     * Artist". The screen collects this and forwards to its
+     * `onNavigateToArtist` callback. `extraBufferCapacity = 1` so an emit
+     * that lands a hair before the screen re-subscribes (config change)
+     * isn't dropped.
      */
     private val _artistNavEvents = MutableSharedFlow<ArtistNavTarget>(extraBufferCapacity = 1)
     val artistNavEvents: SharedFlow<ArtistNavTarget> = _artistNavEvents.asSharedFlow()
 
     /**
-     * True while an artist resolve is in flight. The screen disables the
-     * track block and swaps its chevron for a spinner; also the double-tap
+     * True while an artist resolve is in flight. The screen swaps the
+     * "More on Artist" chip's icon for a spinner; also the double-tap
      * guard in [onTrackInfoTapped].
      */
     private val _resolvingArtist = MutableStateFlow(false)

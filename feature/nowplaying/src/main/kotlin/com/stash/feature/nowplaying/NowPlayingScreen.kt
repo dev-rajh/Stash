@@ -142,8 +142,13 @@ private fun npAccent(raw: Color): Color =
  * paper in light.
  *
  * @param onDismiss Callback invoked when the user taps the dismiss (down arrow) button.
- * @param onNavigateToArtist Callback invoked with artist details when the user taps the artist.
- * @param onNavigateToAlbum Callback invoked with album details when the user taps the album.
+ * @param onNavigateToArtist Callback invoked with artist details when the user taps
+ *   "More on Artist"; opens the real online artist profile page.
+ * @param onNavigateToAlbum Callback invoked with album details when the user taps the
+ *   title; opens the offline (on-device) Album screen.
+ * @param onNavigateToOfflineArtist Callback invoked with the artist name when the user
+ *   taps the artist name line; opens the offline songs-by-artist list (Library's
+ *   Artist tab).
  * @param onNavigateToPlaylist Callback invoked with a playlist id when the user taps
  *   one of the "Appears in" playlists; opens that playlist's track list.
  * @param viewModel The [NowPlayingViewModel] provided by Hilt.
@@ -154,6 +159,7 @@ fun NowPlayingScreen(
     onDismiss: () -> Unit,
     onNavigateToArtist: (id: String, name: String, avatarUrl: String?, focusAlbum: String?) -> Unit,
     onNavigateToAlbum: (albumId: String, name: String, artUrl: String?, artistName: String) -> Unit,
+    onNavigateToOfflineArtist: (artistName: String) -> Unit = {},
     onNavigateToPlaylist: (Long) -> Unit = {},
     viewModel: NowPlayingViewModel = hiltViewModel(),
 ) {
@@ -219,6 +225,14 @@ fun NowPlayingScreen(
     LaunchedEffect(Unit) {
         viewModel.albumNavEvents.collect { a ->
             onNavigateToAlbum(a.albumId, a.name, a.artUrl, a.artistName)
+        }
+    }
+
+    // Tap-to-artist-songs: instant local nav, no resolve — forward straight
+    // to the host's offline Artist-tab callback.
+    LaunchedEffect(Unit) {
+        viewModel.offlineArtistNavEvents.collect { name ->
+            onNavigateToOfflineArtist(name)
         }
     }
 
@@ -466,12 +480,15 @@ fun NowPlayingScreen(
 
                 Spacer(modifier = Modifier.height(8.dp))
 
-                // -- Track info -- (tap the title/artist to open the artist
-                // profile; the trailing chevron signals it's actionable, and
-                // swaps to a spinner while the artist name is being resolved).
-                // Long titles marquee-scroll instead of truncating; same for
-                // the artist line. Tapping the title opens the album; tapping
-                // the artist/album line below opens the artist profile.
+                // -- Track info -- both lines open a local (offline) library
+                // view, no network involved; the trailing chevron just signals
+                // that the line below is tappable. Long titles marquee-scroll
+                // instead of truncating; same for the artist line. Tapping the
+                // title opens the offline Album screen; tapping the
+                // artist/album line below opens the offline songs-by-artist
+                // list (the Library screen's Artist tab). The online artist
+                // profile page lives behind the separate "More on Artist"
+                // quick-action chip further down.
                 Column(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalAlignment = Alignment.CenterHorizontally,
@@ -515,20 +532,12 @@ fun NowPlayingScreen(
                                 size = 24.dp,
                             )
                             Spacer(modifier = Modifier.width(6.dp))
-                            if (resolvingArtist) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(16.dp),
-                                    strokeWidth = 2.dp,
-                                    color = npInk(),
-                                )
-                            } else {
-                                Icon(
-                                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                                    contentDescription = "Open artist",
-                                    tint = npInk().copy(alpha = 0.6f),
-                                    modifier = Modifier.size(18.dp),
-                                )
-                            }
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                                contentDescription = "Open artist songs",
+                                tint = npInk().copy(alpha = 0.6f),
+                                modifier = Modifier.size(18.dp),
+                            )
                         }
                     }
 
@@ -549,8 +558,8 @@ fun NowPlayingScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .basicMarquee()
-                            .clickable(enabled = track != null && !resolvingArtist) {
-                                viewModel.onTrackInfoTapped()
+                            .clickable(enabled = track != null) {
+                                viewModel.onViewArtistSongsTapped()
                             },
                     )
                 }
@@ -614,6 +623,7 @@ fun NowPlayingScreen(
                     Spacer(modifier = Modifier.height(24.dp))
                     QuickActionsRow(
                         queueSize = uiState.queueSize,
+                        resolvingArtist = resolvingArtist,
                         onQueueClick = { showQueue = true },
                         onArtistClick = viewModel::onTrackInfoTapped,
                     )
@@ -845,6 +855,7 @@ private fun TopBar(
         @Composable
         private fun QuickActionsRow(
             queueSize: Int,
+            resolvingArtist: Boolean,
             onQueueClick: () -> Unit,
             onArtistClick: () -> Unit,
         ) {
@@ -863,13 +874,14 @@ private fun TopBar(
                     icon = Icons.Default.Person,
                     label = "More on Artist",
                     contentDescription = "More on Artist",
+                    loading = resolvingArtist,
                     onClick = onArtistClick,
                     modifier = Modifier.weight(1f),
                 )
             }
         }
 
-/** A single filled quick-action chip (icon + label). */
+/** A single filled quick-action chip (icon + label). [loading] swaps the icon for a spinner and disables the tap. */
 @Composable
 private fun QuickActionChip(
     icon: ImageVector,
@@ -877,22 +889,31 @@ private fun QuickActionChip(
     contentDescription: String,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    loading: Boolean = false,
 ) {
     Row(
         modifier = modifier
             .clip(RoundedCornerShape(12.dp))
-            .clickable(onClick = onClick)
+            .clickable(enabled = !loading, onClick = onClick)
             .background(npInk().copy(alpha = 0.08f))
             .padding(vertical = 14.dp),
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = contentDescription,
-            tint = npInk().copy(alpha = 0.7f),
-            modifier = Modifier.size(20.dp),
-        )
+        if (loading) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(20.dp),
+                strokeWidth = 2.dp,
+                color = npInk().copy(alpha = 0.7f),
+            )
+        } else {
+            Icon(
+                imageVector = icon,
+                contentDescription = contentDescription,
+                tint = npInk().copy(alpha = 0.7f),
+                modifier = Modifier.size(20.dp),
+            )
+        }
         Spacer(modifier = Modifier.width(8.dp))
         Text(
             text = label,

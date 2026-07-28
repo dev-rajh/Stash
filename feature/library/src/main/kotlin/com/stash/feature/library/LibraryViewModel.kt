@@ -472,6 +472,12 @@ class LibraryViewModel @Inject constructor(
     /**
      * Begin playback by replacing the queue with [allTracks] and starting
      * at the position of [track].
+     *
+     * Large libraries made queue construction (per-track disk checks in
+     * [com.stash.core.media.PlayerRepositoryImpl.setQueue]) slow enough to
+     * notice on tap-to-play, so the queue is capped to half of the
+     * downloaded list — a window centered on the tapped track — rather
+     * than the full library.
      */
     fun playTrack(track: Track, allTracks: List<Track>) {
         if (track.filePath == null) return // not downloaded yet
@@ -479,7 +485,11 @@ class LibraryViewModel @Inject constructor(
             val downloadedTracks = allTracks.filter { it.filePath != null }
             val index = downloadedTracks.indexOfFirst { it.id == track.id }
             if (index < 0) return@launch // shouldn't happen, but guard against it
-            playerRepository.setQueue(downloadedTracks, index)
+            val maxSize = (downloadedTracks.size / 2).coerceAtLeast(1)
+            val start = (index - maxSize / 2)
+                .coerceIn(0, (downloadedTracks.size - maxSize).coerceAtLeast(0))
+            val end = (start + maxSize).coerceAtMost(downloadedTracks.size)
+            playerRepository.setQueue(downloadedTracks.subList(start, end), index - start)
         }
     }
 

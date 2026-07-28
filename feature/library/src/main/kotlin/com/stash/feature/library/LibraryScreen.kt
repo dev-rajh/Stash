@@ -10,7 +10,6 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -25,14 +24,12 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -71,8 +68,6 @@ import androidx.compose.material.icons.outlined.PushPin
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -485,19 +480,7 @@ private fun LibraryContent(
         ) { uris: List<Uri>? ->
             if (!uris.isNullOrEmpty()) onStartImport(uris)
         }
-        // Recent-downloads rail — the scrolling leading content of the Songs
-        // landing. Handed ONLY to TracksTab.
-        val libraryHeader: @Composable () -> Unit = {
-            Column {
-                if (state.recentlyAdded.isNotEmpty()) {
-                    RecentlyDownloadedRail(
-                        tracks = state.recentlyAdded.take(12),
-                        onTrackClick = onTrackClick,
-                    )
-                }
-                Spacer(Modifier.height(4.dp))
-            }
-        }
+        val libraryHeader: @Composable () -> Unit = {}
 
         // Heading: title + Import. Play/Shuffle/Search/Sort/Filter live in the
         // compact controls row below instead of stacking into this header.
@@ -580,13 +563,22 @@ private fun LibraryContent(
 
         Spacer(modifier = Modifier.height(12.dp))
 
-        // -- Tab chips (horizontal scroll) --
-        TabChipRow(
-            activeTab = state.activeTab,
-            onTabSelected = onTabSelected,
+        // -- Category chips: Songs / Liked / Playlists / Artists / Albums --
+        val chipTabs = listOf(
+            "Songs" to LibraryTab.TRACKS,
+            "Liked" to LibraryTab.LIKED,
+            "Playlists" to LibraryTab.PLAYLISTS,
+            "Artists" to LibraryTab.ARTISTS,
+            "Albums" to LibraryTab.ALBUMS,
+        )
+        com.stash.core.ui.components.CrispChipRow(
+            chips = chipTabs.map { it.first },
+            selected = chipTabs.first { it.second == state.activeTab }.first,
+            onSelect = { label -> onTabSelected(chipTabs.first { it.first == label }.second) },
+            modifier = Modifier.padding(vertical = 4.dp),
         )
 
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(4.dp))
 
         // -- Content area --
         val anyServiceConnected = state.spotifyConnected || state.youTubeConnected
@@ -663,38 +655,6 @@ private fun LibraryContent(
                     onPlayAlbum = onPlayAlbum,
                     onAddAlbumToQueue = onAddAlbumToQueue,
                     header = {},
-                )
-            }
-        }
-    }
-}
-
-// ── Recently downloaded rail ─────────────────────────────────────────────────
-
-@Composable
-private fun RecentlyDownloadedRail(
-    tracks: List<Track>,
-    onTrackClick: (Track) -> Unit,
-) {
-    Column {
-        Text(
-            text = "RECENTLY DOWNLOADED",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.secondary,
-            modifier = Modifier.padding(start = 20.dp, top = 12.dp, bottom = 8.dp),
-        )
-        LazyRow(
-            contentPadding = PaddingValues(horizontal = 20.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            items(tracks, key = { it.id }) { track ->
-                com.stash.core.ui.components.AlbumSquareCard(
-                    title = track.title,
-                    artist = track.artist,
-                    thumbnailUrl = track.albumArtUrl,
-                    year = null,
-                    isLossless = track.fileFormat.equals("flac", ignoreCase = true),
-                    onClick = { onTrackClick(track) },
                 )
             }
         }
@@ -1118,57 +1078,6 @@ private fun LibraryControlsBar(
             }
         }
     }
-}
-
-// ── Tab chips ────────────────────────────────────────────────────────────────
-
-@Composable
-private fun TabChipRow(
-    activeTab: LibraryTab,
-    onTabSelected: (LibraryTab) -> Unit,
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .horizontalScroll(rememberScrollState())
-            .padding(horizontal = 20.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        LibraryTab.entries.forEach { tab ->
-            val isSelected = tab == activeTab
-            FilterChip(
-                selected = isSelected,
-                onClick = { onTabSelected(tab) },
-                label = {
-                    Text(
-                        text = tab.displayName(),
-                        style = MaterialTheme.typography.labelLarge,
-                    )
-                },
-                colors = FilterChipDefaults.filterChipColors(
-                    selectedContainerColor = MaterialTheme.colorScheme.primary,
-                    selectedLabelColor = Color.White,
-                    containerColor = StashTheme.extendedColors.glassBackground,
-                    labelColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                ),
-                border = FilterChipDefaults.filterChipBorder(
-                    borderColor = StashTheme.extendedColors.glassBorder,
-                    selectedBorderColor = MaterialTheme.colorScheme.primary,
-                    enabled = true,
-                    selected = isSelected,
-                ),
-            )
-        }
-    }
-}
-
-/** Human-readable label for each tab. */
-private fun LibraryTab.displayName(): String = when (this) {
-    LibraryTab.PLAYLISTS -> "Playlists"
-    LibraryTab.TRACKS -> "Tracks"
-    LibraryTab.LIKED -> "Liked"
-    LibraryTab.ARTISTS -> "Artists"
-    LibraryTab.ALBUMS -> "Albums"
 }
 
 // ── Sort + filter menu labels ────────────────────────────────────────────────
