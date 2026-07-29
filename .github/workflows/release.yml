@@ -85,6 +85,9 @@ jobs:
       - name: Fetch qbdlx token pool
         env:
           QBDLX_TOKEN_POOL_SECRET: ${{ secrets.QBDLX_TOKEN_POOL }}
+          # Needed by the liveness probe below — it signs a real getFileUrl call.
+          QBDLX_APP_ID: ${{ secrets.QBDLX_APP_ID }}
+          QBDLX_APP_SECRET: ${{ secrets.QBDLX_APP_SECRET }}
         run: |
           # Fetch the CURRENT shared pool so every release ships live tokens.
           # Reachable from datacenter IPs (verified). Any failure → fall back to
@@ -98,8 +101,55 @@ jobs:
                           and .country!=null and .country!="")]
                           | unique_by(.token) | map(.token+":"+.country) | join(",")' 2>/dev/null) || POOL=""
           if [ -n "$POOL" ]; then
-            echo "Fetched $(echo "$POOL" | tr ',' '\n' | wc -l) qbdlx tokens from the shared pool"
-            echo "QBDLX_TOKEN_POOL=$POOL" >> "$GITHUB_ENV"
+            FETCHED=$(echo "$POOL" | tr ',' '\n' | wc -l)
+            echo "Fetched $FETCHED qbdlx tokens from the shared pool"
+
+            # Keep only tokens that can actually DELIVER LOSSLESS AUDIO.
+            #
+            # The pool accumulates rotated-out accounts and is mostly dead at any
+            # given moment — measured 2026-07-28: 1 of 8. Shipping the dead ones
+            # isn't harmless: failover has to walk them, burning a 401 and a retry
+            # per resolve before landing on a working account, so first plays after
+            # an update are slow and flaky.
+            #
+            # Deliberately NOT an auth check. A token can authenticate perfectly
+            # and still be useless: a downgraded/free account returns 200 with
+            # "sample": true and format_id 5 — it logs in, then plays a 30-second
+            # preview. Checking /user/get would happily keep those. So probe the
+            # exact call the app makes at play time, signed the same way, and
+            # demand a real lossless format back (>= 6 = CD or better).
+            TRACK_ID=8767428   # a stable, widely-available catalog track
+            FMT=27
+            LIVE=""
+            for ENTRY in $(echo "$POOL" | tr ',' ' '); do
+              TOK="${ENTRY%:*}"
+              TS=$(date +%s)
+              SIG=$(printf '%s' "trackgetFileUrlformat_id${FMT}intentstreamtrack_id${TRACK_ID}${TS}${QBDLX_APP_SECRET}" | md5sum | cut -d' ' -f1)
+              BODY=$(curl -s --max-time 20 -A "$UA" \
+                       -H "X-App-Id: ${QBDLX_APP_ID}" \
+                       -H "X-User-Auth-Token: $TOK" \
+                       "https://www.qobuz.com/api.json/0.2/track/getFileUrl?request_ts=${TS}&request_sig=${SIG}&track_id=${TRACK_ID}&format_id=${FMT}&intent=stream" || echo '{}')
+              VERDICT=$(echo "$BODY" | jq -r 'if (.sample == true) or ((.format_id // 0) < 6) then "sample/lossy" else "ok" end' 2>/dev/null || echo "unparseable")
+              if [ "$VERDICT" = "ok" ]; then
+                LIVE="${LIVE:+$LIVE,}$ENTRY"
+              else
+                echo "  token ${TOK:0:8}… — dropped ($VERDICT)"
+              fi
+              sleep 1
+            done
+
+            if [ -n "$LIVE" ]; then
+              echo "Live qbdlx tokens: $(echo "$LIVE" | tr ',' '\n' | wc -l) of $FETCHED"
+              echo "QBDLX_TOKEN_POOL=$LIVE" >> "$GITHUB_ENV"
+            else
+              # Every probe failed. That is far more likely to mean Qobuz is
+              # blocking this runner's IP than that the pool is genuinely 100%
+              # dead — and shipping an EMPTY pool would be strictly worse than
+              # shipping an unverified one. Fall back to the unfiltered pool and
+              # make some noise.
+              echo "::warning::qbdlx liveness probe matched 0 of $FETCHED tokens — shipping the UNFILTERED pool (runner IP blocked?)"
+              echo "QBDLX_TOKEN_POOL=$POOL" >> "$GITHUB_ENV"
+            fi
           else
             echo "::warning::qbdlx pool fetch failed/empty — falling back to the QBDLX_TOKEN_POOL secret"
             echo "QBDLX_TOKEN_POOL=$QBDLX_TOKEN_POOL_SECRET" >> "$GITHUB_ENV"

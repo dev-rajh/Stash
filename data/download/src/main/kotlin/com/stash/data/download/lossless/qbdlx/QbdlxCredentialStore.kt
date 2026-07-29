@@ -13,6 +13,7 @@ import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.flow.first
+import android.util.Log
 
 /** One anonymized pool token for the Settings picker. `token` is the id only, never shown. */
 data class QbdlxTokenChoice(
@@ -61,8 +62,12 @@ private val Context.qbdlxCredentialsDataStore: DataStore<Preferences> by prefere
 class QbdlxCredentialStore @Inject constructor(
     @ApplicationContext private val context: Context,
     poolProvider: QbdlxPoolProvider,
+    private val remotePool: QbdlxRemotePool,
 ) {
     private val pastedTokenKey = stringPreferencesKey("pasted_token")
+
+    /** Runtime-refreshed pool, cached so a cold start doesn't wait on the network. */
+    private val cachedPoolKey = stringPreferencesKey("cached_pool")
 
     /**
      * Test seam: the raw `token:country,token:country` pool. Defaults to the
@@ -72,6 +77,74 @@ class QbdlxCredentialStore @Inject constructor(
 
     /** Injectable clock (epoch ms) for the dead-token cooldown; overridable in tests. */
     internal var clock: () -> Long = { System.currentTimeMillis() }
+
+    /** Guards the one-time cached-pool read; the cache only needs loading once. */
+    private var cacheLoaded = false
+
+    /** Epoch ms of the last refresh ATTEMPT (success or not) — rate-limits retries. */
+    private var lastRefreshAttempt = 0L
+
+    /**
+     * Loads the runtime-refreshed pool from disk, once per process.
+     *
+     * A cached pool WINS over the bundled one: it is strictly fresher, and the
+     * bundled pool is the thing that goes stale. Falls back silently — an empty
+     * or missing cache just leaves the BuildConfig pool in place.
+     */
+    private suspend fun ensureCacheLoaded() {
+        if (cacheLoaded) return
+        cacheLoaded = true
+        val cached = runCatching {
+            context.qbdlxCredentialsDataStore.data.first()[cachedPoolKey]
+        }.getOrNull()
+        if (!cached.isNullOrBlank()) poolRaw = cached
+    }
+
+    /**
+     * Refreshes the pool from the shared endpoint when — and only when — every
+     * token we have is dead.
+     *
+     * This is the exact failure it exists for: tokens rotate roughly monthly, a
+     * shipped build's baked pool eventually goes 100% dead, and lossless silently
+     * stops working until a new release. Refreshing on exhaustion self-heals that
+     * without a release.
+     *
+     * Deliberately NOT a periodic/background refresh: it runs only when we are
+     * already failing, so the happy path pays nothing and there is no hard
+     * runtime dependency on a hobbyist webhook. Attempts are rate-limited to one
+     * per [REFRESH_MIN_INTERVAL_MS] so a genuinely dead pool cannot spin.
+     */
+    private suspend fun refreshIfExhausted() {
+        if (pool().any { !isDead(it.first) }) return
+        val now = clock()
+        if (lastRefreshAttempt != 0L && now - lastRefreshAttempt < REFRESH_MIN_INTERVAL_MS) return
+        lastRefreshAttempt = now
+
+        // Instrumented deliberately, at Info so it survives a release build.
+        // Every previous credential bug here was diagnosed by logging the actual
+        // decision rather than reasoning about it, and a silent self-healing path
+        // is impossible to confirm from the outside.
+        val before = pool().size
+        val fetched = remotePool.fetch()?.trim().orEmpty()
+        if (fetched.isEmpty()) {
+            Log.i(TAG, "pool exhausted ($before token(s)); refresh returned nothing")
+            return
+        }
+        if (fetched == poolRaw) {
+            Log.i(TAG, "pool exhausted ($before token(s)); refresh returned the same pool")
+            return
+        }
+
+        poolRaw = fetched
+        Log.i(TAG, "pool refreshed: $before -> ${pool().size} token(s)")
+        // A fresh pool deserves a clean slate: dead flags describe the OLD tokens,
+        // and a re-added token should not inherit a cooldown from its last life.
+        deadUntil.clear()
+        activePrimary = null
+        runCatching {
+            context.qbdlxCredentialsDataStore.edit { it[cachedPoolKey] = fetched }
+        }
+    }
 
     /**
      * Token → epoch-ms until which it is considered dead. IN-MEMORY and
@@ -156,7 +229,11 @@ class QbdlxCredentialStore @Inject constructor(
      * Null when nothing is live.
      */
     suspend fun activeToken(): String? {
+        ensureCacheLoaded()
         pastedToken()?.let { if (!isDead(it)) return it }
+        // Only reached when the pasted token is absent/dead. Costs nothing unless
+        // the whole pool is exhausted, which is precisely when it can help.
+        refreshIfExhausted()
         pinnedToken()?.let { p ->
             if (!isDead(p) && pool().any { it.first == p }) return p
         }
@@ -218,7 +295,12 @@ class QbdlxCredentialStore @Inject constructor(
      * BuildConfig credentials as silent per-track no_results.
      */
     suspend fun allDead(): Boolean {
+        ensureCacheLoaded()
         val pasted = pastedToken()
+        // Lets a fully-dead build heal itself: allDead() drives the Settings
+        // badge AND gates the source off entirely, so refreshing here means
+        // qbdlx can come back without the user doing anything.
+        refreshIfExhausted()
         val poolTokens = pool().map { it.first }
         if (poolTokens.isEmpty() && pasted == null) return true // no credentials at all
         pasted?.let { if (!isDead(it)) return false }
@@ -232,6 +314,8 @@ class QbdlxCredentialStore @Inject constructor(
     }
 
     companion object {
+        private const val TAG = "QbdlxPool"
+
         const val MAX_REGION_TRIES = 3
 
         // Dead-token cooldown before a token is retried (circuit-breaker style).
@@ -243,5 +327,12 @@ class QbdlxCredentialStore @Inject constructor(
         // one doomed attempt per minute (negligible). Was 10min — far too long a
         // total blackout for a transient ("completely dead" until it aged out).
         const val DEAD_COOLDOWN_MS = 60_000L
+
+        /**
+         * Minimum gap between runtime pool-refresh ATTEMPTS. Only fires while
+         * the pool is fully exhausted, so this bounds a genuinely-dead pool to
+         * one webhook call every 15 minutes rather than one per resolve.
+         */
+        const val REFRESH_MIN_INTERVAL_MS = 15 * 60_000L
     }
 }

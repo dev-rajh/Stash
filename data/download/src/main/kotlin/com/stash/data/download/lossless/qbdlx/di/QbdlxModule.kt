@@ -6,8 +6,10 @@ import com.stash.core.data.discovery.HomeDiscoveryRepository
 import com.stash.data.download.lossless.qbdlx.HomeDiscoveryRepositoryImpl
 import com.stash.data.download.BuildConfig
 import com.stash.data.download.lossless.LosslessSource
+import com.stash.data.download.lossless.qbdlx.HttpQbdlxRemotePool
 import com.stash.data.download.lossless.qbdlx.QbdlxPoolCipher
 import com.stash.data.download.lossless.qbdlx.QbdlxPoolProvider
+import com.stash.data.download.lossless.qbdlx.QbdlxRemotePool
 import com.stash.data.download.lossless.qbdlx.QbdlxQobuzSource
 import com.stash.data.download.lossless.qbdlx.QbdlxSigner
 import com.stash.data.download.lossless.qbdlx.QobuzAlbumFetcherImpl
@@ -52,6 +54,15 @@ abstract class QbdlxModule {
     @Binds
     @Singleton
     abstract fun bindHomeDiscoveryRepository(impl: HomeDiscoveryRepositoryImpl): HomeDiscoveryRepository
+
+    /**
+     * The runtime pool source. This is the "broker-ready" seam the original
+     * design left open: swapping in a Worker-backed broker later means changing
+     * this binding and nothing else.
+     */
+    @Binds
+    @Singleton
+    abstract fun bindQbdlxRemotePool(impl: HttpQbdlxRemotePool): QbdlxRemotePool
 
     companion object {
         @Provides

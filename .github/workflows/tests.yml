@@ -64,7 +64,6 @@ jobs:
   # first failure masks everything behind it and you fix bugs one CI round-trip
   # at a time.
   unit-tests:
-    if: ${{ github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip test]') }}
     name: All module unit tests
     runs-on: ubuntu-latest
     # Job cap retained. It was added when a hung :core:media squatted a

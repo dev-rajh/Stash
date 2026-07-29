@@ -24,11 +24,15 @@ import org.robolectric.RobolectricTestRunner
 class QbdlxCredentialStoreTest {
 
     private val ctx = ApplicationProvider.getApplicationContext<Context>()
-    private fun store(pool: String) = QbdlxCredentialStore(ctx) { "" }.also { it.poolRaw = pool }
+    // Remote pool returns null by default: these tests cover the LOCAL pool
+    // behaviour, and a null fetch is the "endpoint unreachable" path, which must
+    // leave the existing pool untouched. Refresh behaviour has its own test class.
+    private fun store(pool: String, remote: QbdlxRemotePool = QbdlxRemotePool { null }) =
+        QbdlxCredentialStore(ctx, { "" }, remote).also { it.poolRaw = pool }
 
     @Before
     fun setUp() {
-        runBlocking { QbdlxCredentialStore(ctx) { "" }.clearPersistedForTest() }
+        runBlocking { QbdlxCredentialStore(ctx, { "" }, QbdlxRemotePool { null }).clearPersistedForTest() }
     }
 
     @Test
