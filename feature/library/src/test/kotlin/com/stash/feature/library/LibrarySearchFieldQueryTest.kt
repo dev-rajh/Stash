@@ -102,6 +102,7 @@ class LibrarySearchFieldQueryTest {
             streamingPreference = mock(),
             flacUpgradeEnqueuer = mock(),
             ytMusicApiClient = mock(),
+            losslessUpgrader = mock(),
         )
     }
 }
