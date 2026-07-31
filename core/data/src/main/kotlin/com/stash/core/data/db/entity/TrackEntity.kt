@@ -197,6 +197,20 @@ data class TrackEntity(
     val ytMusicSavedAt: Long? = null,
 
     /**
+     * Timestamp (epoch-millis) when Stash loved this track on Last.fm via the
+     * heart button. NULL = Stash never loved it.
+     *
+     * This is not merely deduplication. `track.unlove` is destructive to data
+     * Stash does not own: a user may have loved a track on Last.fm years before
+     * installing Stash, and un-hearting it here must not silently delete that.
+     * The un-love only fires when this column is set, i.e. only for loves Stash
+     * itself created — the same "never un-Like what Stash never Liked" contract
+     * the Spotify and YT columns enforce.
+     */
+    @ColumnInfo(name = "lastfm_loved_at")
+    val lastFmLovedAt: Long? = null,
+
+    /**
      * v0.9.13: timestamp (epoch-millis) when this track was added to
      * the local Stash "Liked Songs" playlist via the heart button.
      * NULL = not yet. Forward-only.

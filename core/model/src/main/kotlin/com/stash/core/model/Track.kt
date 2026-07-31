@@ -47,6 +47,12 @@ data class Track(
      * v0.9.13 — see TrackEntity.spotifySavedAt KDoc.
      */
     val spotifySavedAt: Long? = null,
+    /**
+     * When Stash loved this track on Last.fm. NULL = Stash never did, which is
+     * what stops an un-heart from deleting a love the user made independently.
+     * See TrackEntity.lastFmLovedAt.
+     */
+    val lastFmLovedAt: Long? = null,
     val ytMusicSavedAt: Long? = null,
     val stashLikedAt: Long? = null,
     /**

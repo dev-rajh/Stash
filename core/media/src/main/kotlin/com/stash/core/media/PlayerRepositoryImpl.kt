@@ -94,6 +94,7 @@ class PlayerRepositoryImpl @Inject constructor(
     private val trackDao: TrackDao,
     private val playbackResumer: PlaybackResumer,
     private val radioGenerator: com.stash.core.data.radio.RadioStationGenerator,
+    private val trackIdentityEvents: com.stash.core.data.sync.TrackIdentityEvents,
 ) : PlayerRepository {
 
     /**
@@ -173,6 +174,16 @@ class PlayerRepositoryImpl @Inject constructor(
         scope.launch {
             musicRepository.trackDeletions.collect { trackId ->
                 evictTrackFromQueue(trackId)
+            }
+        }
+
+        // A track's youtubeId was swapped (resync approval, wrong-match
+        // swap, OMV→ATV canonicalization) — any StreamUrl cached under
+        // this id was resolved against the OLD identity and must not be
+        // served for the new one.
+        scope.launch {
+            trackIdentityEvents.changes.collect { trackId ->
+                streamUrlCache.invalidate(trackId)
             }
         }
 
@@ -473,7 +484,12 @@ class PlayerRepositoryImpl @Inject constructor(
         }
         // startIndex maps through the playable filter by track id.
         val startId = tracks[safeStart].id
-        val startInPlayable = playable.indexOfFirst { it.id == startId }.coerceAtLeast(0)
+        val startInPlayable = playable.indexOfFirst { it.id == startId }
+        if (startInPlayable < 0) {
+            _userMessages.tryEmit("That song isn't available offline right now.")
+            // Don't fall back to track 0 — bail rather than silently substitute.
+            return
+        }
 
         currentQueueTracks = playable
         controller.setMediaItems(items, startInPlayable, startPositionMs)

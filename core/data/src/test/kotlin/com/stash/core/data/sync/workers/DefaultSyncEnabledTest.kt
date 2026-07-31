@@ -5,15 +5,23 @@ import com.stash.core.model.PlaylistType
 import org.junit.Test
 
 /**
- * Unit test for [defaultSyncEnabled] — the one-line decision that makes
- * newly-discovered algorithmic mixes surface immediately in Online mode
- * while everything else (and everything in Offline mode) stays opt-in.
+ * Unit test for [defaultSyncEnabled] — the one-line decision that keeps every
+ * newly-discovered playlist opt-in, in both modes.
  */
 class DefaultSyncEnabledTest {
 
+    /**
+     * #368: DAILY_MIX used to auto-enable in Online mode so mixes would surface
+     * immediately with no download. That was redundant — getAllVisible's
+     * streamable escape hatch surfaces a sync_enabled = 0 mix anyway (pinned by
+     * PlaylistDaoMixVisibilityTest) — and the flag's only other effects were
+     * making the mix download-eligible and making the orphan sweep spare its
+     * tracks. Mixes rotate, so each new one pulled a fresh batch of downloads
+     * nobody asked for.
+     */
     @Test
-    fun `daily mix enabled only in online mode`() {
-        assertThat(defaultSyncEnabled(PlaylistType.DAILY_MIX, online = true)).isTrue()
+    fun `daily mix is opt-in in both modes`() {
+        assertThat(defaultSyncEnabled(PlaylistType.DAILY_MIX, online = true)).isFalse()
         assertThat(defaultSyncEnabled(PlaylistType.DAILY_MIX, online = false)).isFalse()
     }
 

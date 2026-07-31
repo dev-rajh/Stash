@@ -1114,6 +1114,17 @@ interface TrackDao {
     suspend fun clearYtMusicSaved(trackId: Long)
 
     /**
+     * Records that Stash loved this track on Last.fm, so a later un-heart knows
+     * the love is ours to remove. See [com.stash.core.data.db.entity.TrackEntity.lastFmLovedAt].
+     */
+    @Query("UPDATE tracks SET lastfm_loved_at = :ts WHERE id = :trackId")
+    suspend fun markLastFmLoved(trackId: Long, ts: Long)
+
+    /** Clears the marker after a successful un-love so a re-heart re-fires it. */
+    @Query("UPDATE tracks SET lastfm_loved_at = NULL WHERE id = :trackId")
+    suspend fun clearLastFmLoved(trackId: Long)
+
+    /**
      * v0.9.13: Mark a track as added to the local Stash "Liked Songs"
      * playlist. Called by [StashLikedPlaylistRepository.add] after the
      * cross-ref is in place.

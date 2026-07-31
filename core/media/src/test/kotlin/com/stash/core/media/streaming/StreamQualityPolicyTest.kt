@@ -37,13 +37,33 @@ class StreamQualityPolicyTest {
         assertThat(policy.streamingTier()).isEqualTo(LosslessQualityTier.CD)
     }
 
-    @Test fun `save data forces CD on wifi`() = runTest {
+    /**
+     * Save Data must reach the LOSSY floor, not merely the lowest lossless tier.
+     *
+     * These asserted CD before, which is still FLAC (~28 MB / 4 min). That only
+     * saved bytes on the amz path where CD maps to 256 kbps AAC — and qbdlx is the
+     * only working lossless provider, so the setting saved a user on a metered plan
+     * essentially nothing. Qobuz format_id 5 (MP3 320, ~10 MB) is the real floor,
+     * verified live against the API.
+     */
+    @Test fun `save data drops to the lossy floor on wifi`() = runTest {
         setup(cellular = false, wifi = LosslessQualityTier.MAX, saveData = true)
-        assertThat(policy.streamingTier()).isEqualTo(LosslessQualityTier.CD)
+        assertThat(policy.streamingTier()).isEqualTo(LosslessQualityTier.DATA_SAVER)
     }
 
-    @Test fun `save data forces CD on cellular`() = runTest {
+    @Test fun `save data drops to the lossy floor on cellular`() = runTest {
         setup(cellular = true, cell = LosslessQualityTier.HI_RES, saveData = true)
-        assertThat(policy.streamingTier()).isEqualTo(LosslessQualityTier.CD)
+        assertThat(policy.streamingTier()).isEqualTo(LosslessQualityTier.DATA_SAVER)
+    }
+
+    /** The floor is what actually gets requested from Qobuz: 5 = MP3 320. */
+    @Test fun `the lossy floor requests qobuz format 5`() {
+        assertThat(LosslessQualityTier.DATA_SAVER.qobuzCode).isEqualTo(5)
+    }
+
+    /** Save Data overrides an explicit high tier rather than being averaged with it. */
+    @Test fun `save data overrides the user's chosen tier`() = runTest {
+        setup(cellular = false, wifi = LosslessQualityTier.MAX, saveData = true)
+        assertThat(policy.streamingTier()).isNotEqualTo(LosslessQualityTier.MAX)
     }
 }

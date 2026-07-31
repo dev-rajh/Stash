@@ -140,25 +140,45 @@ class StreamSourceRegistry @Inject constructor(
                 if (allowYtDlp && BuildConfig.QBDLX_CONFIGURED) {
                     add("qbdlx" to qbdlx::resolve)
                 }
-                // amz (Amazon Music) is the SLOWEST lossless source: its stream
-                // resolver decrypts the whole FLAC to a local cache file before
-                // returning a URL (tens of seconds), serialized behind a single
-                // captcha / per-asin lock. Foreground/next-up only, and skipped
-                // on cellular fast-start so it doesn't starve the YouTube
-                // fallback (observed on-device 2026-06-21: 52s to resolve one
-                // next-up).
-                if (allowYtDlp) {
-                    add("amz" to amz::resolve)
-                }
-                // ARCOD is an authenticated, per-user-account fallback. Foreground/
-                // next-up only, and only when the build bundles the private
-                // stream base — an unconfigured build can never get a match.
-                if (allowYtDlp && BuildConfig.ARCOD_CONFIGURED) {
-                    add("arcod" to arcod::resolve)
-                }
+                // PARKED 2026-07-30: amz and arcod are no longer working lossless
+                // providers — qbdlx is the only one. Leaving them in the chain cost
+                // every YouTube-fallback play a wait for two sources that cannot
+                // succeed. Measured on-device that day:
+                //
+                //   57.772  chain [qbdlx,amz,arcod,youtube]
+                //   58.148  qbdlx 403                     (0.4s)
+                //   59.391  amz attempted                 (1.2s)
+                //   02.991  youtube served                (arcod 3.6s)
+                //
+                // ~4.8s of the 5.2s resolve spent on dead sources, on top of the
+                // yt-dlp extraction itself. Removing them is a larger win than the
+                // extraction fix that preceded it.
+                //
+                // arcod was ALREADY parked on the download side
+                // (LosslessSourceRegistry.PARKED_SOURCE_IDS); this brings streaming
+                // in line. Re-enabling either is uncommenting its block — the
+                // resolvers, their force-toggles, and their tests all stay.
+                // add("amz" to amz::resolve)
+                // add("arcod" to arcod::resolve)
                 if (allowYouTube) add("youtube" to { t: TrackEntity -> youtube.resolve(t, allowYtDlp) })
             }
         }
+        // Which sources are actually IN PLAY for this resolve, and why.
+        //
+        // Added after a "works in debug, dead in release" hunt where qbdlx never
+        // appeared in the logs at all and there was no way to tell whether it had
+        // been tried and failed, or silently excluded before it ever ran. The two
+        // gates that can drop a source here are invisible from the outside:
+        // `allowYtDlp` (false for speculative background fill) and the
+        // compile-time BuildConfig flags. Info level so a release build says so.
+        Log.i(
+            TAG,
+            "chain for ${track.id}: [${resolvers.joinToString(",") { it.first }}] " +
+                "allowYouTube=$allowYouTube allowYtDlp=$allowYtDlp " +
+                "qbdlxConfigured=${BuildConfig.QBDLX_CONFIGURED} " +
+                "arcodConfigured=${BuildConfig.ARCOD_CONFIGURED}",
+        )
+
         for ((name, fn) in resolvers) {
             val result = runCatching { fn(track) }
                 .onFailure { e ->

@@ -105,7 +105,12 @@ class LikeCoordinator internal constructor(
 
         // Fast-path gate so a mirroring-off install never churns the queue.
         // The drain loop re-checks at fire time anyway (see class KDoc #3).
-        if (!likePreferences.mirrorLikesSpotifyNow() && !likePreferences.mirrorLikesYtMusicNow()) return
+        if (!likePreferences.mirrorLikesSpotifyNow() &&
+            !likePreferences.mirrorLikesYtMusicNow() &&
+            !likePreferences.mirrorLikesLastFmNow()
+        ) {
+            return
+        }
         queue.send(MirrorOp(trackId, liked))
     }
 
@@ -122,6 +127,7 @@ class LikeCoordinator internal constructor(
     private suspend fun process(op: MirrorOp) {
         val mirrorSpotify = likePreferences.mirrorLikesSpotifyNow()
         val mirrorYt = likePreferences.mirrorLikesYtMusicNow()
+        val mirrorLastFm = likePreferences.mirrorLikesLastFmNow()
         var track = trackDao.getById(op.trackId)?.toDomain() ?: return
 
         // Cross-platform backfill (LIKE only): a heart should reach BOTH
@@ -143,6 +149,9 @@ class LikeCoordinator internal constructor(
         val destinations = buildSet {
             if (mirrorSpotify && track.spotifyUri != null) add(Destination.SPOTIFY)
             if (mirrorYt && track.youtubeId != null) add(Destination.YT_MUSIC)
+            // No id precondition: Last.fm matches on artist + title, so unlike the
+            // other two there is nothing to resolve and nothing to skip for.
+            if (mirrorLastFm) add(Destination.LAST_FM)
         }
         if (destinations.isEmpty()) return
 

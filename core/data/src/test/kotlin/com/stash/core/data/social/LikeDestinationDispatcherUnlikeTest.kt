@@ -24,7 +24,11 @@ class LikeDestinationDispatcherUnlikeTest {
     private val ytMusic = mockk<YtMusicLibraryApiClient>(relaxed = true)
     private val stashLiked = mockk<StashLikedPlaylistRepository>(relaxed = true)
     private val trackDao = mockk<TrackDao>(relaxed = true)
-    private val dispatcher = LikeDestinationDispatcher(spotify, ytMusic, stashLiked, trackDao)
+    private val lastFm = mockk<com.stash.core.data.lastfm.LastFmApiClient>(relaxed = true)
+    private val lastFmSession =
+        mockk<com.stash.core.data.lastfm.LastFmSessionPreference>(relaxed = true)
+    private val dispatcher =
+        LikeDestinationDispatcher(spotify, ytMusic, stashLiked, trackDao, lastFm, lastFmSession)
 
     private fun track(
         spotifySavedAt: Long? = null,

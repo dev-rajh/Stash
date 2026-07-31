@@ -78,6 +78,7 @@ class PreviewUrlExtractor @Inject constructor(
     private val ytDlpManager: YtDlpManager,
     private val tokenManager: TokenManager,
     private val innerTubeClient: InnerTubeClient,
+    private val tailProbe: AudioUrlTailProbe,
 ) {
     /** Test-only injection point for race logic. Not wired in production. */
     internal interface TestHooks {
@@ -106,6 +107,35 @@ class PreviewUrlExtractor @Inject constructor(
         private const val YTDLP_TIMEOUT_MS = 60_000L
         private const val INNERTUBE_TIMEOUT_MS = 10_000L
         private const val FORMAT_SELECTOR = "251/250/bestaudio"
+
+        /**
+         * Selector for the pinned fast client. Audio-only itags first (251/250
+         * opus, 140 m4a); `best` last.
+         *
+         * That trailing `best` is a deliberate compromise, measured on-device
+         * 2026-07-29: android_vr currently advertises NO audio-only format, so an
+         * audio-only-only selector fails the attempt and the track falls to the
+         * default client at ~13s. With `best` it serves itag 18 — a combined 360p
+         * MP4, AAC ~96k — in ~2.8s. So the choice on this path is 2.8s at 96k AAC
+         * (plus discarded video bytes) versus 13s at 160k opus.
+         *
+         * Fast wins here because this is already the lossy last-resort path — it
+         * only runs when the track has no lossless source at all, and Now Playing
+         * badges it "via YT". A 13-second stall is the worse experience. Flip the
+         * order (drop `/best`) to trade back to quality.
+         */
+        private const val FAST_CLIENT_FORMAT_SELECTOR = "251/250/140/bestaudio/best"
+
+        /**
+         * Client pinned for the fast first attempt. Must be cookie-free (see
+         * [COOKIE_INCOMPATIBLE_CLIENTS]).
+         *
+         * Measured alternatives, same session: `ios` returns no usable URLs at all
+         * (YouTube's SABR-only experiment — yt-dlp #12482), and our own InnerTube
+         * request returns URLs that are PO-token-gated and 403 past the first
+         * megabyte, which [AudioUrlTailProbe] catches and rejects.
+         */
+        internal const val FAST_PLAYER_CLIENT = "android_vr"
 
         /**
          * Concurrency caps for the two extractors. Shared process-wide.
@@ -140,7 +170,15 @@ class PreviewUrlExtractor @Inject constructor(
          * Only formats with a direct `url` (not signatureCipher) are
          * considered; ciphered formats are skipped.
          */
-        internal fun selectBestAudioUrl(formats: List<JsonObject>): String? {
+        internal fun selectBestAudioUrl(formats: List<JsonObject>): String? =
+            selectBestAudioFormat(formats)?.get("url")?.jsonPrimitive?.content
+
+        /**
+         * Format-returning form of [selectBestAudioUrl]. Playback needs the whole
+         * format object, not just its `url`, so the caller can read
+         * `contentLength` and tail-probe it — see [AudioUrlTailProbe].
+         */
+        internal fun selectBestAudioFormat(formats: List<JsonObject>): JsonObject? {
             val audio = formats.filter { f ->
                 (f["mimeType"]?.jsonPrimitive?.content ?: "").startsWith("audio/") && f["url"] != null
             }
@@ -152,8 +190,35 @@ class PreviewUrlExtractor @Inject constructor(
                 val mime = best["mimeType"]?.jsonPrimitive?.content
                 Log.d(TAG, "InnerTube selected mime=$mime bitrate=${bitrate(best)} opusPreferred=${opusBest != null}")
             }
-            return best?.get("url")?.jsonPrimitive?.content
+            return best
         }
+
+        /**
+         * Clients yt-dlp will not run with a `--cookies` file. Passing both makes
+         * yt-dlp skip the client entirely ("Skipping client X since it does not
+         * support cookies") rather than dropping the cookies, so a pinned
+         * cookie-incompatible client silently becomes a wasted round-trip plus a
+         * fallback. These clients are unauthenticated by design — that is why
+         * they return PO-token-free URLs — so they lose nothing without cookies.
+         */
+        private val COOKIE_INCOMPATIBLE_CLIENTS = setOf("android_vr")
+
+        internal fun supportsCookies(playerClient: String?): Boolean =
+            playerClient == null || playerClient !in COOKIE_INCOMPATIBLE_CLIENTS
+
+        /**
+         * Per-client format selector. The default client set reliably serves
+         * Opus itag 251/250, so ask for it by number and get the best free audio.
+         *
+         * android_vr does NOT (as of 2026-07-29 it answers
+         * "Requested format is not available" for 251/250/bestaudio), so pinning
+         * those itags failed the entire attempt and sent every extraction to the
+         * slow default path. Ask it for the best audio it actually has, falling
+         * back to a combined stream only if it offers no audio-only format.
+         */
+        internal fun formatSelectorFor(playerClient: String?): String =
+            if (playerClient in COOKIE_INCOMPATIBLE_CLIENTS) FAST_CLIENT_FORMAT_SELECTOR
+            else FORMAT_SELECTOR
 
         /**
          * Test-only: exercises [race] directly without Android deps. Reuses
@@ -460,9 +525,20 @@ class PreviewUrlExtractor @Inject constructor(
 
             // Find the best audio format with a direct URL (not signatureCipher).
             // Prefers Opus 251/250 over AAC even at equal/lower bitrate.
-            val streamUrl = selectBestAudioUrl(adaptiveFormats.filterIsInstance<JsonObject>()) ?: run {
+            val bestFormat = selectBestAudioFormat(adaptiveFormats.filterIsInstance<JsonObject>()) ?: run {
                 Log.d(TAG, "InnerTube: no audio formats with direct URL for $videoId " +
                     "(${adaptiveFormats.size} total formats, all may be ciphered)")
+                return@withTimeout null
+            }
+            val streamUrl = bestFormat["url"]?.jsonPrimitive?.content ?: return@withTimeout null
+
+            // A PO-token-gated URL serves ~1MB then 403s. Handing one back is what
+            // killed playback on 2026-06-08 and cost us the fast lane; the probe is
+            // what makes this path safe for whole tracks rather than previews only.
+            // Rejection just defers to yt-dlp, exactly as a cipher miss does.
+            val contentLength = bestFormat["contentLength"]?.jsonPrimitive?.content?.toLongOrNull()
+            if (!tailProbe.servesFullFile(streamUrl, contentLength)) {
+                Log.i(TAG, "InnerTube: URL failed the tail probe for $videoId — deferring to yt-dlp")
                 return@withTimeout null
             }
 
@@ -488,11 +564,11 @@ class PreviewUrlExtractor @Inject constructor(
                 // to the default clients so coverage never regresses (the broad
                 // catalog reach is the whole reason YT fallback exists).
                 val fast = try {
-                    runYtDlp(videoId, playerClient = "android_vr")
+                    runYtDlp(videoId, playerClient = FAST_PLAYER_CLIENT)
                 } catch (ce: CancellationException) {
                     throw ce
                 } catch (e: Exception) {
-                    Log.d(TAG, "yt-dlp android_vr attempt failed for $videoId: ${e.message}")
+                    Log.d(TAG, "yt-dlp $FAST_PLAYER_CLIENT attempt failed for $videoId: ${e.message}")
                     null
                 }
                 fast ?: (runYtDlp(videoId, playerClient = null)
@@ -514,8 +590,13 @@ class PreviewUrlExtractor @Inject constructor(
             val url = "https://www.youtube.com/watch?v=$videoId"
 
             val request = YoutubeDLRequest(url).apply {
-                addOption("-f", FORMAT_SELECTOR)
+                addOption("-f", formatSelectorFor(playerClient))
                 addOption("--print", "urls")
+                // Diagnostic: which format the client actually served. android_vr
+                // stopped offering itag 251/250, so a selector that demands them
+                // fails the whole attempt — this makes the next such drift legible
+                // instead of a bare "Requested format is not available".
+                addOption("--print", "fmt=%(format_id)s acodec=%(acodec)s vcodec=%(vcodec)s")
                 addOption("--no-download")
                 playerClient?.let { addOption("--extractor-args", "youtube:player_client=$it") }
 
@@ -526,8 +607,19 @@ class PreviewUrlExtractor @Inject constructor(
                 }
             }
 
+            // Cookies and android_vr are mutually exclusive: yt-dlp refuses the
+            // client outright rather than dropping the cookies —
+            //   WARNING: [youtube] Skipping client "android_vr" since it does not
+            //   support cookies
+            // — so passing both silently disabled the whole fast path. Measured
+            // on-device 2026-07-29: 3.5s burned being refused, then 11.6s on the
+            // default multi-client path, ~15s per track, for every YouTube
+            // extraction since the two features met. android_vr needs no auth
+            // (that's why it's PO-token-free), so dropping cookies for that
+            // attempt costs nothing; the default-client fallback still sends them
+            // for age-gated / private content.
             val cookie = tokenManager.getYouTubeCookie()
-            if (cookie != null) {
+            if (cookie != null && supportsCookies(playerClient)) {
                 CookieFileWriter.write(cookie, cookieFile)
                 cookieFile.setReadable(false, false)
                 cookieFile.setReadable(true, true)
@@ -547,6 +639,14 @@ class PreviewUrlExtractor @Inject constructor(
             Log.d(TAG, "yt-dlp: exit=${response.exitCode} client=${playerClient ?: "default"} stdoutLen=${stdout.length}")
             if (stderr.isNotBlank()) {
                 Log.d(TAG, "yt-dlp stderr: ${stderr.take(500)}")
+            }
+
+            // The `fmt=` line comes from the diagnostic --print above. Logging it
+            // tells us whether a client served audio-only or fell back to a
+            // combined (video-carrying) stream, which matters for a music app's
+            // data use.
+            stdout.trim().lines().firstOrNull { it.startsWith("fmt=") }?.let {
+                Log.d(TAG, "yt-dlp: $it client=${playerClient ?: "default"}")
             }
 
             val streamUrl = stdout.trim().lines().firstOrNull { it.startsWith("http") }

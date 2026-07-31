@@ -19,8 +19,22 @@ class StreamQualityPolicy @Inject constructor(
     private val connectivity: ConnectivityMonitor,
     private val prefs: StreamingQualityPreferences,
 ) {
+    /**
+     * Save Data returns the lossy floor, not the lowest lossless tier.
+     *
+     * This used to return [LosslessQualityTier.CD], which is still FLAC — roughly
+     * 28 MB for a four-minute track. That saved real bytes only on the amz path
+     * (where CD maps to 256 kbps AAC), and qbdlx is the only working lossless
+     * provider, so the setting effectively did nothing: a user on a metered plan
+     * enabling "Save Data" still pulled full lossless.
+     *
+     * [LosslessQualityTier.DATA_SAVER] asks Qobuz for `format_id = 5` (MP3 320,
+     * ~10 MB), verified live against the API. Tracks with no lossless match fall to
+     * the YouTube path, which is already lossy (~5 MB), so the floor holds across
+     * both routes.
+     */
     suspend fun streamingTier(): LosslessQualityTier {
-        if (prefs.saveDataNow()) return LosslessQualityTier.CD
+        if (prefs.saveDataNow()) return LosslessQualityTier.DATA_SAVER
         return if (connectivity.isCellular()) prefs.cellularTierNow() else prefs.wifiTierNow()
     }
 }

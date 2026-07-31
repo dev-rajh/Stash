@@ -33,15 +33,24 @@ import dagger.assisted.AssistedInject
 import kotlinx.coroutines.flow.first
 
 /**
- * A newly-discovered playlist's initial [PlaylistEntity.syncEnabled].
- * Algorithmic mixes (DAILY_MIX) auto-enable in Online mode so they surface
- * immediately with no download. Everything else — and every playlist in
- * Offline mode — stays opt-in: the first Sync Now is a discovery pass that
- * downloads nothing unasked. [online] is the streaming-mode flag (on = stream,
- * don't download).
+ * A newly-discovered playlist's initial [PlaylistEntity.syncEnabled]: always
+ * opt-in. The first Sync Now is a discovery pass that downloads nothing unasked.
+ *
+ * DAILY_MIX used to auto-enable in Online mode "so they surface immediately with
+ * no download". That was redundant and load-bearing only for harm:
+ * [com.stash.core.data.db.dao.PlaylistDao.getAllVisible] already surfaces a
+ * `sync_enabled = 0` playlist whose tracks are streamable when
+ * `includeStreamable = true` (pinned by PlaylistDaoMixVisibilityTest), so mixes
+ * still appear on Home in Online mode without it. The flag's only other effects
+ * were making the mix download-eligible and making the orphan sweep spare its
+ * tracks — and because mixes rotate, every new one pulled a fresh batch of
+ * downloads the user never asked for (#368).
+ *
+ * Parameters are retained to document what was considered and to keep the
+ * decision testable.
  */
-internal fun defaultSyncEnabled(type: PlaylistType, online: Boolean): Boolean =
-    type == PlaylistType.DAILY_MIX && online
+@Suppress("UNUSED_PARAMETER")
+internal fun defaultSyncEnabled(type: PlaylistType, online: Boolean): Boolean = false
 
 /**
  * Whether a playlist's tracks should be enqueued for download during this sync.
@@ -50,6 +59,10 @@ internal fun defaultSyncEnabled(type: PlaylistType, online: Boolean): Boolean =
  * surface-only (stream-on-tap), so an auto-enabled mix never pulls bytes even
  * after the user switches to Offline and re-syncs.
  */
+// STASH_MIX is deliberately absent from this exclusion: a locally-generated mix
+// never arrives as a remote playlist snapshot, so it cannot reach this guard, and
+// ShouldEnqueueForDownloadTest pins that on purpose. Stash mixes are kept
+// download-ineligible where they ARE reachable — the DownloadQueueDao predicates.
 internal fun shouldEnqueueForDownload(type: PlaylistType, streamingMode: Boolean): Boolean =
     !streamingMode && type != PlaylistType.DAILY_MIX
 
@@ -107,6 +120,12 @@ class DiffWorker @AssistedInject constructor(
 
     override suspend fun doWork(): Result {
         val syncId = inputData.getLong(PlaylistFetchWorker.KEY_SYNC_ID, -1L)
+        // Defaults to false (fail-closed) — if the key is somehow missing, treat
+        // the inventory as unreliable and skip deactivation rather than risk
+        // hiding real playlists.
+        val youtubeInventoryComplete = inputData.getBoolean(
+            PlaylistFetchWorker.KEY_YOUTUBE_INVENTORY_COMPLETE, false,
+        )
         if (syncId == -1L) {
             syncStateManager.onError("DiffWorker: missing sync ID")
             return Result.failure()
@@ -203,7 +222,11 @@ class DiffWorker @AssistedInject constructor(
             val youtubeSourceIds = playlistSnapshots
                 .filter { it.source == MusicSource.YOUTUBE }
                 .map { it.sourcePlaylistId }
-            if (youtubeSourceIds.isNotEmpty()) {
+            // #post-343: mirrors the Spotify inventoryComplete guard — never treat a
+            // PARTIAL YouTube fetch (one failed sub-leg: home mixes / liked songs /
+            // a specific playlist's tracks) as "these other playlists are gone."
+            // A single flaky call used to hide the user's entire YouTube library.
+            if (youtubeSourceIds.isNotEmpty() && youtubeInventoryComplete) {
                 val hidden = playlistDao.deactivateMissingForSource(
                     source = MusicSource.YOUTUBE,
                     currentSourceIds = youtubeSourceIds,
@@ -211,6 +234,8 @@ class DiffWorker @AssistedInject constructor(
                 if (hidden > 0) {
                     Log.i(TAG, "Deactivated $hidden stale YouTube playlist(s)")
                 }
+            } else if (youtubeSourceIds.isNotEmpty()) {
+                Log.w(TAG, "Skipping stale-YouTube-playlist deactivation — this sync's inventory was incomplete")
             }
 
             // Clean up orphaned tracks whose playlists were refreshed and
@@ -562,7 +587,13 @@ class DiffWorker @AssistedInject constructor(
             addCrossRefIfNotSoftDeleted(localPlaylist.id, trackId, snapshot.position, existingCrossRefs, crossRefsToInsert)
         }
 
-        if (!streamingMode) {
+        // Mixes are surface-only: they stream on tap and must never pull bytes.
+        // shouldEnqueueForDownload has encoded that since it was written, and was
+        // unit-tested — but this site tested raw `!streamingMode`, so the guard
+        // was never consulted and every track of every rotating mix was queued in
+        // Offline mode (#368: "it downloads 6000+ from users playlists and
+        // Spotify mixes that I don't need").
+        if (shouldEnqueueForDownload(localPlaylist.type, streamingMode)) {
             for (batchTrack in newTracks) {
                 val trackId = checkNotNull(batchTrack.persistedId)
                 downloadEntries.add(

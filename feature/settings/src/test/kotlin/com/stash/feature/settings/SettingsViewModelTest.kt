@@ -80,6 +80,10 @@ class SettingsViewModelTest {
         homeDiscoveryPreference = mockk(relaxed = true),
         nowPlayingPreference = mockk(relaxed = true),
         homeSectionsPreference = mockk(relaxed = true),
+        listenBrainzPreference = mockk(relaxed = true),
+        listenBrainzApiClient = mockk(relaxed = true),
+        listenSinkCoordinator = mockk(relaxed = true),
+        listenSubmissionDao = mockk(relaxed = true),
     )
 
     @Test fun `onQbdlxEnabledChange persists via setQbdlxEnabled`() = runTest {

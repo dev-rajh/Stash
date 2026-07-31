@@ -100,12 +100,18 @@ interface DownloadQueueDao {
                 -- Replay Mix queued 90 tracks). Mirrors the is_active=1
                 -- guard in PlaylistDao.getSyncEnabledPlaylists.
                 AND p.is_active = 1
-                -- Stash Mixes are stream-only (v0.9.37 seam): their stubs
-                -- live in a sync_enabled playlist (so they stay visible
-                -- offline) but must NEVER be download-eligible. Require a
-                -- sync-enabled, NON-mix parent. A track also in Liked Songs
-                -- /a real playlist still matches via that membership.
-                AND p.type != 'STASH_MIX'
+                -- Mixes are stream-only (v0.9.37 seam): their stubs live in a
+                -- sync_enabled playlist (so they stay visible offline) but must
+                -- NEVER be download-eligible. Require a sync-enabled, NON-mix
+                -- parent. A track also in Liked Songs / a real playlist still
+                -- matches via that membership.
+                --
+                -- DAILY_MIX was missing here until #368: discovered Spotify/YT
+                -- mixes were auto-enabled, so this predicate treated their whole
+                -- contents as download-eligible and the blanket requeue in
+                -- TrackDownloadWorker pulled them — thousands of tracks the user
+                -- never toggled on, refreshed every time the mixes rotated.
+                AND p.type NOT IN ('STASH_MIX', 'DAILY_MIX')
           )
         ORDER BY (CASE WHEN dq.youtube_url IS NULL THEN 0 ELSE 1 END) ASC, dq.created_at ASC
     """)
@@ -144,12 +150,18 @@ interface DownloadQueueDao {
                 -- Replay Mix queued 90 tracks). Mirrors the is_active=1
                 -- guard in PlaylistDao.getSyncEnabledPlaylists.
                 AND p.is_active = 1
-                -- Stash Mixes are stream-only (v0.9.37 seam): their stubs
-                -- live in a sync_enabled playlist (so they stay visible
-                -- offline) but must NEVER be download-eligible. Require a
-                -- sync-enabled, NON-mix parent. A track also in Liked Songs
-                -- /a real playlist still matches via that membership.
-                AND p.type != 'STASH_MIX'
+                -- Mixes are stream-only (v0.9.37 seam): their stubs live in a
+                -- sync_enabled playlist (so they stay visible offline) but must
+                -- NEVER be download-eligible. Require a sync-enabled, NON-mix
+                -- parent. A track also in Liked Songs / a real playlist still
+                -- matches via that membership.
+                --
+                -- DAILY_MIX was missing here until #368: discovered Spotify/YT
+                -- mixes were auto-enabled, so this predicate treated their whole
+                -- contents as download-eligible and the blanket requeue in
+                -- TrackDownloadWorker pulled them — thousands of tracks the user
+                -- never toggled on, refreshed every time the mixes rotated.
+                AND p.type NOT IN ('STASH_MIX', 'DAILY_MIX')
           )
         ORDER BY (CASE WHEN dq.youtube_url IS NULL THEN 0 ELSE 1 END) ASC, dq.created_at ASC
     """)
@@ -411,6 +423,11 @@ interface DownloadQueueDao {
         """
         DELETE FROM download_queue
         WHERE status = 'PENDING'
+          -- Sync partition only. A NULL sync_id is a user's explicit "download
+          -- this" tap, which is the strongest statement of intent there is — this
+          -- sweep drains phantom rows a SYNC created, never a request the user
+          -- made. Without this, tapping Download on a track that lives only in a
+          -- mix silently produced nothing.
           AND sync_id IS NOT NULL
           AND track_id NOT IN (
             SELECT DISTINCT pt.track_id
@@ -419,6 +436,12 @@ interface DownloadQueueDao {
             WHERE p.sync_enabled = 1
               AND p.is_active = 1
               AND pt.removed_at IS NULL
+              -- Mix membership does not count as "wanted" (#368). This query had
+              -- no type filter at all, so an auto-enabled DAILY_MIX — or any
+              -- STASH_MIX, which is created with sync_enabled = true — spared its
+              -- tracks' queue rows and the drain then serviced them. Same rule as
+              -- getUnqueuedTrackIds and deleteOrphanedQueueEntries.
+              AND p.type NOT IN ('STASH_MIX', 'DAILY_MIX')
           )
         """
     )
@@ -497,12 +520,18 @@ interface DownloadQueueDao {
                 -- Replay Mix queued 90 tracks). Mirrors the is_active=1
                 -- guard in PlaylistDao.getSyncEnabledPlaylists.
                 AND p.is_active = 1
-                -- Stash Mixes are stream-only (v0.9.37 seam): their stubs
-                -- live in a sync_enabled playlist (so they stay visible
-                -- offline) but must NEVER be download-eligible. Require a
-                -- sync-enabled, NON-mix parent. A track also in Liked Songs
-                -- /a real playlist still matches via that membership.
-                AND p.type != 'STASH_MIX'
+                -- Mixes are stream-only (v0.9.37 seam): their stubs live in a
+                -- sync_enabled playlist (so they stay visible offline) but must
+                -- NEVER be download-eligible. Require a sync-enabled, NON-mix
+                -- parent. A track also in Liked Songs / a real playlist still
+                -- matches via that membership.
+                --
+                -- DAILY_MIX was missing here until #368: discovered Spotify/YT
+                -- mixes were auto-enabled, so this predicate treated their whole
+                -- contents as download-eligible and the blanket requeue in
+                -- TrackDownloadWorker pulled them — thousands of tracks the user
+                -- never toggled on, refreshed every time the mixes rotated.
+                AND p.type NOT IN ('STASH_MIX', 'DAILY_MIX')
           )
           AND t.id NOT IN (
               SELECT dq.track_id FROM download_queue dq
@@ -546,12 +575,18 @@ interface DownloadQueueDao {
                 -- Replay Mix queued 90 tracks). Mirrors the is_active=1
                 -- guard in PlaylistDao.getSyncEnabledPlaylists.
                 AND p.is_active = 1
-                -- Stash Mixes are stream-only (v0.9.37 seam): their stubs
-                -- live in a sync_enabled playlist (so they stay visible
-                -- offline) but must NEVER be download-eligible. Require a
-                -- sync-enabled, NON-mix parent. A track also in Liked Songs
-                -- /a real playlist still matches via that membership.
-                AND p.type != 'STASH_MIX'
+                -- Mixes are stream-only (v0.9.37 seam): their stubs live in a
+                -- sync_enabled playlist (so they stay visible offline) but must
+                -- NEVER be download-eligible. Require a sync-enabled, NON-mix
+                -- parent. A track also in Liked Songs / a real playlist still
+                -- matches via that membership.
+                --
+                -- DAILY_MIX was missing here until #368: discovered Spotify/YT
+                -- mixes were auto-enabled, so this predicate treated their whole
+                -- contents as download-eligible and the blanket requeue in
+                -- TrackDownloadWorker pulled them — thousands of tracks the user
+                -- never toggled on, refreshed every time the mixes rotated.
+                AND p.type NOT IN ('STASH_MIX', 'DAILY_MIX')
           )
           AND t.id NOT IN (
               SELECT dq.track_id FROM download_queue dq
@@ -584,6 +619,9 @@ interface DownloadQueueDao {
     @Query("""
         DELETE FROM download_queue
         WHERE status IN ('PENDING', 'FAILED', 'WAITING_FOR_LOSSLESS')
+          -- Sync partition only — see cancelDownloadsWithNoEnabledPlaylist. A
+          -- manual (sync_id NULL) row is a download the user asked for; sweeping
+          -- it is how search-tab downloads went missing on relaunch.
           AND sync_id IS NOT NULL
           AND track_id NOT IN (
               SELECT pt.track_id FROM playlist_tracks pt
@@ -596,11 +634,14 @@ interface DownloadQueueDao {
                 -- the invisible-download backlog (Replay Mix's 90 queued
                 -- tracks) the same way it drains mix-only orphans.
                 AND p.is_active = 1
-                -- A sync-enabled STASH_MIX membership does NOT spare a row:
-                -- mix tracks are stream-only, so a mix-only track's queue
-                -- entry is an orphan and gets swept. This drains the legacy
-                -- pre-v0.9.48 backlog of force-queued mix downloads.
-                AND p.type != 'STASH_MIX'
+                -- A sync-enabled mix membership does NOT spare a row: mix tracks
+                -- are stream-only, so a mix-only track's queue entry is an orphan
+                -- and gets swept. This drains the legacy pre-v0.9.48 backlog of
+                -- force-queued mix downloads, and — since DAILY_MIX joined the
+                -- exclusion in #368 — the accumulated backlog of auto-enabled
+                -- Spotify/YT mix downloads. That sweep is why #368 needs no
+                -- migration: the phantom rows drain on the next worker run.
+                AND p.type NOT IN ('STASH_MIX', 'DAILY_MIX')
           )
     """)
     suspend fun deleteOrphanedQueueEntries(): Int

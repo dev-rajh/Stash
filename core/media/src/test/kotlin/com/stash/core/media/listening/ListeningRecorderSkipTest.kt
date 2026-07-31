@@ -137,6 +137,7 @@ class ListeningRecorderSkipTest {
             listeningEventDao = listeningDao,
             trackSkipEventDao = skipDao,
             scrobbler = mockk(relaxed = true),
+            listenSinks = mockk(relaxed = true),
             scope = backgroundScope,
         )
         recorder.start()
@@ -172,6 +173,7 @@ class ListeningRecorderSkipTest {
             listeningEventDao = listeningDao,
             trackSkipEventDao = skipDao,
             scrobbler = mockk(relaxed = true),
+            listenSinks = mockk(relaxed = true),
             scope = backgroundScope,
         )
         recorder.start()
@@ -219,6 +221,7 @@ class ListeningRecorderSkipTest {
             listeningEventDao = listeningDao,
             trackSkipEventDao = skipDao,
             scrobbler = mockk(relaxed = true),
+            listenSinks = mockk(relaxed = true),
             scope = backgroundScope,
         )
         recorder.start()
@@ -256,6 +259,7 @@ class ListeningRecorderSkipTest {
             listeningEventDao = listeningDao,
             trackSkipEventDao = mockk(relaxed = true),
             scrobbler = mockk(relaxed = true),
+            listenSinks = mockk(relaxed = true),
             scope = backgroundScope,
         )
         recorder.start()
@@ -295,6 +299,7 @@ class ListeningRecorderSkipTest {
             listeningEventDao = listeningDao,
             trackSkipEventDao = mockk(relaxed = true),
             scrobbler = mockk(relaxed = true),
+            listenSinks = mockk(relaxed = true),
             scope = backgroundScope,
         )
         recorder.start()
@@ -331,6 +336,7 @@ class ListeningRecorderSkipTest {
             listeningEventDao = listeningDao,
             trackSkipEventDao = skipDao,
             scrobbler = mockk(relaxed = true),
+            listenSinks = mockk(relaxed = true),
             scope = backgroundScope,
         )
         recorder.start()
@@ -373,6 +379,7 @@ class ListeningRecorderSkipTest {
             listeningEventDao = listeningDao,
             trackSkipEventDao = mockk(relaxed = true),
             scrobbler = mockk(relaxed = true),
+            listenSinks = mockk(relaxed = true),
             scope = backgroundScope,
         )
 
@@ -403,6 +410,7 @@ class ListeningRecorderSkipTest {
             listeningEventDao = listeningDao,
             trackSkipEventDao = mockk(relaxed = true),
             scrobbler = mockk(relaxed = true),
+            listenSinks = mockk(relaxed = true),
             scope = recorderScope,
         )
         recorder.start()

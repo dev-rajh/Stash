@@ -53,9 +53,11 @@ class DownloadQueueDaoDeferredTest {
         trackDao.insert(track(id = 1L))
         trackDao.insert(track(id = 2L))
         trackDao.insert(track(id = 3L))
-        // DownloadQueueEntity has FK sync_id → sync_history.id. Seed a single
-        // sync_history row so fixtures can reference syncId = 1L.
-        syncHistoryDao.insert(SyncHistoryEntity(id = 1L))
+        // These fixtures are SYNC-created rows (sync_id set). The orphan sweeps
+        // only touch that partition — a manual sync_id NULL row is a download the
+        // user explicitly asked for and is spared. These tests are about status
+        // coverage (WAITING_FOR_LOSSLESS joining the sweep), not partitions.
+        db.syncHistoryDao().insert(SyncHistoryEntity(id = 1L))
     }
 
     @After
@@ -105,7 +107,7 @@ class DownloadQueueDaoDeferredTest {
 
     private fun entry(trackId: Long, status: DownloadStatus, syncId: Long? = null) = DownloadQueueEntity(
         trackId = trackId,
-        syncId = syncId,
+        syncId = 1L,
         status = status,
         searchQuery = "test query",
     )

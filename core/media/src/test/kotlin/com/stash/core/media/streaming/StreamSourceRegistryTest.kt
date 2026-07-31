@@ -118,18 +118,16 @@ class StreamSourceRegistryTest {
 
         registry().resolve(track, allowYouTube = true)
 
-        // The premise still holds without qbdlx (amz misses → youtube), so only
-        // the qbdlx leg is conditional. See the class KDoc on build-gated sources.
+        // Only the qbdlx leg is build-gated; the chain is qbdlx -> youtube now.
         if (BuildConfig.QBDLX_CONFIGURED) coVerify { qbdlx.resolve(track) }
-        coVerify { amz.resolve(track) }
         coVerify { youtube.resolve(track, allowYtDlp = true) }
-        coVerify(exactly = 0) { kennyy.resolve(any()) } // parked
-        coVerify(exactly = 0) { qobuz.resolve(any()) } // parked
-        // ARCOD is NOT parked — resolve() adds it whenever the build bundles the
-        // private stream base, and this is the one case that walks the WHOLE chain
-        // (nothing short-circuits before arcod), so "never called" only holds for
-        // an unconfigured build.
-        if (!BuildConfig.ARCOD_CONFIGURED) coVerify(exactly = 0) { arcod.resolve(any()) }
+        // All parked as of 2026-07-30 — qbdlx is the only lossless provider, so a
+        // miss goes straight to YouTube rather than waiting on sources that cannot
+        // succeed.
+        coVerify(exactly = 0) { amz.resolve(any()) }
+        coVerify(exactly = 0) { arcod.resolve(any()) }
+        coVerify(exactly = 0) { kennyy.resolve(any()) }
+        coVerify(exactly = 0) { qobuz.resolve(any()) }
     }
 
     /**
@@ -161,36 +159,45 @@ class StreamSourceRegistryTest {
     }
 
     /**
-     * amz sits AFTER qbdlx and BEFORE youtube: when qbdlx misses but amz has a
-     * match, amz serves it and youtube is never consulted. The parked proxies
-     * are skipped.
+     * amz and arcod are PARKED (2026-07-30). They are no longer working lossless
+     * providers, and leaving them in the chain made every YouTube-fallback play
+     * wait on sources that could not succeed — ~4.8s of a 5.2s resolve, measured
+     * on device.
+     *
+     * This asserts they are never consulted, which is the inverse of what this
+     * test checked before. The resolvers, their force-toggles and their own tests
+     * all remain, so re-enabling either is uncommenting one line in the registry.
      */
     @Test
-    fun resolve_amz_consulted_after_qbdlx_before_youtube() = runTest {
+    fun resolve_skips_parked_amz_and_arcod() = runTest {
         coEvery { streamingPreference.isForceAmzOnly() } returns false
         coEvery { streamingPreference.isForceYouTubeFallback() } returns false
         coEvery { qbdlx.resolve(any()) } returns null
+        // amz is stubbed to SUCCEED on purpose: if it were still in the chain it
+        // would serve this resolve, so "youtube served instead" is proof it was
+        // skipped rather than merely absent from the fixture.
         coEvery { amz.resolve(any()) } returns StreamUrl(
             url = "https://amz.squid.wtf/api/stream?asin=B00X",
             expiresAtMs = Long.MAX_VALUE,
             codec = "flac",
             origin = AmzStreamResolver.ORIGIN,
         )
+        coEvery { youtube.resolve(any(), any()) } returns StreamUrl(
+            url = "https://yt/x",
+            expiresAtMs = Long.MAX_VALUE,
+            codec = "aac",
+            origin = YouTubeStreamResolver.ORIGIN,
+        )
         val track = stubTrack()
 
         val result = registry().resolve(track, allowYouTube = true)
 
-        assertThat(result).isNotNull()
-        assertThat(result!!.origin).isEqualTo("amz")
-        // Only the qbdlx leg is build-gated; "amz serves it, youtube never runs"
-        // holds either way. Resolution short-circuits at amz, which precedes arcod
-        // in the chain, so the arcod assertion below is safe unconditionally.
+        assertThat(result!!.origin).isEqualTo(YouTubeStreamResolver.ORIGIN)
         if (BuildConfig.QBDLX_CONFIGURED) coVerify { qbdlx.resolve(track) }
-        coVerify { amz.resolve(track) }
-        coVerify(exactly = 0) { youtube.resolve(any(), any()) }
-        coVerify(exactly = 0) { kennyy.resolve(any()) } // parked
-        coVerify(exactly = 0) { qobuz.resolve(any()) } // parked
-        coVerify(exactly = 0) { arcod.resolve(any()) } // parked
+        coVerify(exactly = 0) { amz.resolve(any()) }
+        coVerify(exactly = 0) { arcod.resolve(any()) }
+        coVerify(exactly = 0) { kennyy.resolve(any()) }
+        coVerify(exactly = 0) { qobuz.resolve(any()) }
     }
 
     /**

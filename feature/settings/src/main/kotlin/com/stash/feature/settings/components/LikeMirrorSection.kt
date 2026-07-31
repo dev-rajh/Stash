@@ -34,10 +34,13 @@ import androidx.compose.ui.unit.dp
 fun LikeMirrorSection(
     spotifyEnabled: Boolean,
     ytMusicEnabled: Boolean,
+    lastFmEnabled: Boolean,
     spotifyConnected: Boolean,
     ytConnected: Boolean,
+    lastFmConnected: Boolean,
     onSpotifyToggle: (Boolean) -> Unit,
     onYtMusicToggle: (Boolean) -> Unit,
+    onLastFmToggle: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Column(modifier = modifier.fillMaxWidth()) {
@@ -71,6 +74,15 @@ fun LikeMirrorSection(
             enabled = ytMusicEnabled,
             connectHint = "Connect YouTube Music first",
             onToggle = onYtMusicToggle,
+        )
+        // Last.fm loved tracks. Stash already imports your Last.fm loves; this is
+        // the direction that was missing, so a heart here reaches Last.fm too.
+        MirrorToggleRow(
+            label = "Last.fm",
+            connected = lastFmConnected,
+            enabled = lastFmEnabled,
+            connectHint = "Connect Last.fm first",
+            onToggle = onLastFmToggle,
         )
     }
 }

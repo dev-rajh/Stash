@@ -58,9 +58,11 @@ class LikeCoordinatorTest {
         youtubeId = youtubeId,
     )
 
-    private fun mirrorPrefs(spotify: Boolean, yt: Boolean) {
+    /** Last.fm defaults off so existing cases keep asserting exactly what they did. */
+    private fun mirrorPrefs(spotify: Boolean, yt: Boolean, lastFm: Boolean = false) {
         coEvery { prefs.mirrorLikesSpotifyNow() } returns spotify
         coEvery { prefs.mirrorLikesYtMusicNow() } returns yt
+        coEvery { prefs.mirrorLikesLastFmNow() } returns lastFm
     }
 
     private fun kotlinx.coroutines.test.TestScope.coordinator(minGapMs: Long = 1_500L) =
@@ -248,4 +250,22 @@ class LikeCoordinatorTest {
 
         coVerify(exactly = 0) { dispatcher.like(any(), any()) }
     }
+    /**
+     * Last.fm needs no platform id — it matches on artist + title — so it must fire
+     * for a track that has neither a spotifyUri nor a youtubeId. The other two
+     * destinations skip such a track entirely, so a naive "add if id present" would
+     * have silently dropped every Last.fm love.
+     */
+    @Test fun `Last_fm mirrors even when the track has no platform ids`() = runTest {
+        mirrorPrefs(spotify = false, yt = false, lastFm = true)
+        coEvery { trackDao.getById(7L) } returns entity(spotifyUri = null, youtubeId = null)
+        coEvery { dispatcher.like(any(), any()) } returns
+            mapOf(Destination.LAST_FM to Result.success(Unit))
+
+        coordinator().setLiked(7L, liked = true)
+        runCurrent()
+
+        coVerify { dispatcher.like(any(), setOf(Destination.LAST_FM)) }
+    }
+
 }

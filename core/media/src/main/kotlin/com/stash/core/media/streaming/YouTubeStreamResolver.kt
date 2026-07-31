@@ -25,21 +25,26 @@ import kotlinx.coroutines.withTimeoutOrNull
  * YouTube has effectively complete coverage; falling back to it
  * trades lossless fidelity for actually playing the music.
  *
- * **Playback uses yt-dlp; fill uses InnerTube (`allowYtDlp`).** The
- * InnerTube fast lane returns audio URLs in ~200 ms, but on-device
- * verification (2026-06-08) proved those URLs are PO-token-gated to a
- * ~1 MB preview and return HTTP 403 on any full-file request — they
- * cannot stream a whole track. So:
- *  - `allowYtDlp = true` (foreground tap, 1-ahead prefetch, and the
- *    [RefreshingDataSourceFactory] 403-refresh) resolves via yt-dlp
- *    DIRECT ([PreviewUrlExtractor.extractStreamUrlViaYtDlp]) — ~11 s but
- *    yields a full-range-playable URL.
- *  - `allowYtDlp = false` (background queue-fill) still uses the cheap
- *    InnerTube fast lane to seed the deep in-order timeline without
- *    touching the serialized cap-1 yt-dlp slot. Those placeholder URLs
- *    never actually stream audio: prefetch swaps the next-up to a yt-dlp
- *    URL before it plays, and any placeholder skipped-to before the swap
- *    403s and is transparently re-resolved via yt-dlp by the refresh seam.
+ * **Both lanes race ([PreviewUrlExtractor.extractStreamUrl]).** InnerTube
+ * returns audio URLs in ~200-500 ms against yt-dlp's ~3.6-15 s, and the
+ * first success wins.
+ *
+ * History worth keeping: on-device verification (2026-06-08) found the
+ * InnerTube URLs of the day were PO-token-gated to a ~1 MB preview and
+ * 403'd on any full-file request, so playback was pinned to yt-dlp
+ * DIRECT. That pinning outlived its cause. yt-dlp itself now extracts by
+ * pinning `player_client=android_vr` — the same client [InnerTubeClient]
+ * can query directly — so the slow lane was spawning Python to make one
+ * HTTPS request. Playback races again, and
+ * [com.stash.data.download.preview.AudioUrlTailProbe] is what makes that
+ * safe: a URL that can't serve its final byte is rejected before it
+ * reaches ExoPlayer and falls through to yt-dlp.
+ *
+ * `allowYtDlp = false` remains the fast-lane-only contract (InnerTube
+ * alone, never the serialized cap-1 yt-dlp slot) for speculative callers.
+ * No caller passes it today; the background queue-fill that did was
+ * refactored away.
+ *
  * The whole call is bound to [YT_RESOLVE_TIMEOUT_MS]; on timeout we treat
  * the track as unavailable.
  *
@@ -97,11 +102,17 @@ class YouTubeStreamResolver @Inject constructor(
             // placeholders never actually stream audio (prefetch / 403-refresh
             // swap them to a yt-dlp URL before playback).
             runCatching {
-                if (allowYtDlp) {
-                    urlExtractor.extractStreamUrlViaYtDlp(videoId)
-                } else {
-                    urlExtractor.extractStreamUrl(videoId, allowYtDlp = false)
-                }
+                // Race both lanes: InnerTube (ANDROID_VR, ~200-500ms) against
+                // yt-dlp, first success wins. This used to call
+                // extractStreamUrlViaYtDlp directly whenever allowYtDlp was true —
+                // i.e. on every real playback — which put a Python process spawn on
+                // the critical path of every YouTube-fallback tap and left the race
+                // as dead code, since nothing passes allowYtDlp = false any more.
+                //
+                // Racing again is safe now that AudioUrlTailProbe rejects the
+                // PO-token-gated URLs that forced the 2026-06-08 bypass: a gated
+                // URL never reaches ExoPlayer, it just falls through to yt-dlp.
+                urlExtractor.extractStreamUrl(videoId, allowYtDlp = allowYtDlp)
             }
                 .onFailure { t ->
                     // CancellationException MUST propagate — swallowing it would

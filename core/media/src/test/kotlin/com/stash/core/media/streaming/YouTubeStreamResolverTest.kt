@@ -32,8 +32,8 @@ class YouTubeStreamResolverTest {
         // Mock throws CE synchronously — simulates an in-flight
         // extraction call hitting a suspension point that observes
         // parent cancellation. resolve() defaults allowYtDlp=true, which
-        // now routes through the yt-dlp-direct path.
-        coEvery { extractor.extractStreamUrlViaYtDlp(any()) } throws
+        // routes through the raced extractStreamUrl path.
+        coEvery { extractor.extractStreamUrl(any(), any()) } throws
             CancellationException("outer cancel")
         val resolver = YouTubeStreamResolver(extractor, ytMusic)
         val track = trackWithYoutubeId("abc123")
@@ -92,22 +92,30 @@ class YouTubeStreamResolverTest {
     }
 
     /**
-     * Core of the 2026-06-08 fix: playback resolution (allowYtDlp=true)
-     * must go straight to yt-dlp — the InnerTube/iOS fast lane returns
-     * PO-token-gated URLs that 403 past ~1MB and can't stream a full track.
+     * Playback resolution (allowYtDlp=true) races both lanes rather than going
+     * straight to yt-dlp.
+     *
+     * This test previously pinned the opposite, as "the core of the 2026-06-08
+     * fix": the InnerTube URLs of that day were PO-token-gated, 403'd past ~1MB
+     * and could not stream a full track, so playback was pinned to yt-dlp direct.
+     * That pinning outlived its cause — yt-dlp now extracts by pinning
+     * `player_client=android_vr`, a client InnerTubeClient can query itself, so
+     * the slow lane was spawning Python to make one HTTPS request. Racing is safe
+     * again because AudioUrlTailProbe rejects a URL that can't serve its final
+     * byte, so a gated URL falls through to yt-dlp instead of reaching ExoPlayer.
      */
     @Test
-    fun resolve_allowYtDlpTrue_routesToYtDlpDirect_notInnerTubeRace() = runTest {
+    fun resolve_allowYtDlpTrue_racesBothLanes_notYtDlpDirect() = runTest {
         val extractor: PreviewUrlExtractor = mockk()
         val ytMusic: YTMusicApiClient = mockk()
-        coEvery { extractor.extractStreamUrlViaYtDlp("abc123") } returns "https://ytdlp/abc123"
+        coEvery { extractor.extractStreamUrl("abc123", true) } returns "https://raced/abc123"
         val resolver = YouTubeStreamResolver(extractor, ytMusic)
 
         val result = resolver.resolve(trackWithYoutubeId("abc123"), allowYtDlp = true)
 
-        assertThat(result?.url).isEqualTo("https://ytdlp/abc123")
-        coVerify(exactly = 1) { extractor.extractStreamUrlViaYtDlp("abc123") }
-        coVerify(exactly = 0) { extractor.extractStreamUrl(any(), any()) }
+        assertThat(result?.url).isEqualTo("https://raced/abc123")
+        coVerify(exactly = 1) { extractor.extractStreamUrl("abc123", true) }
+        coVerify(exactly = 0) { extractor.extractStreamUrlViaYtDlp(any()) }
     }
 
     /**

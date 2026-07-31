@@ -98,6 +98,9 @@ class StashApplication : Application(), Configuration.Provider {
     lateinit var autoSaveScrobbler: AutoSaveScrobbler
 
     @Inject
+    lateinit var listenSinkCoordinator: com.stash.core.data.listen.ListenSinkCoordinator
+
+    @Inject
     lateinit var stashMixRecipeDao: StashMixRecipeDao
 
     @Inject
@@ -422,6 +425,8 @@ class StashApplication : Application(), Configuration.Provider {
         lastFmScrobbler.start()
         youTubeHistoryScrobbler.start()
         autoSaveScrobbler.start()
+        // Generic listen sinks (ListenBrainz). No-ops until connected.
+        listenSinkCoordinator.start()
 
         // Wire the three reactive triggers (cookie change /
         // lastKnownBadCookie transition / rate-limiter circuit-reset

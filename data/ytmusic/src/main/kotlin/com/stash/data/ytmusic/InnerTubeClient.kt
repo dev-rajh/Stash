@@ -50,7 +50,18 @@ enum class InnerTubeVariant(
     /** Whether unauthenticated requests should append the YT-Music API key. */
     val sendsApiKey: Boolean = false,
 ) {
-    /** Oculus Quest 3 VR browser. Historically returns unciphered URLs. */
+    /**
+     * Oculus Quest 3 VR browser. Returns direct, unciphered audio URLs with no PO
+     * token — this is the client yt-dlp pins as `player_client=android_vr`, and
+     * every URL Stash currently streams through the YouTube fallback comes from
+     * it (via a ~3.6 s Python process instead of this ~200 ms request).
+     *
+     * Must be queried on the `www.youtube.com` host, keyless, with the numeric
+     * client-name header (`28`). It was dropped from [AUDIO_VARIANT_ORDER] once
+     * as "no longer unciphered" while still pointing at the YT-Music host with a
+     * blank client-name id — the identical misconfiguration that made IOS look
+     * broken until it was moved to www/keyless/numeric.
+     */
     ANDROID_VR(
         clientName = "ANDROID_VR",
         clientVersion = "1.60.19",
@@ -64,6 +75,9 @@ enum class InnerTubeVariant(
             "osVersion" to "12L",
             "androidSdkVersion" to 32,
         ),
+        apiBase = "https://www.youtube.com/youtubei/v1",
+        clientNameId = "28",
+        sendsApiKey = false,
     ),
 
     /**
@@ -149,13 +163,25 @@ class InnerTubeClient @Inject constructor(
         private const val API_KEY = "AIzaSyC9XL3ZjWddXya6X74dJoCTL-WEYFDNX30"
 
         /**
-         * Ordered attempt list for audio URL extraction. Only the IOS client
-         * reliably returns direct (unciphered) URLs on the fast lane, so it is
-         * the sole entry; ANDROID_VR / WEB_REMIX no longer serve the unciphered
-         * shape and only added latency. `internal` so variant tests can assert
-         * the order without widening to the public API.
+         * Ordered attempt list for audio URL extraction.
+         *
+         * ANDROID_VR first: it is the client yt-dlp pins to get a direct itag-251
+         * URL with no PO token, no m3u8 manifest and no QuickJS signature solve.
+         * It was removed from this list once as "no longer unciphered", but it had
+         * never been given the www-host / numeric-client-id / keyless transport
+         * that the same change applied to IOS — so it was judged on a
+         * misconfiguration rather than on merit.
+         *
+         * IOS second: the proven fast lane, kept as the backstop.
+         *
+         * WEB_REMIX is deliberately absent: it wraps URLs in `signatureCipher`,
+         * which forces the yt-dlp path anyway, so trying it only adds latency.
+         *
+         * `internal` so variant tests can assert the order without widening to
+         * the public API.
          */
         internal val AUDIO_VARIANT_ORDER = listOf(
+            InnerTubeVariant.ANDROID_VR,
             InnerTubeVariant.IOS,
         )
     }

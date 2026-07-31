@@ -11,6 +11,7 @@ import com.stash.core.data.db.dao.DiscoveryQueueDao
 import com.stash.core.data.db.dao.DownloadQueueDao
 import com.stash.core.data.db.dao.FlacUpgradeQueueDao
 import com.stash.core.data.db.dao.LastFmCacheDao
+import com.stash.core.data.db.dao.ListenSubmissionDao
 import com.stash.core.data.db.dao.ListeningEventDao
 import com.stash.core.data.db.dao.LyricsDao
 import com.stash.core.data.db.dao.PlaylistDao
@@ -28,6 +29,7 @@ import com.stash.core.data.db.entity.DiscoveryQueueEntity
 import com.stash.core.data.db.entity.DownloadQueueEntity
 import com.stash.core.data.db.entity.FlacUpgradeQueueEntity
 import com.stash.core.data.db.entity.LastFmCacheEntity
+import com.stash.core.data.db.entity.ListenSubmissionEntity
 import com.stash.core.data.db.entity.ListeningEventEntity
 import com.stash.core.data.db.entity.LyricsEntity
 import com.stash.core.data.db.entity.PlaylistEntity
@@ -81,8 +83,9 @@ import com.stash.core.data.db.entity.TrackTagEntity
         LastFmCacheEntity::class,
         SpotifyResolutionEntity::class,
         FlacUpgradeQueueEntity::class,
+        ListenSubmissionEntity::class,
     ],
-    version = 36,
+    version = 38,
     exportSchema = true,
 )
 @TypeConverters(Converters::class)
@@ -121,6 +124,8 @@ abstract class StashDatabase : RoomDatabase() {
     abstract fun spotifyResolutionDao(): SpotifyResolutionDao
 
     abstract fun flacUpgradeQueueDao(): FlacUpgradeQueueDao
+
+    abstract fun listenSubmissionDao(): ListenSubmissionDao
 
 
     companion object {
@@ -915,6 +920,58 @@ abstract class StashDatabase : RoomDatabase() {
         val MIGRATION_35_36 = object : Migration(35, 36) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE playlists ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
+        /**
+         * v36 → v37: add `listen_submissions`, per-destination scrobble state.
+         *
+         * Replaces the pattern where each new scrobble destination took its own
+         * boolean column plus its own DAO triplet — `scrobbled` for Last.fm, then
+         * `yt_scrobbled` for YouTube history. ListenBrainz would have been the
+         * third of each; now a destination is a `target` string and needs no
+         * schema change.
+         *
+         * Purely additive. The existing columns are untouched and Last.fm /
+         * YouTube history keep using them, so this migration cannot disturb
+         * scrobbling that already works. Moving those two onto this table is a
+         * separate change, made after the new path has proven itself.
+         */
+        /**
+         * v37 → v38: add `tracks.lastfm_loved_at` so Last.fm joins Spotify and
+         * YouTube as a like-mirror destination.
+         *
+         * Not just deduplication: `track.unlove` destroys data Stash does not own.
+         * A user may have loved a track on Last.fm long before installing Stash,
+         * and un-hearting it here must not silently delete that. Only a love this
+         * column records — one Stash created — is ever un-loved.
+         */
+        val MIGRATION_37_38 = object : Migration(37, 38) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE tracks ADD COLUMN lastfm_loved_at INTEGER DEFAULT NULL")
+            }
+        }
+
+        val MIGRATION_36_37 = object : Migration(36, 37) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `listen_submissions` (
+                        `event_id` INTEGER NOT NULL,
+                        `target` TEXT NOT NULL,
+                        `state` TEXT NOT NULL,
+                        `attempts` INTEGER NOT NULL,
+                        `updated_at` INTEGER NOT NULL,
+                        PRIMARY KEY(`event_id`, `target`),
+                        FOREIGN KEY(`event_id`) REFERENCES `listening_events`(`id`)
+                            ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_listen_submissions_target_state` " +
+                        "ON `listen_submissions` (`target`, `state`)",
+                )
             }
         }
     }

@@ -28,7 +28,24 @@ class InnerTubeVariantTest {
         assertTrue(web.sendsApiKey)
     }
 
-    @Test fun audio_variant_order_is_ios_only() {
-        assertEquals(listOf(InnerTubeVariant.IOS), InnerTubeClient.AUDIO_VARIANT_ORDER)
+    /**
+     * ANDROID_VR is the client yt-dlp pins (`player_client=android_vr`) to get a
+     * direct itag-251 URL with no PO token, no m3u8 manifest and no signature
+     * solve — the URLs this app streams today are android_vr URLs, minted the
+     * slow way through a Python process. It must be tried on the www host as
+     * client 28, the same transport shape that made IOS work.
+     */
+    @Test fun android_vr_uses_www_host_as_client_28_keyless() {
+        val vr = InnerTubeVariant.ANDROID_VR
+        assertEquals("https://www.youtube.com/youtubei/v1", vr.apiBase)
+        assertEquals("28", vr.clientNameId)
+        assertFalse(vr.sendsApiKey)
+    }
+
+    @Test fun audio_variant_order_tries_android_vr_then_ios() {
+        assertEquals(
+            listOf(InnerTubeVariant.ANDROID_VR, InnerTubeVariant.IOS),
+            InnerTubeClient.AUDIO_VARIANT_ORDER,
+        )
     }
 }

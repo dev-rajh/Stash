@@ -292,8 +292,12 @@ fun SettingsAudioQualityScreen(
                                 Spacer(modifier = Modifier.height(8.dp))
                                 SettingsToggleRow(
                                     title = "Save Data",
-                                    subtitle = "Request the lowest streaming quality on every network " +
-                                        "to minimize data. Not every source honors this yet.",
+                                    // States the actual trade rather than hedging. The old copy
+                                    // ("Not every source honors this yet") was describing a
+                                    // limitation that no longer exists — and understated a worse
+                                    // one, since Save Data used to still stream lossless.
+                                    subtitle = "Stream at 320 kbps instead of lossless — roughly " +
+                                        "10 MB per track instead of 28 MB. Downloads are unaffected.",
                                     checked = uiState.streamingSaveData,
                                     onCheckedChange = viewModel::onStreamingSaveDataChanged,
                                     titleTrailing = { BetaPill() },

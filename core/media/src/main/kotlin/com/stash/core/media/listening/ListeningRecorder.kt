@@ -4,6 +4,8 @@ import android.util.Log
 import androidx.annotation.VisibleForTesting
 import com.stash.core.data.db.dao.ListeningEventDao
 import com.stash.core.data.lastfm.LastFmScrobbler
+import com.stash.core.data.listen.Listen
+import com.stash.core.data.listen.ListenSinkCoordinator
 import com.stash.core.data.db.dao.TrackSkipEventDao
 import com.stash.core.data.db.entity.ListeningEventEntity
 import com.stash.core.data.db.entity.TrackSkipEventEntity
@@ -53,6 +55,7 @@ class ListeningRecorder @VisibleForTesting internal constructor(
     private val listeningEventDao: ListeningEventDao,
     private val trackSkipEventDao: TrackSkipEventDao,
     private val scrobbler: LastFmScrobbler,
+    private val listenSinks: ListenSinkCoordinator,
     private val scope: CoroutineScope,
 ) {
 
@@ -63,12 +66,14 @@ class ListeningRecorder @VisibleForTesting internal constructor(
         listeningEventDao: ListeningEventDao,
         trackSkipEventDao: TrackSkipEventDao,
         scrobbler: LastFmScrobbler,
+        listenSinks: ListenSinkCoordinator,
     ) : this(
         playerRepository = playerRepository,
         musicRepository = musicRepository,
         listeningEventDao = listeningEventDao,
         trackSkipEventDao = trackSkipEventDao,
         scrobbler = scrobbler,
+        listenSinks = listenSinks,
         scope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
     )
 
@@ -213,6 +218,9 @@ class ListeningRecorder @VisibleForTesting internal constructor(
                             completedAt = completedAt,
                         ),
                     )
+                    // Push the new listen to the generic sinks (ListenBrainz).
+                    // Last.fm has its own Flow-driven scrobbler and needs no nudge.
+                    listenSinks.onListenRecorded()
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
@@ -232,6 +240,18 @@ class ListeningRecorder @VisibleForTesting internal constructor(
                 artist = track.artist,
                 track = track.title,
                 album = track.album.takeIf { it.isNotBlank() },
+            )
+            listenSinks.notifyNowPlaying(
+                Listen(
+                    // No listening_events row exists yet — a now-playing listen
+                    // has not finished, so it has no id and never needs one.
+                    eventId = 0L,
+                    artist = track.artist,
+                    title = track.title,
+                    album = track.album.takeIf { it.isNotBlank() },
+                    durationMs = track.durationMs,
+                    startedAtMs = sessionStart,
+                ),
             )
         }
     }

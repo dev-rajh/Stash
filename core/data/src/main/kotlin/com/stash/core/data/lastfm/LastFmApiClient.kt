@@ -125,6 +125,40 @@ suspend fun updateNowPlaying(
     Unit
 }
 
+    /**
+     * Marks a track loved (or un-loved) on Last.fm.
+     *
+     * Closes a long-standing asymmetry: Stash already *reads* loved tracks via
+     * [getUserLovedTracks] to seed Liked Songs, and mirrors likes out to Spotify
+     * and YouTube — but never wrote them back to Last.fm, so a user who liked a
+     * track in Stash saw it appear everywhere except the service whose loved
+     * tracks they had imported in the first place.
+     *
+     * Best-effort like the now-playing ping: a failure returns a failed [Result]
+     * for the caller to log, and the local like is unaffected. A love is not
+     * queued for retry — unlike a scrobble, it is idempotent and re-derivable from
+     * local state, so the mirror can simply be re-applied later rather than
+     * needing durable per-track submission bookkeeping.
+     *
+     * @param loved false to call `track.unlove` instead.
+     */
+    suspend fun setLoved(
+        sessionKey: String,
+        artist: String,
+        track: String,
+        loved: Boolean,
+    ): Result<Unit> = runCatching {
+        val params = sortedMapOf(
+            "method" to if (loved) "track.love" else "track.unlove",
+            "api_key" to credentials.apiKey,
+            "sk" to sessionKey,
+            "artist" to artist,
+            "track" to track,
+        )
+        signedPost(params)
+        Unit
+    }
+
     // ── Public (API-key-only) read endpoints ──────────────────────────
 
     /**

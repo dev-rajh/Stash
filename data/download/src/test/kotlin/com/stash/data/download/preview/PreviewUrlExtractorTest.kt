@@ -149,6 +149,9 @@ class PreviewUrlExtractorTest {
             ytDlpManager = mockk(relaxed = true),
             tokenManager = mockk(relaxed = true),
             innerTubeClient = mockk(relaxed = true),
+            // Never consulted: these tests drive the TestHooks SPI, which
+            // bypasses extractViaInnerTube where the probe lives.
+            tailProbe = mockk(relaxed = true),
         )
         val hooks = object : PreviewUrlExtractor.TestHooks {
             override suspend fun innerTubeExtract(id: String): String? {
@@ -179,6 +182,9 @@ class PreviewUrlExtractorTest {
             ytDlpManager = mockk(relaxed = true),
             tokenManager = mockk(relaxed = true),
             innerTubeClient = mockk(relaxed = true),
+            // Never consulted: these tests drive the TestHooks SPI, which
+            // bypasses extractViaInnerTube where the probe lives.
+            tailProbe = mockk(relaxed = true),
         )
         val hooks = object : PreviewUrlExtractor.TestHooks {
             override suspend fun innerTubeExtract(id: String): String? = gate.await()
@@ -208,6 +214,9 @@ class PreviewUrlExtractorTest {
             ytDlpManager = mockk(relaxed = true),
             tokenManager = mockk(relaxed = true),
             innerTubeClient = mockk(relaxed = true),
+            // Never consulted: these tests drive the TestHooks SPI, which
+            // bypasses extractViaInnerTube where the probe lives.
+            tailProbe = mockk(relaxed = true),
         )
         val hooks = object : PreviewUrlExtractor.TestHooks {
             override suspend fun innerTubeExtract(id: String): String? = null
@@ -249,6 +258,9 @@ class PreviewUrlExtractorTest {
             ytDlpManager = mockk(relaxed = true),
             tokenManager = mockk(relaxed = true),
             innerTubeClient = mockk(relaxed = true),
+            // Never consulted: these tests drive the TestHooks SPI, which
+            // bypasses extractViaInnerTube where the probe lives.
+            tailProbe = mockk(relaxed = true),
         )
         val invocations = AtomicInteger(0)
         val hooks = object : PreviewUrlExtractor.TestHooks {
@@ -274,6 +286,9 @@ class PreviewUrlExtractorTest {
             ytDlpManager = mockk(relaxed = true),
             tokenManager = mockk(relaxed = true),
             innerTubeClient = mockk(relaxed = true),
+            // Never consulted: these tests drive the TestHooks SPI, which
+            // bypasses extractViaInnerTube where the probe lives.
+            tailProbe = mockk(relaxed = true),
         )
         val ytdlpCalled = AtomicBoolean(false)
         val hooks = object : PreviewUrlExtractor.TestHooks {
@@ -299,6 +314,9 @@ class PreviewUrlExtractorTest {
             ytDlpManager = mockk(relaxed = true),
             tokenManager = mockk(relaxed = true),
             innerTubeClient = mockk(relaxed = true),
+            // Never consulted: these tests drive the TestHooks SPI, which
+            // bypasses extractViaInnerTube where the probe lives.
+            tailProbe = mockk(relaxed = true),
         )
         val ytdlpCalled = AtomicBoolean(false)
         val hooks = object : PreviewUrlExtractor.TestHooks {
@@ -322,6 +340,9 @@ class PreviewUrlExtractorTest {
             ytDlpManager = mockk(relaxed = true),
             tokenManager = mockk(relaxed = true),
             innerTubeClient = mockk(relaxed = true),
+            // Never consulted: these tests drive the TestHooks SPI, which
+            // bypasses extractViaInnerTube where the probe lives.
+            tailProbe = mockk(relaxed = true),
         )
         val hooks = object : PreviewUrlExtractor.TestHooks {
             override suspend fun innerTubeExtract(id: String): String? = null
@@ -343,6 +364,9 @@ class PreviewUrlExtractorTest {
             ytDlpManager = mockk(relaxed = true),
             tokenManager = mockk(relaxed = true),
             innerTubeClient = mockk(relaxed = true),
+            // Never consulted: these tests drive the TestHooks SPI, which
+            // bypasses extractViaInnerTube where the probe lives.
+            tailProbe = mockk(relaxed = true),
         )
         val innerTubeCalled = AtomicBoolean(false)
         val hooks = object : PreviewUrlExtractor.TestHooks {
@@ -370,6 +394,9 @@ class PreviewUrlExtractorTest {
             ytDlpManager = mockk(relaxed = true),
             tokenManager = mockk(relaxed = true),
             innerTubeClient = mockk(relaxed = true),
+            // Never consulted: these tests drive the TestHooks SPI, which
+            // bypasses extractViaInnerTube where the probe lives.
+            tailProbe = mockk(relaxed = true),
         )
         val ytMax = AtomicInteger(0); val ytCur = AtomicInteger(0)
         val hooks = object : PreviewUrlExtractor.TestHooks {
@@ -392,6 +419,9 @@ class PreviewUrlExtractorTest {
             ytDlpManager = mockk(relaxed = true),
             tokenManager = mockk(relaxed = true),
             innerTubeClient = mockk(relaxed = true),
+            // Never consulted: these tests drive the TestHooks SPI, which
+            // bypasses extractViaInnerTube where the probe lives.
+            tailProbe = mockk(relaxed = true),
         )
         val invocations = AtomicInteger(0)
         val hooks = object : PreviewUrlExtractor.TestHooks {

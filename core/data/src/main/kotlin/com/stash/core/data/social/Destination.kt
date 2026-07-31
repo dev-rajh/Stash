@@ -14,4 +14,12 @@ enum class Destination {
 
     /** YouTube Music Liked Music — requires connected YT account + youtubeId. */
     YT_MUSIC,
+
+    /**
+     * Last.fm loved tracks — requires a connected Last.fm session. Unlike the
+     * others this needs no platform id on the track: Last.fm matches on
+     * artist + title, so any track with metadata is eligible and no
+     * cross-platform id resolution step is required.
+     */
+    LAST_FM,
 }

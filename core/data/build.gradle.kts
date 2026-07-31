@@ -65,5 +65,9 @@ dependencies {
     testImplementation("org.mockito:mockito-core:5.11.0")
     testImplementation("org.mockito.kotlin:mockito-kotlin:5.4.0")
     testImplementation("io.mockk:mockk:1.13.8")
+    // ListenBrainzApiClientTest asserts the wire payload — listened_at in seconds
+    // rather than millis, and listen_type single vs import. Both are accepted
+    // silently when wrong, so they need an HTTP-level test, not a mocked client.
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
 }

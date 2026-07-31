@@ -198,16 +198,38 @@ fun SettingsAccountsScreen(
             }
         }
 
+        // ListenBrainz sits beside Last.fm: same job, and users commonly run both
+        // rather than choosing between them.
+        val listenBrainzState by viewModel.listenBrainzState.collectAsStateWithLifecycle()
+        val listenBrainzToken by viewModel.listenBrainzTokenInput.collectAsStateWithLifecycle()
+        val listenBrainzDraining by viewModel.isListenBrainzDraining.collectAsStateWithLifecycle()
+        GlassCard {
+            com.stash.feature.settings.components.ListenBrainzSection(
+                state = listenBrainzState,
+                tokenInput = listenBrainzToken,
+                onTokenInputChange = viewModel::onListenBrainzTokenChange,
+                onConnect = viewModel::onConnectListenBrainz,
+                onDisconnect = viewModel::onDisconnectListenBrainz,
+                onNowPlayingToggle = viewModel::onListenBrainzNowPlayingToggle,
+                onSyncNow = viewModel::onSyncListenBrainzNow,
+                isDraining = listenBrainzDraining,
+            )
+        }
+
         SettingsSectionLabel("Sync your likes", beta = true)
 
         GlassCard {
+            val mirrorLastFm by viewModel.mirrorLikesLastFm.collectAsStateWithLifecycle()
             com.stash.feature.settings.components.LikeMirrorSection(
                 spotifyEnabled = uiState.mirrorLikesSpotify,
                 ytMusicEnabled = uiState.mirrorLikesYtMusic,
+                lastFmEnabled = mirrorLastFm,
                 spotifyConnected = uiState.spotifyAuthState is com.stash.core.auth.model.AuthState.Connected,
                 ytConnected = uiState.youTubeAuthState is com.stash.core.auth.model.AuthState.Connected,
+                lastFmConnected = uiState.lastFmState is LastFmAuthState.Connected,
                 onSpotifyToggle = { viewModel.onMirrorToggleRequested(com.stash.core.data.social.Destination.SPOTIFY, it) },
                 onYtMusicToggle = { viewModel.onMirrorToggleRequested(com.stash.core.data.social.Destination.YT_MUSIC, it) },
+                onLastFmToggle = { viewModel.onMirrorToggleRequested(com.stash.core.data.social.Destination.LAST_FM, it) },
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
             )
         }

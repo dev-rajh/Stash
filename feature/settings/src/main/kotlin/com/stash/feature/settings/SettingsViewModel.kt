@@ -111,7 +111,135 @@ class SettingsViewModel @Inject constructor(
     private val streamingPreference: com.stash.core.data.prefs.StreamingPreference,
     private val crossfadePreference: com.stash.core.data.prefs.CrossfadePreference,
     private val databaseBackupManager: DatabaseBackupManager,
+    private val listenBrainzPreference: com.stash.core.data.listenbrainz.ListenBrainzPreference,
+    private val listenBrainzApiClient: com.stash.core.data.listenbrainz.ListenBrainzApiClient,
+    private val listenSinkCoordinator: com.stash.core.data.listen.ListenSinkCoordinator,
+    private val listenSubmissionDao: com.stash.core.data.db.dao.ListenSubmissionDao,
 ) : ViewModel() {
+
+    // ── ListenBrainz ────────────────────────────────────────────────────────
+    //
+    // Exposed as standalone StateFlows rather than threaded through the big
+    // combine(...) below, which addresses its sources by numeric index
+    // (values[27], values[28]…). Adding four more inputs there would shift every
+    // later index — a silent, type-correct way to hand the UI the wrong value.
+
+    private val _listenBrainzTokenInput = MutableStateFlow("")
+    val listenBrainzTokenInput: StateFlow<String> = _listenBrainzTokenInput
+
+    /** Transient states the persisted prefs cannot express (validating / failed). */
+    private val _listenBrainzTransient =
+        MutableStateFlow<com.stash.feature.settings.components.ListenBrainzState?>(null)
+
+    private val _isListenBrainzDraining = MutableStateFlow(false)
+    val isListenBrainzDraining: StateFlow<Boolean> = _isListenBrainzDraining
+
+    /**
+     * Outstanding listens for ListenBrainz. Depends on the connect cutoff, so it
+     * has to be resolved per emission — see ListenSubmissionDao.pendingCountFor.
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private val listenBrainzPending: kotlinx.coroutines.flow.Flow<Int> =
+        listenBrainzPreference.connectedAtMs.flatMapLatest { since ->
+            if (since == null) {
+                kotlinx.coroutines.flow.flowOf(0)
+            } else {
+                listenSubmissionDao.pendingCountFor(
+                    com.stash.core.data.listenbrainz.ListenBrainzSink.TARGET_ID,
+                    sinceMs = since,
+                )
+            }
+        }
+
+    val listenBrainzState: StateFlow<com.stash.feature.settings.components.ListenBrainzState> =
+        combine(
+            listenBrainzPreference.token,
+            listenBrainzPreference.nowPlayingEnabled,
+            listenBrainzPending,
+            _listenBrainzTransient,
+        ) { token, nowPlaying, pending, transient ->
+            when {
+                // A transient state only survives while disconnected; once a token
+                // is stored the real state wins so a stale error cannot mask a
+                // working connection.
+                token == null && transient != null -> transient
+                token == null -> com.stash.feature.settings.components.ListenBrainzState.Disconnected
+                else -> com.stash.feature.settings.components.ListenBrainzState.Connected(
+                    pendingListens = pending,
+                    nowPlayingEnabled = nowPlaying,
+                )
+            }
+        }.stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5_000),
+            initialValue = com.stash.feature.settings.components.ListenBrainzState.Disconnected,
+        )
+
+    val mirrorLikesLastFm: StateFlow<Boolean> =
+        likePreferences.mirrorLikesLastFm.stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5_000),
+            initialValue = false,
+        )
+
+    fun onListenBrainzTokenChange(value: String) {
+        _listenBrainzTokenInput.value = value
+        // Clear a previous failure as soon as the user edits — leaving the error up
+        // while they retype reads as if the new token already failed.
+        if (_listenBrainzTransient.value is com.stash.feature.settings.components.ListenBrainzState.Error) {
+            _listenBrainzTransient.value = null
+        }
+    }
+
+    /**
+     * Validates before storing, so a mistyped token fails here rather than being
+     * saved and silently never scrobbling.
+     */
+    fun onConnectListenBrainz() {
+        val token = _listenBrainzTokenInput.value.trim()
+        if (token.isBlank()) return
+        _listenBrainzTransient.value = com.stash.feature.settings.components.ListenBrainzState.Validating
+        viewModelScope.launch {
+            val valid = runCatching { listenBrainzApiClient.validateToken(token) }.getOrDefault(false)
+            if (valid) {
+                listenBrainzPreference.connect(token, System.currentTimeMillis())
+                _listenBrainzTokenInput.value = ""
+                _listenBrainzTransient.value = null
+            } else {
+                _listenBrainzTransient.value =
+                    com.stash.feature.settings.components.ListenBrainzState.Error(
+                        "That token didn't work. Copy it again from listenbrainz.org/profile.",
+                    )
+            }
+        }
+    }
+
+    fun onDisconnectListenBrainz() {
+        viewModelScope.launch {
+            listenBrainzPreference.clear()
+            // Drop this destination's submission rows too, so reconnecting later
+            // starts clean instead of inheriting stale attempt counts.
+            runCatching {
+                listenSubmissionDao.clearTarget(
+                    com.stash.core.data.listenbrainz.ListenBrainzSink.TARGET_ID,
+                )
+            }
+            _listenBrainzTransient.value = null
+        }
+    }
+
+    fun onListenBrainzNowPlayingToggle(enabled: Boolean) {
+        viewModelScope.launch { listenBrainzPreference.setNowPlayingEnabled(enabled) }
+    }
+
+    fun onSyncListenBrainzNow() {
+        if (_isListenBrainzDraining.value) return
+        _isListenBrainzDraining.value = true
+        viewModelScope.launch {
+            runCatching { listenSinkCoordinator.drainAll() }
+            _isListenBrainzDraining.value = false
+        }
+    }
 
     /**
      * Live streaming-mode flag (Online vs Offline). Mirrors what the
@@ -1280,6 +1408,7 @@ class SettingsViewModel @Inject constructor(
         when (destination) {
             Destination.SPOTIFY -> likePreferences.setMirrorLikesSpotify(value)
             Destination.YT_MUSIC -> likePreferences.setMirrorLikesYtMusic(value)
+            Destination.LAST_FM -> likePreferences.setMirrorLikesLastFm(value)
             Destination.STASH -> Unit // local likes are always on; not a mirror target
         }
     }
