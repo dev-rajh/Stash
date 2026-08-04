@@ -69,5 +69,6 @@ class LibraryViewModelSourceFilterTest {
         streamingPreference = mock { on { enabled } doReturn flowOf(false) },
         flacUpgradeEnqueuer = mock(),
         ytMusicApiClient = mock(),
+        losslessUpgrader = mock(),
     )
 }

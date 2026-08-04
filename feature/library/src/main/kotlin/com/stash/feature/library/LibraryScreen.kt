@@ -10,7 +10,6 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -25,20 +24,26 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Sort
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Album
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.DownloadDone
@@ -59,13 +64,10 @@ import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.PlaylistPlay
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Shuffle
-import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.outlined.PushPin
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -76,18 +78,17 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
-import androidx.compose.foundation.pager.HorizontalPager
-import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -177,6 +178,7 @@ fun LibraryScreen(
             searchQuery = searchQuery,
             importState = importState,
             onShuffleLibrary = viewModel::shuffleLibrary,
+            onPlayLibrary = viewModel::playLibrary,
             onTabSelected = viewModel::selectTab,
             onSearchQueryChanged = viewModel::setSearchQuery,
             onSortOrderChanged = viewModel::setSortOrder,
@@ -201,6 +203,7 @@ fun LibraryScreen(
             onStartImport = viewModel::startLocalImport,
             onCancelImport = viewModel::cancelLocalImport,
             onDismissImport = viewModel::dismissLocalImport,
+            onUpgradeDownloadedNonFlac = viewModel::upgradeDownloadedNonFlacToFlac,
             selection = selection,
             // Single-track sheet actions reuse the batch VM methods with
             // one-element lists — no separate single-track VM surface.
@@ -423,6 +426,7 @@ private fun LibraryContent(
     searchQuery: String,
     importState: com.stash.data.download.files.LocalImportState,
     onShuffleLibrary: () -> Unit,
+    onPlayLibrary: () -> Unit,
     onTabSelected: (LibraryTab) -> Unit,
     onSearchQueryChanged: (String) -> Unit,
     onSortOrderChanged: (SortOrder) -> Unit,
@@ -447,6 +451,7 @@ private fun LibraryContent(
     onStartImport: (List<Uri>) -> Unit,
     onCancelImport: () -> Unit,
     onDismissImport: () -> Unit,
+    onUpgradeDownloadedNonFlac: () -> Unit,
     selection: SelectionState,
     userPlaylists: List<com.stash.core.ui.components.PlaylistInfo>,
     onSaveToPlaylist: (trackId: Long, playlistId: Long) -> Unit,
@@ -476,34 +481,14 @@ private fun LibraryContent(
         ) { uris: List<Uri>? ->
             if (!uris.isNullOrEmpty()) onStartImport(uris)
         }
-        var searchOpen by remember { mutableStateOf(false) }
-        var sortFilterOpen by remember { mutableStateOf(false) }
+        val libraryHeader: @Composable () -> Unit = {}
 
-        // Recent-downloads rail — the scrolling leading content of the Songs
-        // landing (scrolls away while the compact header + category chips stay
-        // pinned). The old purple shuffle hero is gone — it duplicated the
-        // header's shuffle action.
-        // Songs landing only — noise above the other grids. Handed ONLY to
-        // TracksTab: with the pager, neighbor pages compose mid-swipe, so
-        // gating on activeTab here would flash the rail onto other pages.
-        val libraryHeader: @Composable () -> Unit = {
-            Column {
-                if (state.recentlyAdded.isNotEmpty()) {
-                    RecentlyDownloadedRail(
-                        tracks = state.recentlyAdded.take(12),
-                        onTrackClick = onTrackClick,
-                    )
-                }
-                Spacer(Modifier.height(4.dp))
-            }
-        }
-
-        // Compact header: title + Import (+), search, and sort/filter icons —
-        // replaces the old heading row + the six stacked control bars.
+        // Heading: title + Import. Play/Shuffle/Search/Sort/Filter live in the
+        // compact controls row below instead of stacking into this header.
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(start = 20.dp, end = 8.dp),
+                .padding(horizontal = 20.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
@@ -512,20 +497,28 @@ private fun LibraryContent(
                 color = MaterialTheme.colorScheme.onBackground,
                 modifier = Modifier.weight(1f),
             )
-            // Shuffle stays in the always-visible header so it's reachable even
-            // once the hero has scrolled away.
-            IconButton(onClick = onShuffleLibrary) {
-                Icon(Icons.Filled.Shuffle, contentDescription = "Shuffle library", tint = MaterialTheme.colorScheme.primary)
+            // Filled-tonal button (icon + label) instead of a ghost IconButton
+            // — users were missing the plain '+' too easily.
+            androidx.compose.material3.FilledTonalButton(
+                onClick = { importPicker.launch(arrayOf("audio/*")) },
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                    horizontal = 14.dp,
+                    vertical = 8.dp,
+                ),
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Add,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = "Import",
+                    style = MaterialTheme.typography.labelLarge,
+                )
             }
-            IconButton(onClick = { importPicker.launch(arrayOf("audio/*")) }) {
-                Icon(Icons.Filled.Add, contentDescription = "Import tracks")
-            }
-            IconButton(onClick = { searchOpen = !searchOpen }) {
-                Icon(Icons.Filled.Search, contentDescription = "Search library")
-            }
-            IconButton(onClick = { sortFilterOpen = true }) {
-                Icon(Icons.Filled.Tune, contentDescription = "Sort and filter")
-            }
+
+
         }
 
         // -- Import progress strip (only when Running / Done / Error) --
@@ -535,16 +528,43 @@ private fun LibraryContent(
             onDismiss = onDismissImport,
         )
 
-        // -- Inline search (toggled by the header 🔍) — no permanent bar --
-        if (searchOpen) {
-            GlassSearchBar(
-                query = searchQuery,
-                onQueryChange = onSearchQueryChanged,
-                modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
+        Spacer(modifier = Modifier.height(12.dp))
+
+        // -- Compact controls row: play + shuffle on the left, expanding
+        // search + sort menu + filter menu on the right. Replaces the old
+        // stack (shuffle card → search bar → sort chips → filter chips) that
+        // ate roughly half the screen before any content showed.
+        LibraryControlsBar(
+            // Bound directly, NOT state.searchQuery — see the field-facing
+            // searchQuery param doc above (off-Main pipeline drops keystrokes).
+            searchQuery = searchQuery,
+            activeSort = state.sortOrder,
+            activeFilter = state.sourceFilter,
+            onPlayLibrary = onPlayLibrary,
+            onShuffleLibrary = onShuffleLibrary,
+            onSearchQueryChanged = onSearchQueryChanged,
+            onSortSelected = onSortOrderChanged,
+            onFilterSelected = onSourceFilterChanged,
+            modifier = Modifier.padding(horizontal = 20.dp),
+        )
+
+        if (
+            state.activeTab == LibraryTab.TRACKS &&
+            state.sourceFilter == SourceFilter.NON_FLAC &&
+            (state.downloadedNonFlacCount > 0 || state.flacUpgrade.isRunning)
+        ) {
+            Spacer(modifier = Modifier.height(10.dp))
+            BulkFlacUpgradeStrip(
+                count = state.downloadedNonFlacCount,
+                progress = state.flacUpgrade,
+                onUpgrade = onUpgradeDownloadedNonFlac,
+                modifier = Modifier.padding(horizontal = 20.dp),
             )
         }
 
-        // -- Category chips (pinned): Songs / Playlists / Artists / Albums --
+        Spacer(modifier = Modifier.height(12.dp))
+
+        // -- Category chips: Songs / Liked / Playlists / Artists / Albums --
         val chipTabs = listOf(
             "Songs" to LibraryTab.TRACKS,
             "Liked" to LibraryTab.LIKED,
@@ -561,18 +581,6 @@ private fun LibraryContent(
 
         Spacer(modifier = Modifier.height(4.dp))
 
-        // -- Sort & filter sheet (toggled by the header ⇅) --
-        if (sortFilterOpen) {
-            LibrarySortFilterSheet(
-                sortOrder = state.sortOrder,
-                sourceFilter = state.sourceFilter,
-                showDuration = state.activeTab == LibraryTab.TRACKS,
-                onSortSelected = onSortOrderChanged,
-                onFilterSelected = onSourceFilterChanged,
-                onDismiss = { sortFilterOpen = false },
-            )
-        }
-
         // -- Content area --
         val anyServiceConnected = state.spotifyConnected || state.youTubeConnected
         if (state.isLoading) {
@@ -585,123 +593,139 @@ private fun LibraryContent(
                 CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
             }
         } else {
-            // Swiping left/right moves between the category pages too — the
-            // pager and the chip row drive the same activeTab state: a chip
-            // tap animates the pager here; a settled swipe pushes the tab
-            // back to the ViewModel (both sync no-ops when already aligned).
-            val pagerState = rememberPagerState(
-                initialPage = chipTabs.indexOfFirst { it.second == state.activeTab }.coerceAtLeast(0),
-            ) { chipTabs.size }
-            LaunchedEffect(state.activeTab) {
-                val idx = chipTabs.indexOfFirst { it.second == state.activeTab }
-                if (idx >= 0 && idx != pagerState.currentPage) pagerState.animateScrollToPage(idx)
-            }
-            LaunchedEffect(pagerState) {
-                snapshotFlow { pagerState.settledPage }.collect { page ->
-                    onTabSelected(chipTabs[page].second)
-                }
-            }
-            HorizontalPager(
-                state = pagerState,
-                modifier = Modifier.fillMaxSize(),
-            ) { page ->
-                when (chipTabs[page].second) {
-                    LibraryTab.PLAYLISTS -> PlaylistsGrid(
-                        playlists = state.playlists,
-                        anyServiceConnected = anyServiceConnected,
-                        onPlayPlaylist = onPlayPlaylist,
-                        onAddPlaylistToQueue = onAddPlaylistToQueue,
-                        onRemovePlaylist = onRemovePlaylist,
-                        onDeletePlaylist = onDeletePlaylist,
-                        onSetPlaylistImage = onSetPlaylistImage,
-                        onRemovePlaylistImage = onRemovePlaylistImage,
-                        onTogglePlaylistPinned = onTogglePlaylistPinned,
-                        header = {},
-                    )
-                    LibraryTab.TRACKS -> TracksTab(
-                        tracks = state.tracks,
-                        currentlyPlayingTrackId = state.currentlyPlayingTrackId,
-                        onTrackClick = onTrackClick,
-                        onPlayNext = onPlayNext,
-                        onAddToQueue = onAddToQueue,
-                        onDeleteTrack = onDeleteTrack,
-                        onViewAlbum = onViewAlbum,
-                        anyServiceConnected = anyServiceConnected,
-                        selection = selection,
-                        userPlaylists = userPlaylists,
-                        onSaveToPlaylist = onSaveToPlaylist,
-                        onCreatePlaylistWithTrack = onCreatePlaylistWithTrack,
-                        onDownloadTrack = onDownloadTrack,
-                        onRemoveDownloadTrack = onRemoveDownloadTrack,
-                        header = libraryHeader,
-                    )
-                    LibraryTab.LIKED -> LikedTab(
-                        tracks = likedTracks,
-                        filter = likedFilter,
-                        sources = likedSources,
-                        currentlyPlayingTrackId = state.currentlyPlayingTrackId,
-                        onSelectSource = onSelectLikedSource,
-                        onTrackClick = onPlayLikedTrack,
-                        onPlayNext = onPlayNext,
-                        onAddToQueue = onAddToQueue,
-                        onDeleteTrack = onDeleteTrack,
-                        selection = selection,
-                        userPlaylists = userPlaylists,
-                        onSaveToPlaylist = onSaveToPlaylist,
-                        onCreatePlaylistWithTrack = onCreatePlaylistWithTrack,
-                        onDownloadTrack = onDownloadTrack,
-                        onRemoveDownloadTrack = onRemoveDownloadTrack,
-                    )
-                    LibraryTab.ARTISTS -> ArtistsGrid(
-                        artists = state.artists,
-                        singleTrackArtists = state.singleTrackArtists,
-                        anyServiceConnected = anyServiceConnected,
-                        onPlayArtist = onPlayArtist,
-                        onAddArtistToQueue = onAddArtistToQueue,
-                        onDeleteArtist = onDeleteArtist,
-                        header = {},
-                    )
-                    LibraryTab.ALBUMS -> AlbumsGrid(
-                        albums = state.albums,
-                        singleTrackAlbums = state.singleTrackAlbums,
-                        anyServiceConnected = anyServiceConnected,
-                        onPlayAlbum = onPlayAlbum,
-                        onAddAlbumToQueue = onAddAlbumToQueue,
-                        header = {},
-                    )
-                }
+            when (state.activeTab) {
+                LibraryTab.PLAYLISTS -> PlaylistsGrid(
+                    playlists = state.playlists,
+                    anyServiceConnected = anyServiceConnected,
+                    onPlayPlaylist = onPlayPlaylist,
+                    onAddPlaylistToQueue = onAddPlaylistToQueue,
+                    onRemovePlaylist = onRemovePlaylist,
+                    onDeletePlaylist = onDeletePlaylist,
+                    onSetPlaylistImage = onSetPlaylistImage,
+                    onRemovePlaylistImage = onRemovePlaylistImage,
+                    onTogglePlaylistPinned = onTogglePlaylistPinned,
+                    header = {},
+                )
+                LibraryTab.TRACKS -> TracksTab(
+                    tracks = state.tracks,
+                    currentlyPlayingTrackId = state.currentlyPlayingTrackId,
+                    onTrackClick = onTrackClick,
+                    onPlayNext = onPlayNext,
+                    onAddToQueue = onAddToQueue,
+                    onDeleteTrack = onDeleteTrack,
+                    onViewAlbum = onViewAlbum,
+                    anyServiceConnected = anyServiceConnected,
+                    selection = selection,
+                    userPlaylists = userPlaylists,
+                    onSaveToPlaylist = onSaveToPlaylist,
+                    onCreatePlaylistWithTrack = onCreatePlaylistWithTrack,
+                    onDownloadTrack = onDownloadTrack,
+                    onRemoveDownloadTrack = onRemoveDownloadTrack,
+                    header = libraryHeader,
+                )
+                LibraryTab.LIKED -> LikedTab(
+                    tracks = likedTracks,
+                    filter = likedFilter,
+                    sources = likedSources,
+                    currentlyPlayingTrackId = state.currentlyPlayingTrackId,
+                    onSelectSource = onSelectLikedSource,
+                    onTrackClick = onPlayLikedTrack,
+                    onPlayNext = onPlayNext,
+                    onAddToQueue = onAddToQueue,
+                    onDeleteTrack = onDeleteTrack,
+                    selection = selection,
+                    userPlaylists = userPlaylists,
+                    onSaveToPlaylist = onSaveToPlaylist,
+                    onCreatePlaylistWithTrack = onCreatePlaylistWithTrack,
+                    onDownloadTrack = onDownloadTrack,
+                    onRemoveDownloadTrack = onRemoveDownloadTrack,
+                )
+                LibraryTab.ARTISTS -> ArtistsGrid(
+                    artists = state.artists,
+                    singleTrackArtists = state.singleTrackArtists,
+                    anyServiceConnected = anyServiceConnected,
+                    onPlayArtist = onPlayArtist,
+                    onAddArtistToQueue = onAddArtistToQueue,
+                    onDeleteArtist = onDeleteArtist,
+                    header = {},
+                )
+                LibraryTab.ALBUMS -> AlbumsGrid(
+                    albums = state.albums,
+                    singleTrackAlbums = state.singleTrackAlbums,
+                    anyServiceConnected = anyServiceConnected,
+                    onPlayAlbum = onPlayAlbum,
+                    onAddAlbumToQueue = onAddAlbumToQueue,
+                    header = {},
+                )
             }
         }
     }
 }
 
-// ── Recently downloaded rail ─────────────────────────────────────────────────
-
 @Composable
-private fun RecentlyDownloadedRail(
-    tracks: List<Track>,
-    onTrackClick: (Track) -> Unit,
+private fun BulkFlacUpgradeStrip(
+    count: Int,
+    progress: FlacUpgradeUiState,
+    onUpgrade: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
-    Column {
-        Text(
-            text = "RECENTLY DOWNLOADED",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.secondary,
-            modifier = Modifier.padding(start = 20.dp, top = 12.dp, bottom = 8.dp),
-        )
-        LazyRow(
-            contentPadding = PaddingValues(horizontal = 20.dp),
+    val extendedColors = StashTheme.extendedColors
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        color = extendedColors.glassBackground,
+        shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(1.dp, extendedColors.glassBorder),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            items(tracks, key = { it.id }) { track ->
-                com.stash.core.ui.components.AlbumSquareCard(
-                    title = track.title,
-                    artist = track.artist,
-                    thumbnailUrl = track.albumArtUrl,
-                    year = null,
-                    isLossless = track.fileFormat.equals("flac", ignoreCase = true),
-                    onClick = { onTrackClick(track) },
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = if (progress.isRunning) {
+                        "Finding FLAC ${progress.progressText}"
+                    } else {
+                        "$count downloaded non-FLAC ${if (count == 1) "song" else "songs"}"
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
+                Text(
+                    text = if (progress.isRunning) {
+                        "Existing files are replaced as matches finish."
+                    } else {
+                        "Redownload all existing lossy downloads through Find in FLAC."
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+
+            androidx.compose.material3.FilledTonalButton(
+                onClick = onUpgrade,
+                enabled = !progress.isRunning && count > 0,
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+            ) {
+                if (progress.isRunning) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        strokeWidth = 2.dp,
+                    )
+                } else {
+                    Icon(
+                        imageVector = Icons.Default.Download,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("Find FLAC")
             }
         }
     }
@@ -888,53 +912,196 @@ private fun LikedTab(
     }
 }
 
-// ── Search bar ───────────────────────────────────────────────────────────────
+// ── Compact controls bar ─────────────────────────────────────────────────────
 
+/**
+ * Single-row control strip for the Library: a Spotify-style filled Play
+ * button and a shuffle icon on the left; a search icon (which expands into
+ * a full-width field), a sort menu, and a source-filter menu on the right.
+ *
+ * Replaces the previous four stacked full-width controls so the track list
+ * starts near the top of the screen. The tab chips (Playlists / Tracks /
+ * Liked / Artists / Albums) stay as their own row below this.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun GlassSearchBar(
-    query: String,
-    onQueryChange: (String) -> Unit,
+private fun LibraryControlsBar(
+    searchQuery: String,
+    activeSort: SortOrder,
+    activeFilter: SourceFilter,
+    onPlayLibrary: () -> Unit,
+    onShuffleLibrary: () -> Unit,
+    onSearchQueryChanged: (String) -> Unit,
+    onSortSelected: (SortOrder) -> Unit,
+    onFilterSelected: (SourceFilter) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val extendedColors = StashTheme.extendedColors
+    var searchExpanded by remember { mutableStateOf(false) }
+    var sortMenuOpen by remember { mutableStateOf(false) }
+    var filterMenuOpen by remember { mutableStateOf(false) }
 
-    Surface(
-        modifier = modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(16.dp)),
-        color = extendedColors.glassBackground,
-        shape = RoundedCornerShape(16.dp),
-        border = BorderStroke(1.dp, extendedColors.glassBorder),
-    ) {
-        TextField(
-            value = query,
-            onValueChange = onQueryChange,
-            placeholder = {
-                Text(
-                    "Search library...",
-                    color = extendedColors.textTertiary,
-                )
-            },
-            leadingIcon = {
-                Icon(
-                    imageVector = Icons.Default.Search,
-                    contentDescription = "Search",
-                    tint = extendedColors.textTertiary,
-                )
-            },
-            singleLine = true,
-            colors = TextFieldDefaults.colors(
-                focusedContainerColor = Color.Transparent,
-                unfocusedContainerColor = Color.Transparent,
-                cursorColor = MaterialTheme.colorScheme.primary,
-                focusedIndicatorColor = Color.Transparent,
-                unfocusedIndicatorColor = Color.Transparent,
-                focusedTextColor = MaterialTheme.colorScheme.onBackground,
-                unfocusedTextColor = MaterialTheme.colorScheme.onBackground,
-            ),
-            modifier = Modifier.fillMaxWidth(),
-        )
+    if (searchExpanded) {
+        // -- Expanded search field (full width, auto-focused) --
+        val focusRequester = remember { FocusRequester() }
+        LaunchedEffect(Unit) { focusRequester.requestFocus() }
+        Surface(
+            modifier = modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(16.dp)),
+            color = extendedColors.glassBackground,
+            shape = RoundedCornerShape(16.dp),
+            border = BorderStroke(1.dp, extendedColors.glassBorder),
+        ) {
+            TextField(
+                value = searchQuery,
+                onValueChange = onSearchQueryChanged,
+                placeholder = { Text("Search library...", color = extendedColors.textTertiary) },
+                leadingIcon = {
+                    Icon(Icons.Default.Search, contentDescription = "Search", tint = extendedColors.textTertiary)
+                },
+                trailingIcon = {
+                    IconButton(onClick = {
+                        onSearchQueryChanged("")
+                        searchExpanded = false
+                    }) {
+                        Icon(Icons.Default.Close, contentDescription = "Close search", tint = extendedColors.textTertiary)
+                    }
+                },
+                singleLine = true,
+                colors = TextFieldDefaults.colors(
+                    focusedContainerColor = Color.Transparent,
+                    unfocusedContainerColor = Color.Transparent,
+                    cursorColor = MaterialTheme.colorScheme.primary,
+                    focusedIndicatorColor = Color.Transparent,
+                    unfocusedIndicatorColor = Color.Transparent,
+                    focusedTextColor = MaterialTheme.colorScheme.onBackground,
+                    unfocusedTextColor = MaterialTheme.colorScheme.onBackground,
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .focusRequester(focusRequester),
+            )
+        }
+        return
     }
+
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        // -- Play (filled circular, primary) --
+        FilledIconButton(
+            onClick = onPlayLibrary,
+            modifier = Modifier.size(48.dp),
+            colors = IconButtonDefaults.filledIconButtonColors(
+                containerColor = MaterialTheme.colorScheme.primary,
+                contentColor = Color.White,
+            ),
+        ) {
+            Icon(Icons.Filled.PlayArrow, contentDescription = "Play library", modifier = Modifier.size(26.dp))
+        }
+
+        // -- Shuffle (icon only) --
+        IconButton(onClick = onShuffleLibrary) {
+            Icon(
+                Icons.Filled.Shuffle,
+                contentDescription = "Shuffle library",
+                tint = MaterialTheme.colorScheme.onBackground,
+            )
+        }
+
+        Spacer(modifier = Modifier.weight(1f))
+
+        // -- Search (collapses to icon, expands on tap) --
+        IconButton(onClick = { searchExpanded = true }) {
+            Icon(
+                Icons.Default.Search,
+                contentDescription = "Search",
+                tint = if (searchQuery.isNotEmpty()) MaterialTheme.colorScheme.primary
+                else MaterialTheme.colorScheme.onBackground,
+            )
+        }
+
+        // -- Sort menu --
+        Box {
+            IconButton(onClick = { sortMenuOpen = true }) {
+                Icon(
+                    Icons.AutoMirrored.Filled.Sort,
+                    contentDescription = "Sort",
+                    tint = MaterialTheme.colorScheme.onBackground,
+                )
+            }
+            DropdownMenu(expanded = sortMenuOpen, onDismissRequest = { sortMenuOpen = false }) {
+                SortOrder.entries.forEach { order ->
+                    DropdownMenuItem(
+                        text = { Text(order.displayName()) },
+                        onClick = {
+                            onSortSelected(order)
+                            sortMenuOpen = false
+                        },
+                        leadingIcon = {
+                            if (order == activeSort) {
+                                Icon(Icons.Default.Check, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                            }
+                        },
+                    )
+                }
+            }
+        }
+
+        // -- Source filter menu (All / YouTube / Spotify / FLAC / Non-FLAC) --
+        Box {
+            IconButton(onClick = { filterMenuOpen = true }) {
+                Icon(
+                    Icons.Default.FilterList,
+                    contentDescription = "Filter",
+                    tint = if (activeFilter != SourceFilter.ALL) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onBackground,
+                )
+            }
+            DropdownMenu(expanded = filterMenuOpen, onDismissRequest = { filterMenuOpen = false }) {
+                SourceFilter.entries.forEach { filter ->
+                    DropdownMenuItem(
+                        text = { Text(filter.displayName()) },
+                        onClick = {
+                            onFilterSelected(filter)
+                            filterMenuOpen = false
+                        },
+                        leadingIcon = {
+                            if (filter == activeFilter) {
+                                Icon(Icons.Default.Check, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                            }
+                        },
+                    )
+                }
+            }
+        }
+    }
+}
+
+// ── Sort + filter menu labels ────────────────────────────────────────────────
+
+private fun SortOrder.displayName(): String = when (this) {
+    SortOrder.RECENT -> "Recently Added"
+    SortOrder.OLDEST -> "Oldest First"
+    SortOrder.ALPHABETICAL -> "Title A–Z"
+    SortOrder.ALPHABETICAL_DESC -> "Title Z–A"
+    SortOrder.ARTIST -> "Artist"
+    SortOrder.MOST_PLAYED -> "Most Played"
+    SortOrder.LEAST_PLAYED -> "Least Played"
+    SortOrder.LONGEST -> "Longest"
+    SortOrder.SHORTEST -> "Shortest"
+    SortOrder.RECENTLY_PLAYED -> "Recently Played"
+}
+
+private fun SourceFilter.displayName(): String = when (this) {
+    SourceFilter.ALL -> "All"
+    SourceFilter.YOUTUBE -> "YouTube"
+    SourceFilter.SPOTIFY -> "Spotify"
+    SourceFilter.FLAC -> "FLAC"
+    SourceFilter.NON_FLAC -> "Non-FLAC"
 }
 
 // ── Local import progress strip ─────────────────────────────────────────────

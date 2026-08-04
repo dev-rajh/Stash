@@ -101,6 +101,7 @@ class LibraryViewModelLikedSearchTest {
             streamingPreference = mock { on { enabled } doReturn flowOf(false) },
             flacUpgradeEnqueuer = mock(),
             ytMusicApiClient = mock(),
+            losslessUpgrader = mock(),
         )
     }
 }

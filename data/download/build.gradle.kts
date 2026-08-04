@@ -43,8 +43,10 @@ val qbdlxProps = Properties().apply {
     val f = rootProject.file("local.properties")
     if (f.exists()) f.inputStream().use { load(it) }
 }
-fun qbdlxProp(key: String, env: String) =
-    qbdlxProps.getProperty(key) ?: System.getenv(env).orEmpty()
+fun qbdlxProp(key: String, env: String): String =
+    sequenceOf(qbdlxProps.getProperty(key), qbdlxProps.getProperty(env), System.getenv(env))
+        .firstOrNull { !it.isNullOrBlank() }
+        .orEmpty()
 val qbdlxAppId = qbdlxProp("qbdlx.appId", "QBDLX_APP_ID")
 val qbdlxAppSecret = qbdlxProp("qbdlx.appSecret", "QBDLX_APP_SECRET")
 val qbdlxTokenPool = qbdlxProp("qbdlx.tokenPool", "QBDLX_TOKEN_POOL")
