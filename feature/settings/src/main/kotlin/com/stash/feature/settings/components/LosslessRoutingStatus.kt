@@ -28,10 +28,18 @@ import androidx.compose.ui.unit.sp
 /**
  * ROUTING status block for the lossless source chain.
  *
- * Shows the live chain: Direct Qobuz (primary) with amz.squid.wtf (Amazon
- * Music) as an independent fallback for tracks Qobuz doesn't carry. The older
- * kennyy.com.br / squid.wtf proxies are parked (hosts down for us) and are no
- * longer advertised here.
+ * Shows the live chain. As of 2026-07-31 that is Qobuz, full stop — amz and arcod
+ * were parked, and kennyy/squid before them.
+ *
+ * Two rules this block has to follow, both learned the hard way:
+ *  - **Say what is true right now.** It previously advertised "amz.squid.wtf fills
+ *    in when a track isn't on Qobuz", which stayed on screen after amz was parked.
+ *    A panel that explains where the user's audio comes from is worse than useless
+ *    when it is wrong.
+ *  - **Name what the user recognises, not our plumbing.** "Qobuz" is a service they
+ *    can look up; `amz.squid.wtf` is a proxy hostname that means nothing to them and
+ *    exposes our supply chain. When a source is parked, its row goes — do not leave
+ *    it greyed out as decoration.
  *
  * Visual: mono caps header, indented `↳` rows, small status dots.
  *
@@ -57,19 +65,14 @@ internal fun LosslessRoutingStatus(
         // Direct Qobuz is the primary lossless source; amz.squid.wtf (Amazon
         // Music) is an independent fallback for tracks Qobuz doesn't carry.
         RoutingRow(
-            host = "Direct Qobuz",
+            host = "Qobuz",
             configured = true,
             statusLabel = "active",
         )
-        RoutingRow(
-            host = "amz.squid.wtf",
-            configured = true,
-            statusLabel = "fallback",
-        )
         Spacer(modifier = Modifier.height(6.dp))
         Text(
-            text = "Lossless streams from Direct Qobuz; amz.squid.wtf (Amazon Music) " +
-                "fills in when a track isn't on Qobuz.",
+            text = "Lossless comes from Qobuz. Anything Qobuz doesn't carry falls " +
+                "back to YouTube, shown as \"via YT\" while it plays.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

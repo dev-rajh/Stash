@@ -146,6 +146,11 @@ class LosslessSourceRegistry @Inject constructor(
          * [com.stash.core.media.streaming.StreamSourceRegistry] for streaming).
          * Force-X test toggles and the Settings source list still reach them.
          */
-        val PARKED_SOURCE_IDS = setOf("squid_qobuz", "kennyy_qobuz", "arcod")
+        // arcod UNPARKED 2026-08-01: the operator rebuilt the VPS, rotated the
+        // integration key and moved us to the /v2/stash routes — verified live
+        // (search 200 + stream returns audio/flac, fLaC-magic byte-checked). It
+        // self-gates on the user having connected an account and on the build
+        // carrying the key, so an unconfigured build still skips it.
+        val PARKED_SOURCE_IDS = setOf("squid_qobuz", "kennyy_qobuz")
     }
 }

@@ -113,19 +113,19 @@ class StreamSourceRegistryTest {
         coEvery { streamingPreference.isForceYouTubeFallback() } returns false
         coEvery { amz.resolve(any()) } returns null
         coEvery { qbdlx.resolve(any()) } returns null
+        coEvery { arcod.resolve(any()) } returns null
         coEvery { youtube.resolve(any(), any()) } returns null
         val track = stubTrack()
 
         registry().resolve(track, allowYouTube = true)
 
-        // Only the qbdlx leg is build-gated; the chain is qbdlx -> youtube now.
+        // Chain is qbdlx -> arcod -> youtube; the two lossless legs are build-gated.
         if (BuildConfig.QBDLX_CONFIGURED) coVerify { qbdlx.resolve(track) }
+        if (BuildConfig.ARCOD_CONFIGURED) coVerify { arcod.resolve(track) }
         coVerify { youtube.resolve(track, allowYtDlp = true) }
-        // All parked as of 2026-07-30 — qbdlx is the only lossless provider, so a
-        // miss goes straight to YouTube rather than waiting on sources that cannot
-        // succeed.
+        // amz/kennyy/qobuz remain parked — a miss must not wait on sources that
+        // cannot succeed (~4.8s of a 5.2s resolve, measured on device).
         coVerify(exactly = 0) { amz.resolve(any()) }
-        coVerify(exactly = 0) { arcod.resolve(any()) }
         coVerify(exactly = 0) { kennyy.resolve(any()) }
         coVerify(exactly = 0) { qobuz.resolve(any()) }
     }
@@ -164,15 +164,49 @@ class StreamSourceRegistryTest {
      * wait on sources that could not succeed — ~4.8s of a 5.2s resolve, measured
      * on device.
      *
-     * This asserts they are never consulted, which is the inverse of what this
-     * test checked before. The resolvers, their force-toggles and their own tests
-     * all remain, so re-enabling either is uncommenting one line in the registry.
+     * amz is still parked and must never be consulted. arcod was UNPARKED
+     * 2026-08-01 (operator rotated the key + moved us to /v2/stash; verified live),
+     * so it IS expected in the chain on a keyed build — this test pins both halves
+     * at once: amz absent, arcod present.
+     */
+    /**
+     * A force toggle must never be able to strand a user with no audio.
+     *
+     * The pref outlives the build that exposed the switch: arcod is parked here,
+     * and its debug toggle isn't in this build at all, yet `force_arcod_only`
+     * can still be true in DataStore with no UI to clear it. Before this, that
+     * meant every track resolved through a parked source with no fallback —
+     * silence, permanently. YouTube stays in the chain so the worst case is
+     * lossy playback, never none.
      */
     @Test
-    fun resolve_skips_parked_amz_and_arcod() = runTest {
+    fun forceArcod_still_falls_back_to_youtube_when_arcod_misses() = runTest {
+        coEvery { streamingPreference.isForceQbdlxOnly() } returns false
+        coEvery { streamingPreference.isForceArcodOnly() } returns true
+        coEvery { streamingPreference.isForceYouTubeFallback() } returns false
+        coEvery { arcod.resolve(any()) } returns null   // parked / dead endpoint
+        coEvery { youtube.resolve(any(), any()) } returns StreamUrl(
+            url = "https://yt/x",
+            expiresAtMs = Long.MAX_VALUE,
+            codec = "aac",
+            origin = YouTubeStreamResolver.ORIGIN,
+        )
+        val track = stubTrack()
+
+        val result = registry().resolve(track, allowYouTube = true)
+
+        assertThat(result).isNotNull()
+        assertThat(result!!.origin).isEqualTo(YouTubeStreamResolver.ORIGIN)
+    }
+
+    @Test
+    fun resolve_skips_parked_amz_but_consults_arcod() = runTest {
         coEvery { streamingPreference.isForceAmzOnly() } returns false
         coEvery { streamingPreference.isForceYouTubeFallback() } returns false
         coEvery { qbdlx.resolve(any()) } returns null
+        // arcod UNPARKED 2026-08-01 — it misses here so the chain still reaches
+        // YouTube, which keeps the amz assertion below meaningful.
+        coEvery { arcod.resolve(any()) } returns null
         // amz is stubbed to SUCCEED on purpose: if it were still in the chain it
         // would serve this resolve, so "youtube served instead" is proof it was
         // skipped rather than merely absent from the fixture.
@@ -194,8 +228,9 @@ class StreamSourceRegistryTest {
 
         assertThat(result!!.origin).isEqualTo(YouTubeStreamResolver.ORIGIN)
         if (BuildConfig.QBDLX_CONFIGURED) coVerify { qbdlx.resolve(track) }
+        // arcod is build-gated like qbdlx: only a keyed build can reach it.
+        if (BuildConfig.ARCOD_CONFIGURED) coVerify { arcod.resolve(track) }
         coVerify(exactly = 0) { amz.resolve(any()) }
-        coVerify(exactly = 0) { arcod.resolve(any()) }
         coVerify(exactly = 0) { kennyy.resolve(any()) }
         coVerify(exactly = 0) { qobuz.resolve(any()) }
     }
@@ -283,71 +318,46 @@ class StreamSourceRegistryTest {
      * squid, and youtube are never consulted, and an amz hit is returned.
      */
     /**
-     * The force-qbdlx-only test toggle routes through qbdlx ONLY — every other
-     * source is skipped, and a qbdlx hit is returned. Takes precedence over the
-     * other force toggles.
+     * A STALE `force_amz_only` preference must not strand the user.
+     *
+     * amz was parked on 2026-07-30 and its Settings toggle removed on 2026-07-31 —
+     * but anyone who had switched it on still has `force_amz_only = true` persisted,
+     * with no UI left to switch it off. If the registry still honoured that flag,
+     * those users would route every track through a parked source and get permanent
+     * silence with no way to recover.
+     *
+     * This is the same shape as the force-YouTube incident: a stale preference
+     * quietly disabling lossless, costing a full debugging session. So the rule is
+     * that parking a source parks its force branch in the same change, and this test
+     * is the guard. These two tests previously asserted the opposite (that the flag
+     * routed amz-only); that behaviour is intentionally gone.
      */
     @Test
-    fun `forceQbdlxOnly routes through qbdlx only`() = runTest {
-        coEvery { streamingPreference.isForceQbdlxOnly() } returns true
-        coEvery { qbdlx.resolve(any()) } returns StreamUrl(
-            url = "https://www.qobuz.com/file?fmt=27&etsp=1782867891",
-            expiresAtMs = Long.MAX_VALUE,
-            codec = "flac",
-            origin = "qbdlx",
-        )
-        val track = stubTrack()
-
-        val result = registry().resolve(track, allowYouTube = true, allowYtDlp = true)
-
-        assertThat(result).isNotNull()
-        assertThat(result!!.origin).isEqualTo("qbdlx")
-        coVerify { qbdlx.resolve(track) }
-        coVerify(exactly = 0) { kennyy.resolve(any()) }
-        coVerify(exactly = 0) { qobuz.resolve(any()) }
-        coVerify(exactly = 0) { amz.resolve(any()) }
-        coVerify(exactly = 0) { youtube.resolve(any(), any()) }
-    }
-
-    @Test
-    fun `forceAmzOnly routes through amz only`() = runTest {
+    fun `a stale forceAmzOnly preference is ignored and playback still resolves`() = runTest {
         coEvery { streamingPreference.isForceAmzOnly() } returns true
-        // kennyy/qobuz/youtube are skipped in the amz-only branch — unstubbed.
+        coEvery { streamingPreference.isForceYouTubeFallback() } returns false
+        coEvery { qbdlx.resolve(any()) } returns null
+        // Stubbed to succeed: if the parked branch were still live, amz would serve
+        // this and the assertion below would catch it.
         coEvery { amz.resolve(any()) } returns StreamUrl(
             url = "https://amz.squid.wtf/api/stream?asin=B00X",
             expiresAtMs = Long.MAX_VALUE,
             codec = "flac",
             origin = AmzStreamResolver.ORIGIN,
         )
+        coEvery { youtube.resolve(any(), any()) } returns StreamUrl(
+            url = "https://yt/x",
+            expiresAtMs = Long.MAX_VALUE,
+            codec = "aac",
+            origin = YouTubeStreamResolver.ORIGIN,
+        )
         val track = stubTrack()
 
         val result = registry().resolve(track, allowYouTube = true, allowYtDlp = true)
 
-        assertThat(result).isNotNull()
-        assertThat(result!!.origin).isEqualTo("amz")
-        coVerify { amz.resolve(track) }
-        coVerify(exactly = 0) { kennyy.resolve(any()) }
-        coVerify(exactly = 0) { qobuz.resolve(any()) }
-        coVerify(exactly = 0) { youtube.resolve(any(), any()) }
-    }
-
-    /**
-     * Under force-amz-only an amz miss returns null and youtube is NOT
-     * consulted (even though allowYouTube is true) — it's amz or nothing.
-     */
-    @Test
-    fun `forceAmzOnly amz miss returns null and does not consult youtube`() = runTest {
-        coEvery { streamingPreference.isForceAmzOnly() } returns true
-        coEvery { amz.resolve(any()) } returns null
-        val track = stubTrack()
-
-        val result = registry().resolve(track, allowYouTube = true, allowYtDlp = true)
-
-        assertThat(result).isNull()
-        coVerify { amz.resolve(track) }
-        coVerify(exactly = 0) { kennyy.resolve(any()) }
-        coVerify(exactly = 0) { qobuz.resolve(any()) }
-        coVerify(exactly = 0) { youtube.resolve(any(), any()) }
+        // Falls through to the normal chain instead of being trapped on amz.
+        assertThat(result!!.origin).isEqualTo(YouTubeStreamResolver.ORIGIN)
+        coVerify(exactly = 0) { amz.resolve(any()) }
     }
 
     private fun stubTrack(): TrackEntity = TrackEntity(

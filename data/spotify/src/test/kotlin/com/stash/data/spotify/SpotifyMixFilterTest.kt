@@ -6,13 +6,16 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Contract tests for [isSpotifyMix], the pure keep-check that decides which
- * home-feed playlists the sync widens to.
+ * Contract tests for [isSpotifyMix], the pure keep-check deciding which home-feed
+ * playlists the sync widens to.
  *
- * The rule: keep "Daily Mix N", keep the known named mixes, and keep anything
- * owned by "spotify" (the locale-proof catch-all for personalized home items
- * like Your Top Songs / Blend / Made-For-You / This Is). Drop user-owned
- * custom playlists.
+ * The rule: keep "Daily Mix N", keep the known named mixes, keep spotify-owned
+ * personalized items (Your Top Songs / Blend / Made-For-You) — but DROP editorial
+ * playlists, which are spotify-owned too and so used to ride in on the owner
+ * catch-all.
+ *
+ * Ids below are real prefixes observed on a live account (2026-08-01), where the
+ * catch-all had classified 66 editorial playlists as "mixes" out of 130 total.
  */
 class SpotifyMixFilterTest {
 
@@ -23,13 +26,40 @@ class SpotifyMixFilterTest {
 
     // Owner catch-all: personalized items whose names match no rule.
     @Test fun keepsYourTopSongs()      = assertTrue(isSpotifyMix("Your Top Songs 2025", "spotify"))
-    @Test fun keepsBlend()             = assertTrue(isSpotifyMix("Rawn + Alex", "spotify")) // Blend, spotify-owned
+    @Test fun keepsBlend()             = assertTrue(isSpotifyMix("Rawn + Alex", "spotify"))
     @Test fun keepsMadeForYouMood()    = assertTrue(isSpotifyMix("Chill Mix", "spotify"))
 
     @Test fun rejectsUserOwnedCustom() = assertFalse(isSpotifyMix("My Road Trip", "rawnaldclark"))
 
-    // Pins the known ceiling as intentional: a spotify-owned editorial title
-    // currently leaks through the owner catch-all. If B4 shows this on-device,
-    // a deny-set flips this assertion (and this test guards that change).
-    @Test fun keepsSpotifyOwnedEditorial() = assertTrue(isSpotifyMix("Today's Top Hits", "spotify"))
+    // ── Editorial deny-rule (the ceiling the previous version pinned) ────────
+    // Every one of these is spotify-owned, so ONLY the id can reject them.
+
+    @Test fun rejectsEditorialDX() =
+        assertFalse(isSpotifyMix("Disco Fever", "spotify", "37i9dQZF1DX2sUQwD7tbmL"))
+
+    @Test fun rejectsEditorialDW() =
+        assertFalse(isSpotifyMix("70s Rock Anthems", "spotify", "37i9dQZF1DWWwzidNQX6jx"))
+
+    /** "This Is <artist>" is curated for everyone, not generated for this listener. */
+    @Test fun rejectsThisIsArtist() =
+        assertFalse(isSpotifyMix("This Is Phantogram", "spotify", "37i9dQZF1DZ06evO2iBPiw"))
+
+    // ── Personalized surfaces must survive the deny-rule ─────────────────────
+
+    @Test fun keepsDailyMixById() =
+        assertTrue(isSpotifyMix("Daily Mix 1", "spotify", "37i9dQZF1E38ZgHCGJDJmC"))
+
+    @Test fun keepsArtistRadio() =
+        assertTrue(isSpotifyMix("Curtis Mayfield Radio", "spotify", "37i9dQZF1E4z5B1TjSNLWc"))
+
+    @Test fun keepsDecadeMix() =
+        assertTrue(isSpotifyMix("70s Mix", "spotify", "37i9dQZF1EQqkOPvHGajmW"))
+
+    /** Discover Weekly / Release Radar use a different prefix again — not editorial. */
+    @Test fun keepsDiscoverWeeklyById() =
+        assertTrue(isSpotifyMix("Discover Weekly", "spotify", "37i9dQZEVXcQ9COmYvdajy"))
+
+    /** Absent id (older call sites / missing data) must not silently drop a mix. */
+    @Test fun keepsWhenIdUnknown() =
+        assertTrue(isSpotifyMix("Some Personalized Thing", "spotify"))
 }

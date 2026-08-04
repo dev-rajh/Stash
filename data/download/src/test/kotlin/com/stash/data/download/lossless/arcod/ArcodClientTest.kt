@@ -39,6 +39,8 @@ class ArcodClientTest {
             // Neutral mock base — the real private base lives in BuildConfig and is
             // never embedded here. Asserts only that trackId + quality are appended.
             streamBaseUrl = server.url("/strm").toString().trimEnd('/')
+            // The /v2/stash routes issued to Stash: search + stream both live here.
+            stashBaseUrl = server.url("/v2/stash").toString().trimEnd('/')
         }
     }
 
@@ -53,7 +55,9 @@ class ArcodClientTest {
 
         val request = server.takeRequest()
         assertEquals("GET", request.method)
-        assertTrue(request.path!!.startsWith("/api/get-music"))
+        // The operator moved Stash to /v2/stash/* — the old generic routes are
+        // explicitly not for us, so a regression back to get-music must fail here.
+        assertTrue(request.path!!.startsWith("/v2/stash/search"))
         assertTrue(request.path!!.contains("q="))
         assertTrue(request.path!!.contains("offset=0"))
 
@@ -123,7 +127,7 @@ class ArcodClientTest {
         }
     }
 
-    @Test fun `streamUrl appends trackId and quality to the stream base and parses plain-text url`() = runTest {
+    @Test fun `streamUrl appends trackId and quality to the stash stream route and parses plain-text url`() = runTest {
         val url = "https://dl.arcod.xyz/stream/abc.flac?token=xyz"
         server.enqueue(MockResponse().setResponseCode(200).setBody(url))
 
@@ -131,10 +135,27 @@ class ArcodClientTest {
 
         val request = server.takeRequest()
         assertEquals("GET", request.method)
-        assertEquals("/strm/8767428?quality=27", request.path)
+        assertEquals("/v2/stash/stream/8767428?quality=27", request.path)
         assertNotNull(result)
         assertEquals(url, result!!.url)
         assertNull(result.expiresInSec)
+    }
+
+    /**
+     * The integration key is what separates a 403 from a real answer on the
+     * `/v2/stash` routes, so a request that forgets it is silently useless.
+     * Only asserted when the build actually carries a key (an unconfigured
+     * build legitimately omits the header).
+     */
+    @Test fun `stash requests carry the X-Stash-Key header when configured`() = runTest {
+        server.enqueue(MockResponse().setResponseCode(200).setBody(SEARCH_BODY))
+        client.search("Ja Rule Murderers")
+        val sent = server.takeRequest().getHeader("X-Stash-Key")
+        if (com.stash.data.download.BuildConfig.ARCOD_STASH_KEY.isNotBlank()) {
+            assertEquals(com.stash.data.download.BuildConfig.ARCOD_STASH_KEY, sent)
+        } else {
+            assertNull(sent)
+        }
     }
 
     @Test fun `streamUrl parses flat json url`() = runTest {

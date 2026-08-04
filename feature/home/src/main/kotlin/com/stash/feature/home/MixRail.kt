@@ -25,3 +25,24 @@ fun mixRail(playlist: Playlist): MixRail? {
     if (DAILY_OR_MYMIX.matches(n) || n.lowercase() in MADE_FOR_YOU_NAMES) return MixRail.MADE_FOR_YOU
     return MixRail.MOOD_DECADES
 }
+
+/**
+ * Freshest first: the mix that most recently gained a track leads the rail.
+ *
+ * Home's rails used to inherit the DAO's `ORDER BY p.name ASC`, so their head
+ * was a fixed alphabetical prefix of the library — a sync could pull in hundreds
+ * of songs and Home looked untouched, because the mixes that changed sorted into
+ * the middle of an uncapped rail. Ordering by last-gained-a-track makes the rail
+ * head exactly what the last sync found.
+ *
+ * [recency] maps playlist id -> epoch millis of its newest live membership
+ * (PlaylistDao.observeLatestAdditionPerPlaylist). A mix with no live memberships
+ * is absent from it and sorts last rather than jumping the queue. Name is the
+ * tie-break: a sync writes many rows in the same millisecond, so ties are the
+ * common case, and without it the rail would reshuffle on every emission.
+ */
+internal fun List<HomeMix>.freshestFirst(recency: Map<Long, Long>): List<HomeMix> =
+    sortedWith(
+        compareByDescending<HomeMix> { recency[it.id] ?: Long.MIN_VALUE }
+            .thenBy { it.title.lowercase() },
+    )

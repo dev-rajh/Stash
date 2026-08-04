@@ -69,6 +69,7 @@ class SettingsViewModelTest {
         qobuzSource = mockk(relaxed = true),
         arcodCredentialStore = mockk(relaxed = true),
         qbdlxCredentialStore = qbdlxStore,
+        qobuzAccountConnector = mockk(relaxed = true),
         likePreferences = mockk(relaxed = true),
         trackDao = mockk(relaxed = true),
         settingsDeepLinkController = mockk(relaxed = true),

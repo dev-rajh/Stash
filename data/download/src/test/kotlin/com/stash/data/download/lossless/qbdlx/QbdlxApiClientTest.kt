@@ -17,7 +17,10 @@ class QbdlxApiClientTest {
         server = MockWebServer(); server.start()
         client = QbdlxApiClient(
             sharedClient = OkHttpClient(),
-            signer = QbdlxSigner("secret") { 1000L },
+            signer = QbdlxSigner { 1000L },
+            // Every token in these tests signs under the same test pair; getFileUrl
+            // reads app_id/secret from here (the real store resolves per-token).
+            signingResolver = { QbdlxSigning(appId = "798273057", appSecret = "secret") },
         ).also {
             it.baseUrl = server.url("/").toString().trimEnd('/')
             it.appId = "798273057"   // appId is an internal var (reads BuildConfig in prod), set here for the test
@@ -61,6 +64,40 @@ class QbdlxApiClientTest {
         server.enqueue(MockResponse().setBody("""{"url":"https://cdn/file?fmt=6","format_id":6,"restrictions":[{"code":"FormatRestrictedByFormatAvailability"}]}"""))
         val r = client.getFileUrl(trackId = 42, formatId = 27, token = "tok")
         assertThat(r).isInstanceOf(QbdlxResolveResult.Ok::class.java)  // fmt6 is still lossless
+    }
+
+    /**
+     * A banned Qobuz account answers 403 USER_BLOCKED. That is a dead TOKEN, not a
+     * sick service: it must surface as QbdlxAuthException so the source marks it
+     * dead and rotates. Treated as a generic failure it never rotates, and because
+     * the active token is sticky one banned account silently downgrades every play
+     * to lossy YouTube while live tokens sit unused.
+     */
+    @Test fun `403 USER_BLOCKED is a dead token, not a service failure`() = runTest {
+        server.enqueue(
+            MockResponse().setResponseCode(403).setBody(
+                """{"status":"error","code":403,"message":"Account is blocked","error_code":"USER_BLOCKED"}"""
+            )
+        )
+        try {
+            client.search("x", token = "tok")
+            assertThat(false).isTrue()
+        } catch (e: QbdlxAuthException) {
+            assertThat(e.status).isEqualTo(403)
+        }
+    }
+
+    /** A 403 that is NOT a ban stays transient — don't burn a good token on it. */
+    @Test fun `other 403s remain transient api errors`() = runTest {
+        server.enqueue(
+            MockResponse().setResponseCode(403).setBody("""{"status":"error","code":403,"message":"Rate limited"}""")
+        )
+        try {
+            client.search("x", token = "tok")
+            assertThat(false).isTrue()
+        } catch (e: QbdlxApiException) {
+            assertThat(e.status).isEqualTo(403)
+        }
     }
 
     @Test fun `search 401 throws TokenDead-signalling exception`() = runTest {

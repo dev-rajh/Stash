@@ -167,6 +167,7 @@ fun SettingsAccountsScreen(
         // Last.fm renders via its own composable (web-auth / cookie / OAuth UX
         // differs enough from AccountConnectionCard). The deep-link
         // bringIntoViewRequester from the monolith is dropped here.
+        val scrobbleFirstArtistOnly by viewModel.scrobbleFirstArtistOnly.collectAsStateWithLifecycle()
         val lastFmUriHandler = androidx.compose.ui.platform.LocalUriHandler.current
         GlassCard {
             com.stash.feature.settings.components.LastFmSection(
@@ -179,6 +180,8 @@ fun SettingsAccountsScreen(
                 onDismissError = viewModel::onDismissLastFmError,
                 onSyncScrobblesNow = viewModel::onSyncScrobblesNow,
                 isScrobbleDraining = uiState.isScrobbleDraining,
+                firstArtistOnly = scrobbleFirstArtistOnly,
+                onFirstArtistOnlyChange = viewModel::onScrobbleFirstArtistOnlyChanged,
             )
             uiState.scrobbleDrainResult?.let { result ->
                 Spacer(modifier = Modifier.height(8.dp))

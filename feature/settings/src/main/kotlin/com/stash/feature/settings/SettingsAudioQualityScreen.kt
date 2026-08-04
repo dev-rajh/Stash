@@ -7,6 +7,9 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -20,6 +23,11 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -33,6 +41,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
@@ -41,6 +53,7 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.stash.core.ui.components.GlassCard
+import com.stash.core.ui.theme.StashTheme
 import com.stash.data.download.lossless.LosslessQualityTier
 import com.stash.feature.settings.components.AudioQualityPicker
 import com.stash.feature.settings.components.BetaPill
@@ -78,6 +91,9 @@ fun SettingsAudioQualityScreen(
     val qbdlxExpired by viewModel.qbdlxExpired.collectAsStateWithLifecycle()
     val qbdlxTokenChoices by viewModel.qbdlxTokenChoices.collectAsStateWithLifecycle()
     val qbdlxPinnedToken by viewModel.qbdlxPinnedToken.collectAsStateWithLifecycle()
+    val qobuzConnectedEmail by viewModel.qobuzConnectedEmail.collectAsStateWithLifecycle()
+    val qobuzConnecting by viewModel.qobuzConnecting.collectAsStateWithLifecycle()
+    val qobuzConnectError by viewModel.qobuzConnectError.collectAsStateWithLifecycle()
 
     SettingsScaffold(title = "Audio & Quality", onBack = onBack, modifier = modifier) {
         // (a) Download tier — only when lossless OFF. The standalone yt-dlp
@@ -131,9 +147,43 @@ fun SettingsAudioQualityScreen(
                         // kennyy/squid proxies are parked and no longer shown.
                         LosslessRoutingStatus()
 
-                        // ARCOD connect row: removed 2026-07-01 while ARCOD is
-                        // parked (host down for us). ArcodConnectScreen + the
-                        // onNavigateToArcodConnect route stay wired for re-enabling.
+                        // ARCOD — independent Qobuz lossless (a 2nd live source
+                        // alongside qbdlx). Connect via Google login in an in-app
+                        // WebView. Restored 2026-08-01 after the operator rotated
+                        // the key + moved us to the /v2/stash routes (verified live).
+                        SettingsNavRow(
+                            title = if (uiState.arcodConnected) {
+                                "ARCOD — connected"
+                            } else {
+                                "Connect ARCOD"
+                            },
+                            subtitle = "Independent Qobuz lossless (2nd source)",
+                            onClick = onNavigateToArcodConnect,
+                            leadingContent = {
+                                Image(
+                                    painter = painterResource(
+                                        id = com.stash.core.ui.R.drawable.partner_arcod,
+                                    ),
+                                    contentDescription = null, // decorative; the row title already says "ARCOD"
+                                    contentScale = ContentScale.Fit,
+                                    modifier = Modifier
+                                        .size(22.dp)
+                                        .clip(RoundedCornerShape(6.dp)),
+                                )
+                            },
+                            titleTrailing = if (uiState.arcodConnected) {
+                                {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(7.dp)
+                                            .clip(CircleShape)
+                                            .background(StashTheme.extendedColors.success),
+                                    )
+                                }
+                            } else {
+                                null
+                            },
+                        )
 
                         // Direct Qobuz — direct www.qobuz.com Hi-Res FLAC, the
                         // primary lossless source. Per-source enable toggle gates
@@ -155,11 +205,88 @@ fun SettingsAudioQualityScreen(
                                 if (qbdlxExpired) {
                                     Spacer(modifier = Modifier.height(4.dp))
                                     Text(
-                                        text = "No working token — paste a fresh one",
+                                        text = "No working token — connect your account below",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.error,
                                     )
                                 }
+
+                                // -- Bring your own Qobuz account -------------
+                                // The user's own paid subscription: the one
+                                // credential guaranteed to serve FLAC, since we
+                                // mint + sign its token under a matching app_id.
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Text(
+                                    text = "Your Qobuz account",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                )
+                                val connectedEmail = qobuzConnectedEmail
+                                if (connectedEmail != null) {
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    Text(
+                                        text = "Connected as $connectedEmail",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.primary,
+                                    )
+                                    TextButton(onClick = viewModel::onDisconnectQobuz) {
+                                        Text("Disconnect")
+                                    }
+                                } else {
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    Text(
+                                        text = "Sign in with your own Qobuz subscription for " +
+                                            "guaranteed lossless — your account, not the shared pool.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                    var qobuzEmail by remember { mutableStateOf("") }
+                                    var qobuzPassword by remember { mutableStateOf("") }
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    OutlinedTextField(
+                                        value = qobuzEmail,
+                                        onValueChange = { qobuzEmail = it },
+                                        modifier = Modifier.fillMaxWidth(),
+                                        label = { Text("Qobuz email") },
+                                        singleLine = true,
+                                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
+                                    )
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    OutlinedTextField(
+                                        value = qobuzPassword,
+                                        onValueChange = { qobuzPassword = it },
+                                        modifier = Modifier.fillMaxWidth(),
+                                        label = { Text("Password") },
+                                        singleLine = true,
+                                        visualTransformation = PasswordVisualTransformation(),
+                                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                                    )
+                                    qobuzConnectError?.let { err ->
+                                        Spacer(modifier = Modifier.height(4.dp))
+                                        Text(
+                                            text = err,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.error,
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    Button(
+                                        onClick = { viewModel.onConnectQobuz(qobuzEmail, qobuzPassword) },
+                                        enabled = !qobuzConnecting,
+                                    ) {
+                                        if (qobuzConnecting) {
+                                            CircularProgressIndicator(
+                                                modifier = Modifier.size(16.dp),
+                                                strokeWidth = 2.dp,
+                                            )
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Text("Connecting…")
+                                        } else {
+                                            Text("Connect")
+                                        }
+                                    }
+                                }
+
                                 if (qbdlxTokenChoices.size > 1) {
                                     Spacer(modifier = Modifier.height(4.dp))
                                     Text(

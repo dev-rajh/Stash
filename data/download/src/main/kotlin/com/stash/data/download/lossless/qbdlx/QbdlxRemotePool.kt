@@ -69,35 +69,51 @@ class HttpQbdlxRemotePool @Inject constructor(
                 "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 
         /**
-         * Keeps rows that are usable by THIS build and flattens them to the
-         * `token:country` pool format.
+         * Keeps every row we can SIGN and flattens them to the tagged
+         * `token:country:appId` pool format.
          *
-         * The app_id filter is load-bearing, not incidental: the endpoint also
-         * serves tokens for a different Qobuz app_id, and those need that app's
-         * own app_secret to sign a request. We bundle exactly one app_id/secret
-         * pair, so a token from the other app would fail every signature. Drop
-         * them rather than ship credentials we cannot sign for.
+         * The endpoint serves tokens for more than one Qobuz app_id, each needing
+         * its own app_secret to sign. We used to bundle a single pair and DROP the
+         * other app_id's tokens — throwing away ~13 of ~21 tokens and running the
+         * primary app_id down to zero live tokens. Now we bundle each app_id's
+         * secret ([knownAppIds]) and TAG every kept token with its app_id, so the
+         * signer picks the right secret ([QbdlxSigningResolver]) instead of
+         * mismatching it into a preview. A row we still have no secret for is
+         * dropped (an unsignable token is worse than none — it just previews).
          *
          * Internal + pure so it can be tested without a network.
          */
         internal fun parsePool(
             body: String,
-            appId: String = com.stash.data.download.BuildConfig.QBDLX_APP_ID,
+            primaryAppId: String = com.stash.data.download.BuildConfig.QBDLX_APP_ID,
+            knownAppIds: Set<String> = knownAppIdsFromBuildConfig(),
         ): String {
             val root = runCatching { Json.parseToJsonElement(body) }.getOrNull() as? JsonArray
                 ?: return ""
-            val seen = LinkedHashMap<String, String>()
+            val seen = LinkedHashMap<String, String>() // token -> "country:appId"
             for (element in root) {
                 val row = element as? JsonObject ?: continue
                 fun str(key: String) = row[key]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
                 val token = str("token")
                 val country = str("country")
-                val rowAppId = str("app_id")
                 if (token.isEmpty() || country.isEmpty()) continue
-                if (appId.isNotEmpty() && rowAppId != appId) continue
-                seen.putIfAbsent(token, country)
+                // No app_id on a row → assume the primary app's (the historical
+                // default). Keep the row only if we can sign for its app_id.
+                val appId = str("app_id").ifEmpty { primaryAppId }
+                if (knownAppIds.isNotEmpty() && appId !in knownAppIds) continue
+                seen.putIfAbsent(token, "$country:$appId")
             }
-            return seen.entries.joinToString(",") { (token, country) -> "$token:$country" }
+            return seen.entries.joinToString(",") { (token, tail) -> "$token:$tail" }
+        }
+
+        /** app_ids this build bundles a secret for: the primary plus every extra pair. */
+        private fun knownAppIdsFromBuildConfig(): Set<String> {
+            val ids = linkedSetOf(com.stash.data.download.BuildConfig.QBDLX_APP_ID)
+            com.stash.data.download.BuildConfig.QBDLX_APP_SECRETS.split(",").forEach { pair ->
+                val i = pair.indexOf(':')
+                if (i > 0) ids += pair.take(i).trim()
+            }
+            return ids.filter { it.isNotEmpty() }.toSet()
         }
     }
 }

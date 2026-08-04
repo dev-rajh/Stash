@@ -5,10 +5,12 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -36,6 +38,8 @@ fun LastFmSection(
     onDismissError: () -> Unit,
     onSyncScrobblesNow: () -> Unit,
     isScrobbleDraining: Boolean,
+    firstArtistOnly: Boolean = false,
+    onFirstArtistOnlyChange: (Boolean) -> Unit = {},
 ) {
     Column(modifier = Modifier.fillMaxWidth()) {
         when (state) {
@@ -117,6 +121,31 @@ fun LastFmSection(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                Spacer(modifier = Modifier.height(12.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Only scrobble the first artist",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                        Text(
+                            text = "Submits \"Artist A\" instead of \"Artist A, Artist B\" so collabs " +
+                                "don't split your Last.fm stats. Artist names that contain a comma " +
+                                "may be shortened.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Switch(
+                        checked = firstArtistOnly,
+                        onCheckedChange = onFirstArtistOnlyChange,
+                    )
+                }
                 Spacer(modifier = Modifier.height(12.dp))
                 // "Sync scrobbles now" — manual drain. Useful right after
                 // the Last.fm connect handshake when cold-start import +

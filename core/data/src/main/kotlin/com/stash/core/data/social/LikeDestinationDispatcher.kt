@@ -80,7 +80,7 @@ class LikeDestinationDispatcher @Inject constructor(
                         ?: throw NoLastFmSessionException()
                     lastFmApiClient.setLoved(
                         sessionKey = session.sessionKey,
-                        artist = track.artist,
+                        artist = scrobbleArtist(track.artist),
                         track = track.title,
                         loved = true,
                     ).getOrThrow()
@@ -144,7 +144,7 @@ class LikeDestinationDispatcher @Inject constructor(
                         ?: throw NoLastFmSessionException()
                     lastFmApiClient.setLoved(
                         sessionKey = session.sessionKey,
-                        artist = track.artist,
+                        artist = scrobbleArtist(track.artist),
                         track = track.title,
                         loved = false,
                     ).getOrThrow()
@@ -159,6 +159,26 @@ class LikeDestinationDispatcher @Inject constructor(
             Result.failure(t)
         }
     }
+
+    /**
+     * Applies the same "only first artist" preference the scrobbler uses.
+     *
+     * Loves and scrobbles must agree. Last.fm matches a love against its own catalog
+     * entry, so submitting "Calvin Harris" for the scrobble and "Calvin Harris, Dua
+     * Lipa" for the love lands them on different entries — or the love on nothing at
+     * all. That split is precisely what the toggle exists to prevent, so it has to
+     * govern both writes, not just one.
+     *
+     * Reuses [com.stash.core.data.lastfm.primaryArtist] rather than reimplementing
+     * the split: one definition of "primary artist", one place to fix it when the
+     * "Tyler, The Creator" limitation is eventually addressed.
+     */
+    private suspend fun scrobbleArtist(artist: String): String =
+        if (lastFmSessionPreference.firstArtistOnly.first() == true) {
+            com.stash.core.data.lastfm.primaryArtist(artist)
+        } else {
+            artist
+        }
 
     private fun alreadySaved(track: Track, dest: Destination): Boolean = when (dest) {
         Destination.STASH -> track.stashLikedAt != null

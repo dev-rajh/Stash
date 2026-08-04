@@ -60,12 +60,27 @@ class ArcodClient @Inject constructor(
     internal var streamBaseUrl = BuildConfig.ARCOD_STREAM_BASE
 
     /**
+     * Base for the operator's `/v2/stash/…` routes — the ones issued to Stash
+     * specifically (2026-08-01, after the operator rebuilt the VPS and rotated the
+     * key). Search and stream go here; the generic `/v2/search` + `/v2/albums`
+     * routes are explicitly NOT for us.
+     *
+     * Same Qobuz-native payloads as the old `get-music` route (arcod proxies
+     * Qobuz), so [ArcodSearchResponse] and [parseStreamResult] parse them
+     * unchanged — verified against the live API. Test seam like the others.
+     */
+    internal var stashBaseUrl = BuildConfig.ARCOD_API_BASE.trimEnd('/') + "/v2/stash"
+
+    /** True when this build carries the operator's private integration key. */
+    val isConfigured: Boolean get() = BuildConfig.ARCOD_STASH_KEY.isNotBlank()
+
+    /**
      * Search the proxied Qobuz catalog. Non-2xx (other than 429) or a parse
      * failure yields an empty list so the caller cleanly fails over.
      */
     suspend fun search(query: String): List<ArcodTrackItem> = withContext(Dispatchers.IO) {
         val encoded = URLEncoder.encode(query, "UTF-8")
-        val request = arcodRequest("$baseUrl/get-music?q=$encoded&offset=0").get().build()
+        val request = arcodRequest("$stashBaseUrl/search?q=$encoded&limit=$SEARCH_LIMIT&offset=0").get().build()
         try {
             httpClient.newCall(request).execute().use { response ->
                 if (response.code == 429) throw ArcodRateLimitedException()
@@ -165,13 +180,13 @@ class ArcodClient @Inject constructor(
      */
     suspend fun streamUrl(trackId: Long, quality: Int): ArcodStreamResult? =
         withContext(Dispatchers.IO) {
-            // Unconfigured build (no private base injected) → skip cleanly so the
-            // registry fails over instead of building an invalid relative URL.
-            if (streamBaseUrl.isBlank()) {
-                Log.d(TAG, "stream base not configured — skipping arcod stream")
+            // Unconfigured build (no integration key injected) → skip cleanly so the
+            // registry fails over instead of calling a route that can only 403.
+            if (!isConfigured) {
+                Log.d(TAG, "stash key not configured — skipping arcod stream")
                 return@withContext null
             }
-            val request = arcodRequest("$streamBaseUrl/$trackId?quality=$quality")
+            val request = arcodRequest("$stashBaseUrl/stream/$trackId?quality=$quality")
                 .get().build()
             try {
                 httpClient.newCall(request).execute().use { response ->
@@ -218,16 +233,29 @@ class ArcodClient @Inject constructor(
         }
     }
 
-    /** Browser-y headers the arcod web app sends; Bearer is added by the interceptor. */
+    /**
+     * Browser-y headers the arcod web app sends; Bearer is added by the interceptor.
+     *
+     * `X-Stash-Key` is the operator's per-build integration key for the `/v2/stash`
+     * routes. Without it those routes answer 403; with it (and no Bearer) 401. It's
+     * harmless on the older routes, so it's set unconditionally rather than
+     * threaded per-call. Empty in an unconfigured build — [isConfigured] gates that.
+     */
     private fun arcodRequest(url: String): Request.Builder =
         Request.Builder()
             .url(url)
             .header("User-Agent", USER_AGENT)
             .header("Origin", "https://arcod.xyz")
             .header("Referer", "https://arcod.xyz/")
+            .apply {
+                BuildConfig.ARCOD_STASH_KEY.takeIf { it.isNotBlank() }
+                    ?.let { header("X-Stash-Key", it) }
+            }
 
     private companion object {
         const val TAG = "ArcodClient"
+        /** Catalog page size for search — enough candidates for the matcher to score. */
+        const val SEARCH_LIMIT = 12
         val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
         const val USER_AGENT =
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +

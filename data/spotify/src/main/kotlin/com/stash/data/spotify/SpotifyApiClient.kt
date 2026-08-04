@@ -126,9 +126,40 @@ class SpotifyApiClient @Inject constructor(
          * ponytail: owner rule first; add a deny-set only if device shows
          * editorial leakage (e.g. "Today's Top Hits" surfacing in the home feed).
          */
-        internal fun isSpotifyMix(name: String, ownerId: String): Boolean {
+        /**
+         * Spotify's EDITORIAL playlist id prefix. Editorial playlists are curated
+         * for everyone; personalized ones are generated for this listener.
+         *
+         * Verified against a real account (2026-08-01): every `37i9dQZF1D…` id was
+         * editorial — "Disco Fever", "70s Rock Anthems", "Ambient Essentials",
+         * "This Is <artist>" — while personalized surfaces carry other prefixes
+         * (`37i9dQZF1E…` for Daily Mix / artist Radio / mood Mix, `37i9dQZEVX…`
+         * for Discover Weekly and Release Radar).
+         *
+         * Matching on the id rather than the name is deliberate: names are
+         * localized and unbounded, ids are not.
+         */
+        private const val EDITORIAL_ID_PREFIX = "37i9dQZF1D"
+
+        /** Spotify's own playlist-id namespace; anything else is a user's copy. */
+        private const val SPOTIFY_OWNED_ID_PREFIX = "37i9dQ"
+
+        /**
+         * Search terms that surface the recaps. "Your Top Songs" alone returns the
+         * yearly set; the all-time list only appeared for its own phrasing.
+         */
+        private val YEARLY_SEARCH_TERMS = listOf("Your Top Songs", "Your All-Time Top Songs")
+
+        internal fun isSpotifyMix(name: String, ownerId: String, playlistId: String = ""): Boolean {
             if (DAILY_MIX_REGEX.matches(name)) return true
             if (name.lowercase(java.util.Locale.ROOT) in SPOTIFY_MIX_NAMES) return true
+            // Editorial leakage guard. The owner rule below can't tell these apart:
+            // editorial playlists are spotify-owned too, so the catch-all swept in
+            // 66 of them on a real account (130 "mixes", over half not personalized).
+            // The Sync tab calls these MIXES, which promises "made for you" — a
+            // playlist curated for everyone doesn't qualify. A user who wants one
+            // saves it on Spotify, and it arrives as their own playlist instead.
+            if (playlistId.startsWith(EDITORIAL_ID_PREFIX)) return false
             return ownerId == "spotify"
         }
     }
@@ -404,6 +435,82 @@ class SpotifyApiClient @Inject constructor(
      *
      * @return List of [SpotifyPlaylistItem] representing all Spotify-generated mixes.
      */
+    /**
+     * The user's yearly recaps and all-time top songs — "Your Top Songs 2024",
+     * "Your All-Time Top Songs" and friends.
+     *
+     * These never reach the home feed outside a few weeks each December, and they
+     * only arrive via libraryV3 if the user explicitly saved them, so a sync run
+     * in any other month could never see them. They ARE reachable through the
+     * Partner API's search, which is personalized to the caller: the ids it
+     * returns resolve to THIS listener's playlists (verified 2026-08-02 — "Your
+     * All-Time Top Songs" came back with 121 tracks matching the user's taste,
+     * "Your Top Songs 2025" with 100).
+     *
+     * Uses `searchDesktop`, which already has a working persisted-query hash and,
+     * unlike the public Web API, is not quota-throttled.
+     *
+     * Results are filtered to Spotify's OWN id namespace on purpose. A name search
+     * also returns user-made playlists called "Your Top Songs 2015" and similar,
+     * which belong to strangers; only `37i9dQ…` ids are Spotify-generated, and the
+     * personalized families here (`…1F` Wrapped, `…1CK` all-time, `…EVX`) are
+     * distinct from the `37i9dQZF1D` editorial prefix the mix filter rejects.
+     */
+    suspend fun getYearlyMixes(): SyncResult<List<SpotifyPlaylistItem>> = withContext(Dispatchers.IO) {
+        try {
+            val out = linkedMapOf<String, SpotifyPlaylistItem>()
+            for (term in YEARLY_SEARCH_TERMS) {
+                val variables = buildJsonObject {
+                    put("searchTerm", term)
+                    put("offset", 0)
+                    put("limit", 20)
+                    put("numberOfTopResults", 5)
+                    put("includeAudiobooks", false)
+                    put("includePreReleases", false)
+                }.toString()
+                val root = executeGraphQL(
+                    operationName = "searchDesktop",
+                    variables = variables,
+                    hash = SpotifyAuthConfig.HASH_SEARCH_DESKTOP,
+                ) ?: continue
+                val search = root["data"]?.jsonObject?.get("search")?.jsonObject ?: continue
+                // Spotify scatters these across buckets — the yearly recaps came
+                // back under "playlists" and "topResults", all-time under "genres".
+                for (bucket in listOf("playlists", "topResults", "genres")) {
+                    val items = search[bucket]?.jsonObject?.get("items")?.jsonArray ?: continue
+                    for (el in items) {
+                        val o = el.jsonObject
+                        val d = o["data"]?.jsonObject ?: o
+                        val uri = d["uri"]?.jsonPrimitive?.contentOrNull ?: continue
+                        val name = d["name"]?.jsonPrimitive?.contentOrNull ?: continue
+                        val id = uri.removePrefix("spotify:playlist:")
+                        if (uri == id) continue                               // not a playlist
+                        if (!id.startsWith(SPOTIFY_OWNED_ID_PREFIX)) continue // stranger's copy
+                        if (!name.startsWith("Your", ignoreCase = true)) continue
+                        val art = d["images"]?.jsonObject?.get("items")?.jsonArray?.firstOrNull()
+                            ?.jsonObject?.get("sources")?.jsonArray?.firstOrNull()
+                            ?.jsonObject?.get("url")?.jsonPrimitive?.contentOrNull
+                        out.putIfAbsent(
+                            id,
+                            SpotifyPlaylistItem(
+                                id = id,
+                                name = name,
+                                owner = SpotifyOwner(id = "spotify", display_name = "Spotify"),
+                                images = if (art != null) listOf(SpotifyImage(url = art)) else emptyList(),
+                                tracks = SpotifyTracksRef(total = 0),
+                            ),
+                        )
+                    }
+                }
+            }
+            Log.d(TAG, "getYearlyMixes: found ${out.size} — ${out.values.map { it.name }}")
+            SyncResult.Success(out.values.toList())
+        } catch (e: Exception) {
+            Log.w(TAG, "getYearlyMixes failed", e)
+            SyncResult.Error("getYearlyMixes failed: ${e.message}", e)
+        }
+    }
+
     suspend fun getDailyMixes(): SyncResult<List<SpotifyPlaylistItem>> = withContext(Dispatchers.IO) {
         Log.d(TAG, "getDailyMixes: fetching home feed for Spotify mixes")
 
@@ -497,7 +604,7 @@ class SpotifyApiClient @Inject constructor(
                             ?: "spotify"
                         val ownerName = ownerData?.get("name")?.jsonPrimitive?.contentOrNull ?: "Spotify"
 
-                        if (!isSpotifyMix(name, ownerId)) continue
+                        if (!isSpotifyMix(name, ownerId, uri.removePrefix("spotify:playlist:"))) continue
 
                         val playlistId = uri.removePrefix("spotify:playlist:")
 

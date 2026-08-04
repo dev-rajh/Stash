@@ -200,7 +200,9 @@ class HomeViewModel @Inject constructor(
         discoveryQueueDao.observeNonFailedCountsByRecipe(),
         // Builtin ids are a one-shot suspend read wrapped as a flow.
         flow { emit(recipeDao.getBuiltinPlaylistIds()) },
-    ) { playlists, recipes, discoveryCounts, builtinIdList ->
+        // Orders the rails by what actually changed — see freshestFirst.
+        playlistDao.observeLatestAdditionPerPlaylist(),
+    ) { playlists, recipes, discoveryCounts, builtinIdList, recency ->
         val builtinIds = builtinIdList.toSet()
         val customRecipes = recipes.filter { !it.isBuiltin && it.playlistId != null }
         val customMixPlaylistIds = customRecipes.mapNotNull { it.playlistId }.toSet()
@@ -260,7 +262,18 @@ class HomeViewModel @Inject constructor(
             }
         }
 
-        HomePlaylistData(hero, madeForYou, radios, moodDecades, yourMixes, customMixPlaylistIds)
+        // Rails lead with whatever just changed. yourMixes is deliberately left
+        // alone: it feeds the hero pager, where a stable position matters more
+        // than freshness, and it's a handful of user-authored mixes anyway.
+        val recencyById = recency.associate { it.playlistId to it.latestAddedAt }
+        HomePlaylistData(
+            hero = hero,
+            madeForYou = madeForYou.freshestFirst(recencyById),
+            radios = radios.freshestFirst(recencyById),
+            moodDecades = moodDecades.freshestFirst(recencyById),
+            yourMixes = yourMixes,
+            customMixPlaylistIds = customMixPlaylistIds,
+        )
     }
 
     private fun Playlist.toHomeMix(buildState: MixBuildState = MixBuildState.READY) =

@@ -243,7 +243,7 @@ class LibraryViewModelTest {
         localImportCoordinator: LocalImportCoordinator = mock {
             on { state } doReturn MutableStateFlow<LocalImportState>(LocalImportState.Idle)
         },
-        streamingPreference: StreamingPreference = mock(),
+        streamingPreference: StreamingPreference = mock { on { enabled } doReturn flowOf(false) },
         losslessUpgrader: LosslessUpgrader = mock(),
     ): LibraryViewModel = LibraryViewModel(
         musicRepository = musicRepository,

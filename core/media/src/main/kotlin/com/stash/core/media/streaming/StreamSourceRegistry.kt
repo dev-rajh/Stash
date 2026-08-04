@@ -112,11 +112,32 @@ class StreamSourceRegistry @Inject constructor(
                 // playlist would spend a search call + the user's arcod account
                 // on every queue track speculatively, not just the ones played.
                 if (allowYtDlp) add("arcod" to arcod::resolve)
-            } else if (streamingPreference.isForceAmzOnly()) {
-                // Test toggle (outage drill): amz ONLY — kennyy/squid/youtube
-                // removed from play so a track either streams via amz or fails
-                // visibly. Ignores allowYouTube/allowYtDlp — it's amz or nothing.
-                add("amz" to amz::resolve)
+                // ...and YouTube stays available behind it. A force toggle is a
+                // TEST instrument, but the pref outlives the build that showed it.
+                // While arcod was parked, a stale `force_arcod_only = true` meant
+                // every track resolved through a dead source with no fallback and
+                // no UI left to switch it off — silence, permanently. arcod is
+                // live again now, but the guarantee has to survive the NEXT time a
+                // source is parked, which is the amz failure described below.
+                //
+                // Keeping the fallback costs the toggle a little of its "fails
+                // visibly" sharpness and buys back the guarantee that no
+                // preference, however stale, can leave a user unable to play music.
+                // That trade is not close.
+                if (allowYouTube) add("youtube" to { t: TrackEntity -> youtube.resolve(t, allowYtDlp) })
+                // NOTE: the force-amz branch is deliberately gone (2026-07-31).
+                //
+                // amz is parked, and its Settings toggle was removed with it — but a
+                // user who had already switched it on still has `force_amz_only = true`
+                // sitting in DataStore, with no UI left to switch it off. Had this
+                // branch survived, those users would route every track through a
+                // parked source and get silence, permanently, with no way out.
+                //
+                // Parking a source therefore has to mean parking its force branch in
+                // the same change. This is the exact failure shape that took a full
+                // debugging session when force-YouTube was left enabled in a release
+                // install: a stale preference quietly disabling lossless. The pref key
+                // and StreamingPreference accessor stay for re-enablement.
             } else if (streamingPreference.isForceYouTubeFallback()) {
                 // Test toggle: skip the lossless sources, forcing the
                 // YouTube fallback path. Still gated by allowYouTube so the
@@ -154,12 +175,23 @@ class StreamSourceRegistry @Inject constructor(
                 // yt-dlp extraction itself. Removing them is a larger win than the
                 // extraction fix that preceded it.
                 //
-                // arcod was ALREADY parked on the download side
-                // (LosslessSourceRegistry.PARKED_SOURCE_IDS); this brings streaming
-                // in line. Re-enabling either is uncommenting its block — the
-                // resolvers, their force-toggles, and their tests all stay.
+                // amz stays parked (client-side decrypt, no working operator).
                 // add("amz" to amz::resolve)
-                // add("arcod" to arcod::resolve)
+                //
+                // arcod UNPARKED 2026-08-01: the operator rotated the integration
+                // key and moved us to /v2/stash — verified live (stream returns
+                // audio/flac, fLaC-magic byte-checked). Sits AFTER qbdlx (qbdlx is
+                // plain Range-seekable FLAC with no per-user login) and before the
+                // lossy YouTube fallback, so a track qbdlx misses can still play
+                // lossless for anyone who connected an ARCOD account.
+                //
+                // Foreground/next-up only (allowYtDlp), like qbdlx: it spends the
+                // user's own arcod quota, so the speculative background fill must
+                // not touch it. Also build-gated — an APK without the private key
+                // can only 403, so skipping it avoids a guaranteed-wasted round trip.
+                if (allowYtDlp && BuildConfig.ARCOD_CONFIGURED) {
+                    add("arcod" to arcod::resolve)
+                }
                 if (allowYouTube) add("youtube" to { t: TrackEntity -> youtube.resolve(t, allowYtDlp) })
             }
         }

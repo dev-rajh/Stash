@@ -144,7 +144,7 @@ data class SyncUiState(
     // -- Hero card: last-sync metadata ----------------------------------------
     /** Relative time string for the most recent sync, e.g. "2 hours ago". Empty if never synced. */
     val lastSyncRelativeTime: String = "",
-    /** Tracks downloaded in the most recent sync, or null if never synced. */
+    /** New tracks the most recent sync added, or null if never synced. */
     val lastSyncTrackCount: Int? = null,
     /** Short health label: "✓ healthy", "! partial", "× failed", or "". */
     val lastSyncHealthLabel: String = "",
@@ -183,6 +183,8 @@ class SyncViewModel @Inject constructor(
     private val tokenManager: TokenManager,
     private val syncHistoryDao: SyncHistoryDao,
     private val playlistDao: com.stash.core.data.db.dao.PlaylistDao,
+    private val syncUndoDao: com.stash.core.data.db.dao.SyncUndoDao,
+    private val syncLog: com.stash.core.data.sync.SyncLog,
     private val downloadQueueDao: com.stash.core.data.db.dao.DownloadQueueDao,
     private val musicRepository: com.stash.core.data.repository.MusicRepository,
     private val blocklistGuard: com.stash.core.data.blocklist.BlocklistGuard,
@@ -230,6 +232,74 @@ class SyncViewModel @Inject constructor(
                 started = SharingStarted.WhileSubscribed(5_000),
                 initialValue = 0,
             )
+
+    /**
+     * The most recent pre-sync restore point, or null when there's nothing to
+     * undo. Drives the "Undo last sync" card — absent means the card isn't
+     * rendered at all, so the control only exists when it can actually do
+     * something.
+     */
+    val undoPoint: StateFlow<com.stash.core.data.db.entity.SyncUndoPointEntity?> =
+        syncUndoDao.latestPoint()
+            .stateIn(
+                scope = viewModelScope,
+                started = SharingStarted.WhileSubscribed(5_000),
+                initialValue = null,
+            )
+
+    /**
+     * Live account of what the running sync is finding. Drives the terminal on
+     * the Sync tab; empty until the first sync of this app session.
+     */
+    val syncLogLines: StateFlow<List<com.stash.core.data.sync.SyncLog.Line>> =
+        syncLog.lines
+            .stateIn(
+                scope = viewModelScope,
+                started = SharingStarted.WhileSubscribed(5_000),
+                initialValue = emptyList(),
+            )
+
+    /** The log as plain text, for the copy-to-clipboard action (bug reports). */
+    fun syncLogAsText(): String = syncLog.asPlainText()
+
+    /** True while an undo is applying — the button disables so it can't double-fire. */
+    private val _undoInProgress = MutableStateFlow(false)
+    val undoInProgress: StateFlow<Boolean> = _undoInProgress
+
+    /** One-shot result message after an undo ("Restored 2,919 tracks…"), or null. */
+    private val _undoResult = MutableStateFlow<String?>(null)
+    val undoResult: StateFlow<String?> = _undoResult
+
+    /**
+     * Roll the library back to how it looked before the last sync: playlists it
+     * hid come back, playlists it emptied are refilled in order. Tracks the user
+     * added by hand are left untouched.
+     *
+     * Doesn't restore deleted audio files — nothing can — but sync no longer
+     * deletes them while any source is on Accumulate.
+     */
+    fun onUndoLastSync() {
+        if (_undoInProgress.value) return
+        viewModelScope.launch {
+            _undoInProgress.value = true
+            val point = syncUndoDao.latestPointNow()
+            if (point == null) {
+                _undoResult.value = "Nothing to undo."
+            } else {
+                val restored = runCatching { syncUndoDao.restore(point.syncId) }
+                _undoResult.value = restored.fold(
+                    onSuccess = { count ->
+                        "Undone — restored ${point.playlistCount} playlists and $count tracks."
+                    },
+                    onFailure = { "Couldn't undo that sync. Nothing was changed." },
+                )
+            }
+            _undoInProgress.value = false
+        }
+    }
+
+    /** Clear the one-shot undo message once the UI has shown it. */
+    fun onUndoResultShown() { _undoResult.value = null }
 
     /**
      * Per-source auth expiry state from SyncStateManager. The Sync tab's
@@ -589,7 +659,13 @@ class SyncViewModel @Inject constructor(
                 _uiState.update { state ->
                     state.copy(
                         lastSyncRelativeTime = relativeTime,
-                        lastSyncTrackCount = latest?.tracksDownloaded,
+                        // What the sync FOUND, not what it downloaded. In Online
+                        // mode nothing downloads, so tracksDownloaded is always 0
+                        // and the headline read "0 tracks" after a run that added
+                        // 159 songs. newTracksFound is the honest answer in both
+                        // modes — Offline downloads them, Online streams them, but
+                        // either way they are new music in the library.
+                        lastSyncTrackCount = latest?.newTracksFound,
                         lastSyncHealthLabel = healthLabel,
                         lastSyncHealthColor = healthColor,
                     )

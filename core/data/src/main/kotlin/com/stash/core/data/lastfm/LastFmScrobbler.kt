@@ -86,10 +86,11 @@ class LastFmScrobbler @Inject constructor(
     suspend fun notifyNowPlaying(artist: String, track: String, album: String? = null) {
         val session = runCatching { sessionPreference.session.firstOrNull() }.getOrNull()
             ?: return
+        val submitArtist = scrobbleArtist(artist)
         runCatching {
             apiClient.updateNowPlaying(
                 sessionKey = session.sessionKey,
-                artist = artist,
+                artist = submitArtist,
                 track = track,
                 album = album,
             )
@@ -128,7 +129,7 @@ class LastFmScrobbler @Inject constructor(
     private suspend fun submit(session: LastFmSession, event: ListeningEventEntity, track: TrackEntity) {
         val result = apiClient.scrobble(
             sessionKey = session.sessionKey,
-            artist = track.artist,
+            artist = scrobbleArtist(track.artist),
             track = track.title,
             album = track.album.takeIf { it.isNotBlank() },
             timestampEpochSeconds = event.startedAt / 1000,
@@ -141,7 +142,29 @@ class LastFmScrobbler @Inject constructor(
         }
     }
 
+    /**
+     * Applies the "only first artist" preference, if the user enabled it.
+     */
+    private suspend fun scrobbleArtist(artist: String): String =
+        if (sessionPreference.firstArtistOnly.firstOrNull() == true) primaryArtist(artist) else artist
+
     companion object {
         private const val TAG = "LastFmScrobbler"
     }
 }
+
+/**
+ * Best-effort primary artist for scrobbling. Every parser in the app joins
+ * multiple artists with `", "` (PlaylistFetchWorker, ResponseParserHelpers,
+ * SearchResponseParser), so the join delimiter is the split delimiter.
+ *
+ * Deliberately NOT a regex on "&" / "feat." / "x" — that shreds real band
+ * names like "Simon & Garfunkel".
+ *
+ * Known limitation: a single artist whose own name contains ", " is
+ * truncated ("Tyler, The Creator" -> "Tyler"). Fixing that properly needs a
+ * structured artist list on TrackEntity and a DB migration. This is why the
+ * setting is opt-in and off by default.
+ */
+internal fun primaryArtist(artist: String): String =
+    artist.substringBefore(", ").trim().ifBlank { artist }

@@ -26,6 +26,18 @@ data class PlaylistWithTracks(
 )
 
 /**
+ * When a playlist last gained a track — the "this actually changed" signal Home
+ * orders its mix rails by. See [PlaylistDao.observeLatestAdditionPerPlaylist].
+ *
+ * @property playlistId    The playlist.
+ * @property latestAddedAt Epoch millis of its newest live membership.
+ */
+data class PlaylistRecency(
+    val playlistId: Long,
+    val latestAddedAt: Long,
+)
+
+/**
  * Data-access object for [PlaylistEntity] and the
  * [PlaylistTrackCrossRef] join table.
  */
@@ -292,6 +304,37 @@ interface PlaylistDao {
         ORDER BY p.name ASC
     """)
     fun getAllVisible(includeStreamable: Boolean): Flow<List<PlaylistEntity>>
+
+    /**
+     * When each playlist last GAINED a track, for ordering Home's mix rails.
+     *
+     * Home used to inherit [getAllVisible]'s `ORDER BY p.name ASC`, which meant
+     * the front of every rail was a fixed alphabetical prefix — on a real library
+     * the first cards were "'00s R&B", "'70s Lite Hits", "'70s Rock", forever.
+     * A sync could add hundreds of songs and Home looked identical, because the
+     * mixes that changed sorted into the middle where nobody scrolls.
+     *
+     * Deliberately a separate query rather than a new ORDER BY on [getAllVisible]:
+     * that one is shared with Android Auto's browse tree
+     * (StashPlaybackService), where alphabetical is the right answer.
+     *
+     * `removed_at IS NULL` so a mix doesn't look fresh because of a track it
+     * dropped. Playlists with no live memberships are simply absent — callers
+     * treat missing as "no recency" and sort it last.
+     *
+     * No index on `added_at` (see PlaylistTrackCrossRef); this is one grouped
+     * scan of the membership table — ~21k rows / ~270 playlists on a large real
+     * library. Revisit if that grows by an order of magnitude.
+     */
+    @Query(
+        """
+        SELECT pt.playlist_id AS playlistId, MAX(pt.added_at) AS latestAddedAt
+        FROM playlist_tracks pt
+        WHERE pt.removed_at IS NULL
+        GROUP BY pt.playlist_id
+        """
+    )
+    fun observeLatestAdditionPerPlaylist(): Flow<List<PlaylistRecency>>
 
     /** All playlists from a specific music source. */
     @Query("SELECT * FROM playlists WHERE source = :source ORDER BY name ASC")

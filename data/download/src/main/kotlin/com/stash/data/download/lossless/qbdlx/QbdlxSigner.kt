@@ -8,9 +8,15 @@ import java.security.MessageDigest
  * literal concatenation per endpoint were reverse-engineered from qbdlx's JS
  * and locked by [QbdlxSignerTest] against real HAR vectors. [clock] returns
  * epoch SECONDS (injectable so the vectors are reproducible).
+ *
+ * The `app_secret` is a PER-CALL argument, not constructor state: a Qobuz token
+ * only returns full-quality FLAC when it is signed with the `app_secret` of the
+ * app_id it was minted under. The pool spans more than one app_id (each with its
+ * own secret) and a user-connected account carries its own pair, so the correct
+ * secret is chosen per request by [QbdlxSigningResolver] — a single bundled
+ * secret silently degrades mismatched tokens to 30-second previews.
  */
 class QbdlxSigner(
-    private val appSecret: String,
     private val clock: () -> Long = { System.currentTimeMillis() / 1000L },
 ) {
     fun requestTs(): Long = clock()
@@ -20,10 +26,10 @@ class QbdlxSigner(
      * passes that same value into both the URL's `request_ts` param and here, so
      * the signed timestamp can never drift from the sent timestamp.
      */
-    fun signGetFileUrl(ts: Long, trackId: Long, formatId: Int): String =
+    fun signGetFileUrl(ts: Long, trackId: Long, formatId: Int, appSecret: String): String =
         md5("trackgetFileUrl" + "format_id$formatId" + "intentstream" + "track_id$trackId" + ts + appSecret)
 
-    fun signLyricsUrl(ts: Long, trackId: Long): String =
+    fun signLyricsUrl(ts: Long, trackId: Long, appSecret: String): String =
         md5("tracklyricsUrl" + "track_id$trackId" + ts + appSecret)
 
     private fun md5(s: String): String =

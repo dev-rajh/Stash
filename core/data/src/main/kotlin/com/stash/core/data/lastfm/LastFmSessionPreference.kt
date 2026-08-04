@@ -39,6 +39,7 @@ class LastFmSessionPreference @Inject constructor(
     private val usernameKey = stringPreferencesKey("username")
     private val sessionKeyKey = stringPreferencesKey("session_key")
     private val bannerDismissedKey = booleanPreferencesKey("home_banner_dismissed")
+    private val firstArtistOnlyKey = booleanPreferencesKey("scrobble_first_artist_only")
 
     val session: Flow<LastFmSession?> = context.lastFmDataStore.data.map { prefs ->
         val u = prefs[usernameKey]
@@ -77,5 +78,18 @@ class LastFmSessionPreference @Inject constructor(
 
     suspend fun setBannerDismissed(dismissed: Boolean) {
         context.lastFmDataStore.edit { it[bannerDismissedKey] = dismissed }
+    }
+
+    /**
+     * When true, only the primary (first) artist is submitted to Last.fm.
+     * Off by default. Deliberately NOT cleared by [clear] — a user who
+     * disconnects and reconnects keeps their choice.
+     */
+    val firstArtistOnly: Flow<Boolean> = context.lastFmDataStore.data.map { prefs ->
+        prefs[firstArtistOnlyKey] ?: false
+    }
+
+    suspend fun setFirstArtistOnly(enabled: Boolean) {
+        context.lastFmDataStore.edit { it[firstArtistOnlyKey] = enabled }
     }
 }

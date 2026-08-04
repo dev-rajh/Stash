@@ -163,6 +163,10 @@ class LibraryViewModel @Inject constructor(
      */
     private val libraryDataFlow = combine(
         musicRepository.getAllPlaylists(),
+        // Downloads only, deliberately. Library is the offline-first surface —
+        // "the music that is actually on this device" — so it stays downloads-only
+        // even in Online mode. Recently-added STREAMABLE tracks belong on Home,
+        // which is the streaming/discovery surface.
         musicRepository.getRecentlyAdded(20),
     ) { playlists, recentlyAdded ->
         LibraryData(playlists = playlists, recentlyAdded = recentlyAdded)
@@ -480,7 +484,6 @@ class LibraryViewModel @Inject constructor(
      * than the full library.
      */
     fun playTrack(track: Track, allTracks: List<Track>) {
-        if (track.filePath == null) return // not downloaded yet
         viewModelScope.launch {
             val downloadedTracks = allTracks.filter { it.filePath != null }
             val index = downloadedTracks.indexOfFirst { it.id == track.id }

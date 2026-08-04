@@ -218,6 +218,12 @@ class HomeViewModelTest {
         val discoveryQueueDao = mock<com.stash.core.data.db.dao.DiscoveryQueueDao> {
             on { observeNonFailedCountsByRecipe() } doReturn flowOf(emptyList())
         }
+        // Same deal: the rail-recency source is the 5th arm of that combine, and
+        // an unstubbed Flow returns null, so combine never emits and every test
+        // times out rather than failing on an assertion.
+        val playlistDao = mock<com.stash.core.data.db.dao.PlaylistDao> {
+            on { observeLatestAdditionPerPlaylist() } doReturn flowOf(emptyList())
+        }
         return HomeViewModel(
             musicRepository = musicRepo,
             playerRepository = playerRepository,
@@ -226,7 +232,7 @@ class HomeViewModelTest {
             tipJarRepository = tipJar,
             recipeDao = recipeDao,
             discoveryQueueDao = discoveryQueueDao,
-            playlistDao = mock(),
+            playlistDao = playlistDao,
             downloadNetworkPreference = mock(),
             streamingPreference = streamingPreference,
             metadataBackfillState = metadataBackfill,

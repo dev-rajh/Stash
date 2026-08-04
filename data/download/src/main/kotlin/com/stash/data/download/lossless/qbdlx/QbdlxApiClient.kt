@@ -27,10 +27,13 @@ class QbdlxApiException(val status: Int, message: String? = null) : RuntimeExcep
 class QbdlxApiClient @Inject constructor(
     sharedClient: OkHttpClient,
     private val signer: QbdlxSigner,
+    private val signingResolver: QbdlxSigningResolver,
 ) {
     // appId read from BuildConfig directly (like ArcodClient reads ARCOD_STREAM_BASE) —
     // NOT a constructor String param, to avoid polluting the global Hilt String namespace.
-    // internal var so tests can override.
+    // internal var so tests can override. This is the CATALOG default (search/metadata
+    // work under any valid app_id); getFileUrl overrides it per-token via the resolver,
+    // because ONLY the file-url response degrades to a preview on an app_id mismatch.
     internal var appId: String = com.stash.data.download.BuildConfig.QBDLX_APP_ID
     internal var httpClient: OkHttpClient = sharedClient  // direct www.qobuz.com; no interceptor
     internal var baseUrl: String = ORIGIN
@@ -159,18 +162,22 @@ class QbdlxApiClient @Inject constructor(
     /** Resolve a track id to a signed FLAC URL, classified. */
     suspend fun getFileUrl(trackId: Long, formatId: Int, token: String): QbdlxResolveResult =
         withContext(Dispatchers.IO) {
+            // Sign with THIS token's own (app_id, app_secret): the pool spans more
+            // than one app_id and a connected account carries its own pair. Sign
+            // with the wrong secret and Qobuz returns a 30-second preview, not FLAC.
+            val signing = signingResolver.signingFor(token)
             // ts and sig MUST be one atomic read: take ts once, sign with it, send the same ts.
             val ts = signer.requestTs()
-            val sig = signer.signGetFileUrl(ts = ts, trackId = trackId, formatId = formatId)
+            val sig = signer.signGetFileUrl(ts = ts, trackId = trackId, formatId = formatId, appSecret = signing.appSecret)
             val url = "$baseUrl/api.json/0.2/track/getFileUrl".toHttpUrl().newBuilder()
                 .addQueryParameter("track_id", trackId.toString())
                 .addQueryParameter("format_id", formatId.toString())
-                .addQueryParameter("app_id", appId)
+                .addQueryParameter("app_id", signing.appId)
                 .addQueryParameter("request_ts", ts.toString())
                 .addQueryParameter("request_sig", sig)
                 .addQueryParameter("intent", "stream")
                 .build()
-            val raw = get(url.toString(), token)
+            val raw = get(url.toString(), token, appIdHeader = signing.appId)
             val result = classify(json.decodeFromString<QbdlxFileUrl>(raw))
             if (result is QbdlxResolveResult.TokenDead) {
                 android.util.Log.w(TAG, "getFileUrl classified TokenDead for track=$trackId fmt=$formatId; raw=${raw.take(300)}")
@@ -187,9 +194,9 @@ class QbdlxApiClient @Inject constructor(
         return QbdlxResolveResult.Ok(f.url, "flac", f.bitDepth, (f.samplingRate * 1000f).toInt())
     }
 
-    private fun get(url: String, token: String): String {
+    private fun get(url: String, token: String, appIdHeader: String = appId): String {
         val req = Request.Builder().url(url)
-            .header("X-App-Id", appId)
+            .header("X-App-Id", appIdHeader)
             .header("X-User-Auth-Token", token)
             .header("Accept", "application/json")
             .header("User-Agent", UA)
@@ -199,6 +206,22 @@ class QbdlxApiClient @Inject constructor(
             if (resp.code == 401) {
                 android.util.Log.w(TAG, "auth 401 on ${url.substringBefore('?').substringAfterLast('/')}: ${body.take(160)}")
                 throw QbdlxAuthException(401, body.take(120))
+            }
+            // A banned account is a DEAD TOKEN, not a service failure.
+            //
+            // Qobuz answers a blocked account with 403 USER_BLOCKED, which used to
+            // fall through to the generic branch below: reported as a health
+            // failure, never marked dead, never rotated away from. Because the
+            // active token is sticky, one banned account in the pool meant every
+            // single resolve failed to it and dropped to lossy YouTube — with the
+            // other live tokens sitting unused. Observed on-device 2026-08-02.
+            //
+            // Matched on the error_code rather than the bare status so a 403 that
+            // genuinely means "service said no" (rate limit, geo) still counts as
+            // a transient failure and doesn't burn a good token.
+            if (resp.code == 403 && body.contains("USER_BLOCKED", ignoreCase = true)) {
+                android.util.Log.w(TAG, "token's account is blocked (403 USER_BLOCKED) — marking dead + rotating")
+                throw QbdlxAuthException(403, body.take(120))
             }
             if (!resp.isSuccessful) {
                 android.util.Log.w(TAG, "HTTP ${resp.code} on ${url.substringBefore('?').substringAfterLast('/')}: ${body.take(160)}")

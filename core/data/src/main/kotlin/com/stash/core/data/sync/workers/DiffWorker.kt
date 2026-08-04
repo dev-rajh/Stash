@@ -92,6 +92,8 @@ class DiffWorker @AssistedInject constructor(
     private val syncPreferencesManager: SyncPreferencesManager,
     private val blocklistGuard: com.stash.core.data.blocklist.BlocklistGuard,
     private val streamingPreference: com.stash.core.data.prefs.StreamingPreference,
+    private val syncUndoDao: com.stash.core.data.db.dao.SyncUndoDao,
+    private val syncLog: com.stash.core.data.sync.SyncLog,
 ) : CoroutineWorker(appContext, params) {
 
     companion object {
@@ -99,6 +101,8 @@ class DiffWorker @AssistedInject constructor(
         const val KEY_NEW_TRACKS = "new_tracks"
         const val KEY_PLAYLISTS_CHECKED = "playlists_checked"
         private const val TAG = "DiffWorker"
+        /** How many new songs to name before collapsing to "+N more". */
+        private const val NEW_TRACKS_NAMED = 3
         private const val NEVER_MATCH_SENTINEL = "\u0000__stash_never_match__"
     }
 
@@ -135,6 +139,23 @@ class DiffWorker @AssistedInject constructor(
             syncStateManager.onDiffing()
             syncHistoryDao.updateStatus(syncId, SyncState.DIFFING)
 
+            // Restore point for "Undo last sync", captured BEFORE anything
+            // destructive: everything above this line only reads or writes
+            // snapshot tables, while below it REFRESH clears playlist membership
+            // and stale playlists get deactivated. Bulk INSERT…SELECT, so this is
+            // one statement per table rather than a per-row copy.
+            //
+            // Never fatal: a sync that works must not be blocked because the
+            // safety net couldn't be set up. Worst case the user has no undo for
+            // this run, which is exactly where they were before the feature.
+            runCatching {
+                syncUndoDao.capture(syncId, System.currentTimeMillis())
+            }.onFailure { e ->
+                if (e is kotlin.coroutines.cancellation.CancellationException) throw e
+                Log.w(TAG, "Undo restore point capture failed for sync $syncId", e)
+                syncLog.warn("Couldn't save a restore point — undo unavailable for this sync")
+            }
+
             // Read each source's sync mode once at the start of the diff
             // pass. Per-source (not global) as of v0.5 — the user picks
             // REFRESH/ACCUMULATE independently for Spotify and YouTube in
@@ -168,8 +189,18 @@ class DiffWorker @AssistedInject constructor(
                 // and needs its id to drive the block below).
                 val localPlaylist = findOrCreatePlaylist(playlistSnapshot, streamingMode)
 
-                // Skip playlists the user has disabled in Sync Preferences.
-                if (!localPlaylist.syncEnabled) {
+                // Skip playlists the user has disabled in Sync Preferences —
+                // EXCEPT algorithmic mixes, which are surface-only.
+                //
+                // A mix can never enqueue a download regardless of this flag
+                // (shouldEnqueueForDownload excludes DAILY_MIX outright), and the
+                // fetch worker has ALREADY pulled its tracks over the network this
+                // run. Skipping therefore bought nothing and threw that work away,
+                // leaving the mix on screen with zero tracks — the "I have 130
+                // mixes but Home shows nothing" report. Linking them is pure
+                // local bookkeeping: no extra request, no unasked downloads, and
+                // Online mode can stream them on tap.
+                if (!localPlaylist.syncEnabled && localPlaylist.type != PlaylistType.DAILY_MIX) {
                     Log.d(TAG, "Playlist '${playlistSnapshot.playlistName}' sync disabled, skipping")
                     continue
                 }
@@ -222,20 +253,47 @@ class DiffWorker @AssistedInject constructor(
             val youtubeSourceIds = playlistSnapshots
                 .filter { it.source == MusicSource.YOUTUBE }
                 .map { it.sourcePlaylistId }
-            // #post-343: mirrors the Spotify inventoryComplete guard — never treat a
-            // PARTIAL YouTube fetch (one failed sub-leg: home mixes / liked songs /
-            // a specific playlist's tracks) as "these other playlists are gone."
-            // A single flaky call used to hide the user's entire YouTube library.
-            if (youtubeSourceIds.isNotEmpty() && youtubeInventoryComplete) {
+            // Close with the answer to "what did this sync actually get me?".
+            // Saying "no new music" outright matters as much as listing finds: a
+            // sync that changed nothing should look different from one that
+            // failed, and previously both just stopped.
+            if (newTrackCount > 0) {
+                syncLog.success("$newTrackCount new song${if (newTrackCount == 1) "" else "s"} added")
+            } else {
+                syncLog.info("No new music this time — everything already in your library")
+            }
+
+            // Gated by the SAME predicate Spotify uses — REFRESH *and* a complete
+            // inventory. This previously checked only the inventory half, so an
+            // ACCUMULATE sync still hid YouTube playlists that the run didn't
+            // return, including user-created ones: the mode that promises "never
+            // remove anything" was quietly removing things. Spotify honoured the
+            // mode, YouTube didn't, which is why a sync could gain Spotify
+            // playlists and lose YouTube ones in the same pass.
+            if (youtubeSourceIds.isNotEmpty() &&
+                shouldDeactivateMissingPlaylists(youtubeSyncMode, youtubeInventoryComplete)
+            ) {
                 val hidden = playlistDao.deactivateMissingForSource(
                     source = MusicSource.YOUTUBE,
                     currentSourceIds = youtubeSourceIds,
                 )
                 if (hidden > 0) {
                     Log.i(TAG, "Deactivated $hidden stale YouTube playlist(s)")
+                    syncLog.warn("Hid $hidden YouTube playlist(s) not returned this run (Refresh mode)")
                 }
             } else if (youtubeSourceIds.isNotEmpty()) {
-                Log.w(TAG, "Skipping stale-YouTube-playlist deactivation — this sync's inventory was incomplete")
+                Log.i(
+                    TAG,
+                    "Skipping stale-YouTube-playlist deactivation " +
+                        "(mode=$youtubeSyncMode inventoryComplete=$youtubeInventoryComplete)",
+                )
+                syncLog.info(
+                    if (youtubeSyncMode != com.stash.core.model.SyncMode.REFRESH) {
+                        "Kept all YouTube playlists (Accumulate never removes)"
+                    } else {
+                        "Kept all YouTube playlists — this run's fetch was incomplete"
+                    },
+                )
             }
 
             // Clean up orphaned tracks whose playlists were refreshed and
@@ -338,6 +396,10 @@ class DiffWorker @AssistedInject constructor(
             syncEnabled = defaultSyncEnabled(snapshot.playlistType, streamingMode),
         )
         val id = playlistDao.insert(newPlaylist)
+        // A playlist or mix that wasn't here before is news — arguably the most
+        // interesting thing a sync can report, and previously invisible.
+        val kind = if (snapshot.playlistType == PlaylistType.DAILY_MIX) "mix" else "playlist"
+        syncLog.success("New $kind: ${snapshot.playlistName}")
         return newPlaylist.copy(id = id)
     }
 
@@ -609,6 +671,18 @@ class DiffWorker @AssistedInject constructor(
             }
         }
         val newTrackCount = newTracks.size
+        // Name what actually arrived. A count ("3 new tracks") still leaves the
+        // user hunting for which three — the whole complaint about sync being a
+        // dead end. These are tracks NEW TO THE LIBRARY, so it is genuinely music
+        // they have not had before, not a reshuffle.
+        if (newTracks.isNotEmpty()) {
+            val named = newTracks.take(NEW_TRACKS_NAMED)
+                .joinToString(", ") { "${it.entity.artist} - ${it.entity.title}" }
+            val more = (newTracks.size - NEW_TRACKS_NAMED).coerceAtLeast(0)
+            syncLog.success(
+                "${playlistSnapshot.playlistName}: $named" + if (more > 0) ", +$more more" else ""
+            )
+        }
 
         // ── Existing-track path: membership + enrichment ─────────────────
         // Enrichment writes (youtubeId backfill, art refresh, auto-

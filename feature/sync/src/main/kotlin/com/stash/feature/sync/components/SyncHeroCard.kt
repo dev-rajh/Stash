@@ -43,7 +43,7 @@ import com.stash.core.ui.theme.StashTheme
  * multi-phase progress widget extracted as [SyncActionProgress]).
  *
  * @param lastSyncRelativeTime  e.g. "2 hours ago", "Yesterday", or "" when never synced.
- * @param lastSyncTrackCount    Total tracks downloaded in the most recent sync, or null
+ * @param lastSyncTrackCount    New tracks the most recent sync added, or null if never synced
  *                              if never synced.
  * @param healthLabel           "✓ healthy" / "! partial" / "× failed" — small status text.
  * @param healthColor           Tint for the health label (success / warning / error).
@@ -105,7 +105,13 @@ fun SyncHeroCard(
                     Spacer(Modifier.height(2.dp))
                     val body = when {
                         lastSyncTrackCount == null -> "Never synced"
-                        else -> "$lastSyncRelativeTime · $lastSyncTrackCount tracks"
+                        // "tracks" was ambiguous enough to hide a bug for months:
+                        // it read 0 while the run had added 159 songs. Name the
+                        // thing, and say plainly when a sync found nothing rather
+                        // than printing a bare 0.
+                        lastSyncTrackCount == 0 -> "$lastSyncRelativeTime · no new songs"
+                        lastSyncTrackCount == 1 -> "$lastSyncRelativeTime · 1 new song"
+                        else -> "$lastSyncRelativeTime · $lastSyncTrackCount new songs"
                     }
                     Text(
                         text = body,

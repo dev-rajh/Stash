@@ -12,8 +12,10 @@ import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.stash.core.common.constants.StashConstants
@@ -45,8 +47,15 @@ fun SettingsPlaybackScreen(
     val streamingEnabled by viewModel.streamingEnabled.collectAsStateWithLifecycle()
     val streamOnCellular by viewModel.streamOnCellular.collectAsStateWithLifecycle()
     val forceYouTubeFallback by viewModel.forceYouTubeFallback.collectAsStateWithLifecycle()
-    val forceAmzOnly by viewModel.forceAmzOnly.collectAsStateWithLifecycle()
     val forceQbdlxOnly by viewModel.forceQbdlxOnly.collectAsStateWithLifecycle()
+    val forceArcodOnly by viewModel.forceArcodOnly.collectAsStateWithLifecycle()
+    // Gates developer instruments out of release builds. Read from the installed
+    // app's own flags rather than a module BuildConfig: it is the actual property we
+    // care about ("is this a debuggable install"), and it needs no build-file change.
+    val context = LocalContext.current
+    val isDebuggableBuild = remember(context) {
+        context.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0
+    }
     val crossfadeEnabled by viewModel.crossfadeEnabled.collectAsStateWithLifecycle()
     val crossfadeDurationMs by viewModel.crossfadeDurationMs.collectAsStateWithLifecycle()
 
@@ -61,44 +70,59 @@ fun SettingsPlaybackScreen(
 
             SettingsSectionLabel("Streaming")
             SettingsGroupCard(
-                rows = listOf(
-                    {
+                rows = buildList {
+                    add {
                         SettingsToggleRow(
                             title = "Stream on cellular",
                             subtitle = "Allow streaming over mobile data (5G / LTE). Off by default to avoid surprise data use.",
                             checked = streamOnCellular,
                             onCheckedChange = viewModel::onStreamOnCellularToggle,
                         )
-                    },
-                    {
+                    }
+                    add {
                         SettingsToggleRow(
                             title = "Stream via YouTube",
-                            subtitle = "Skip the lossless sources (Qobuz) and stream everything via YouTube. Turn this on if lossless playback is down or only playing short clips.",
+                            subtitle = "Skip Qobuz and stream everything via YouTube. Turn this on if lossless playback is down or only playing short clips.",
                             checked = forceYouTubeFallback,
                             onCheckedChange = viewModel::setForceYouTubeFallback,
                         )
-                    },
-                    // Force-ARCOD toggle row: removed 2026-07-01 while ARCOD is
-                    // parked (host down). The pref + registry branch stay; restore
-                    // this row (checked = forceArcodOnly,
-                    // onCheckedChange = viewModel::setForceArcodOnly) to re-enable.
-                    {
-                        SettingsToggleRow(
-                            title = "Stream via amz (test)",
-                            subtitle = "Route streaming AND downloads through amz (Amazon Music) only — no Qobuz, no YouTube. For testing the amz source. Turn off after testing.",
-                            checked = forceAmzOnly,
-                            onCheckedChange = viewModel::setForceAmzOnly,
-                        )
-                    },
-                    {
-                        SettingsToggleRow(
-                            title = "Force Direct Qobuz only (test)",
-                            subtitle = "Route streaming AND downloads through Direct Qobuz only — no other sources, no YouTube. For testing the Direct Qobuz source. Turn off after testing.",
-                            checked = forceQbdlxOnly,
-                            onCheckedChange = viewModel::setForceQbdlxOnly,
-                        )
-                    },
-                ),
+                    }
+                    // Force-ARCOD came back 2026-08-01 when ARCOD was unparked — as a
+                    // DEBUG-ONLY row below, not the user-facing control it used to be.
+                    // It exists because arcod and qbdlx share the Qobuz catalog: qbdlx
+                    // always matches first, so arcod's path is otherwise unreachable
+                    // without disabling Direct Qobuz.
+                    //
+                    // "Stream via amz (test)" row: REMOVED 2026-07-31. amz is parked,
+                    // so the toggle routed every stream and download through a source
+                    // no longer in the chain — it could only break playback. The pref
+                    // and registry branch stay for re-enablement; the row does not
+                    // come back as a user-facing control.
+                    //
+                    // Force-Qobuz is a DEVELOPER instrument and is debug-only below.
+                    // Shipping one of these cost a real outage: a force toggle left on
+                    // in a release install silently disabled lossless, and the hunt for
+                    // it went as far as dex-dumping the APK. Users never see a switch
+                    // whose only effect is to break their audio.
+                    if (isDebuggableBuild) {
+                        add {
+                            SettingsToggleRow(
+                                title = "Force Qobuz only (debug)",
+                                subtitle = "Debug builds only. Routes streaming and downloads through Qobuz with no YouTube fallback.",
+                                checked = forceQbdlxOnly,
+                                onCheckedChange = viewModel::setForceQbdlxOnly,
+                            )
+                        }
+                        add {
+                            SettingsToggleRow(
+                                title = "Force ARCOD only (debug)",
+                                subtitle = "Debug builds only. Routes streaming and downloads through ARCOD with no Qobuz or YouTube fallback, so a track either plays via ARCOD or fails visibly.",
+                                checked = forceArcodOnly,
+                                onCheckedChange = viewModel::setForceArcodOnly,
+                            )
+                        }
+                    }
+                },
             )
         } else {
             Text(

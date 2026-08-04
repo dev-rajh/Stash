@@ -111,7 +111,7 @@ class QbdlxPoolRefreshTest {
 
     // ---- pool parsing (pure, no network) ----
 
-    @Test fun `parsePool keeps only rows for our app_id and dedupes`() {
+    @Test fun `parsePool keeps every signable app_id, tags it, and dedupes`() {
         val body = """
             [
               {"token":"t1","country":"FR","app_id":"798273057"},
@@ -123,16 +123,44 @@ class QbdlxPoolRefreshTest {
             ]
         """.trimIndent()
 
-        val pool = HttpQbdlxRemotePool.parsePool(body, appId = "798273057")
+        // Both app_ids are now signable (we bundle both secrets), so the
+        // second-app token is KEPT and tagged — the whole point of #1.
+        val pool = HttpQbdlxRemotePool.parsePool(
+            body,
+            primaryAppId = "798273057",
+            knownAppIds = setOf("798273057", "312369995"),
+        )
+        assertThat(pool).isEqualTo("t1:FR:798273057,t2:GB:798273057,other:US:312369995")
+    }
 
-        // Other-app tokens are dropped on purpose: they need that app's own
-        // secret to sign, which this build does not bundle.
-        assertThat(pool).isEqualTo("t1:FR,t2:GB")
+    @Test fun `parsePool drops rows for app_ids we cannot sign`() {
+        val body = """
+            [
+              {"token":"t1","country":"FR","app_id":"798273057"},
+              {"token":"unsignable","country":"US","app_id":"999999999"}
+            ]
+        """.trimIndent()
+        val pool = HttpQbdlxRemotePool.parsePool(
+            body,
+            primaryAppId = "798273057",
+            knownAppIds = setOf("798273057"),
+        )
+        assertThat(pool).isEqualTo("t1:FR:798273057")
+    }
+
+    @Test fun `parsePool treats a missing app_id as the primary app`() {
+        val body = """[{"token":"t1","country":"FR"}]"""
+        val pool = HttpQbdlxRemotePool.parsePool(
+            body,
+            primaryAppId = "798273057",
+            knownAppIds = setOf("798273057"),
+        )
+        assertThat(pool).isEqualTo("t1:FR:798273057")
     }
 
     @Test fun `parsePool returns empty for junk rather than throwing`() {
-        assertThat(HttpQbdlxRemotePool.parsePool("not json", appId = "798273057")).isEmpty()
-        assertThat(HttpQbdlxRemotePool.parsePool("{}", appId = "798273057")).isEmpty()
-        assertThat(HttpQbdlxRemotePool.parsePool("[]", appId = "798273057")).isEmpty()
+        assertThat(HttpQbdlxRemotePool.parsePool("not json", knownAppIds = setOf("798273057"))).isEmpty()
+        assertThat(HttpQbdlxRemotePool.parsePool("{}", knownAppIds = setOf("798273057"))).isEmpty()
+        assertThat(HttpQbdlxRemotePool.parsePool("[]", knownAppIds = setOf("798273057"))).isEmpty()
     }
 }

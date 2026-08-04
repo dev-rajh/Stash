@@ -99,7 +99,7 @@ class LibrarySearchFieldQueryTest {
             },
             playlistImageHelper = mock(),
             localImportCoordinator = mock { on { state } doReturn MutableStateFlow<LocalImportState>(LocalImportState.Idle) },
-            streamingPreference = mock(),
+            streamingPreference = mock { on { enabled } doReturn flowOf(false) },
             flacUpgradeEnqueuer = mock(),
             ytMusicApiClient = mock(),
             losslessUpgrader = mock(),

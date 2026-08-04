@@ -69,6 +69,24 @@ class LikePreferences @Inject constructor(
     val heartDefaultYtMusic: Flow<Boolean> =
         context.likeDataStore.data.map { it[heartDefaultYtMusicKey] ?: false }
 
+    // NOTE (review pass 3, 2026-07-31): heartDefaultStash / heartDefaultSpotify /
+    // heartDefaultYtMusic are SUPERSEDED and decide nothing.
+    //
+    // They were the original "which services does the heart reach" controls. That job
+    // now belongs to mirrorLikesSpotify / mirrorLikesYtMusic below, which LikeCoordinator
+    // actually reads. The heartDefault flows are still plumbed into SettingsUiState, but
+    // no switch renders them and nothing in core/data consults them — outside tests, they
+    // have zero readers.
+    //
+    // Left in place deliberately rather than deleted: SettingsViewModel assembles UiState
+    // with an index-addressed combine (values[27], values[28], ...), so removing a source
+    // silently shifts every later index and hands the UI a type-correct wrong value. That
+    // is a worse bug than the dead weight. Remove these together with that combine, not
+    // before.
+    //
+    // The trap to avoid meanwhile: adding a Settings switch for heartDefault* would give
+    // users a control that does nothing. Wire it to the mirror prefs instead.
+
     val mirrorLikesSpotify: Flow<Boolean> =
         context.likeDataStore.data.map { it[mirrorLikesSpotifyKey] ?: false }
 

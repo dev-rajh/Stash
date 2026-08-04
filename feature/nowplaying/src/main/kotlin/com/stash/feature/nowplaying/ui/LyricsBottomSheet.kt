@@ -24,8 +24,10 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 
@@ -59,6 +61,18 @@ fun LyricsBottomSheet(
     onSaveToFile: () -> Unit = {},
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+
+    // Issue #382 — hold the screen on while lyrics are on screen. This
+    // composable only exists while the sheet is open (the call site guards
+    // it with `if (showLyrics)`), so the flag is scoped to exactly that.
+    // Restore the previous value rather than forcing false, so we never
+    // clear a keep-screen-on set by something else.
+    val view = LocalView.current
+    DisposableEffect(view) {
+        val wasKeepingScreenOn = view.keepScreenOn
+        view.keepScreenOn = true
+        onDispose { view.keepScreenOn = wasKeepingScreenOn }
+    }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,

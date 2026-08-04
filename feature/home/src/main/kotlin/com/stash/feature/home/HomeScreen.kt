@@ -137,6 +137,17 @@ import com.stash.core.ui.theme.StashTheme
 import com.stash.core.common.extensions.pluralize
 
 /**
+ * How many mixes a Home rail shows before "See all".
+ *
+ * The rails were uncapped, so a synced library put ~120 cards into three
+ * horizontal lists nobody scrolls to the end of — the tail was unreachable in
+ * practice and cost layout on every recomposition. Capped here at the render
+ * site and NOT in the ViewModel on purpose: MixBrowseScreen ("See all") reads
+ * the same uiState lists, and capping upstream would truncate the full grid too.
+ */
+private const val HOME_RAIL_LIMIT = 12
+
+/**
  * Home screen composable displaying a premium dark dashboard with sync
  * status, daily mixes, recently added tracks, liked songs, and playlists.
  */
@@ -512,7 +523,7 @@ fun HomeScreen(
                             actionText = "See all",
                             onActionClick = { onSeeAllMixes(MixRail.MADE_FOR_YOU) },
                         ) {
-                            items(uiState.madeForYou, key = { it.id }) { m ->
+                            items(uiState.madeForYou.take(HOME_RAIL_LIMIT), key = { it.id }) { m ->
                                 MixRailCard(
                                     title = m.title, artUrl = m.artUrl, source = m.source,
                                     buildState = m.buildState, onClick = { openMix(m.id) },
@@ -529,7 +540,7 @@ fun HomeScreen(
                             actionText = "See all",
                             onActionClick = { onSeeAllMixes(MixRail.RADIOS) },
                         ) {
-                            items(uiState.radios, key = { it.id }) { m ->
+                            items(uiState.radios.take(HOME_RAIL_LIMIT), key = { it.id }) { m ->
                                 MixRailCard(
                                     title = m.title, artUrl = m.artUrl, source = m.source,
                                     buildState = m.buildState, onClick = { openMix(m.id) },
@@ -546,7 +557,7 @@ fun HomeScreen(
                             actionText = "See all",
                             onActionClick = { onSeeAllMixes(MixRail.MOOD_DECADES) },
                         ) {
-                            items(uiState.moodDecades, key = { it.id }) { m ->
+                            items(uiState.moodDecades.take(HOME_RAIL_LIMIT), key = { it.id }) { m ->
                                 MixRailCard(
                                     title = m.title, artUrl = m.artUrl, source = m.source,
                                     buildState = m.buildState, onClick = { openMix(m.id) },

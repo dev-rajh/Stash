@@ -27,6 +27,12 @@ val arcodLocalProperties = Properties().apply {
 }
 val arcodStreamBase: String =
     arcodLocalProperties.getProperty("arcod.streamBase") ?: System.getenv("ARCOD_STREAM_BASE").orEmpty()
+// Private integration key for ARCOD's /v2/stash routes (per build, sent as the
+// X-Stash-Key header). Rotated by the operator (Fufu) — keep it out of source,
+// inject from local.properties / the ARCOD_STASH_KEY CI secret. Empty = ARCOD
+// /v2/stash calls 403 and the source fails over.
+val arcodStashKey: String =
+    arcodLocalProperties.getProperty("arcod.stashKey") ?: System.getenv("ARCOD_STASH_KEY").orEmpty()
 
 // ── qbdlx (direct-Qobuz) credentials + token pool ──────────────────────────
 // Bundled at build time from local.properties / env. APP_ID + APP_SECRET are
@@ -43,15 +49,12 @@ fun qbdlxProp(key: String, env: String): String =
         .orEmpty()
 val qbdlxAppId = qbdlxProp("qbdlx.appId", "QBDLX_APP_ID")
 val qbdlxAppSecret = qbdlxProp("qbdlx.appSecret", "QBDLX_APP_SECRET")
-val qbdlxTokenPoolFromList = qbdlxProp("qbdlx.tokenPool", "QBDLX_TOKEN_POOL")
-val qbdlxSingleToken = qbdlxProp("qbdlx.token", "QBDLX_TOKEN")
-val qbdlxSingleTokenCountry = qbdlxProp("qbdlx.tokenCountry", "QBDLX_TOKEN_COUNTRY")
-val qbdlxTokenPool =
-    qbdlxTokenPoolFromList.ifBlank {
-        qbdlxSingleToken.takeIf { it.isNotBlank() }
-            ?.let { token -> if (qbdlxSingleTokenCountry.isBlank()) token else "$token:$qbdlxSingleTokenCountry" }
-            .orEmpty()
-    }
+val qbdlxTokenPool = qbdlxProp("qbdlx.tokenPool", "QBDLX_TOKEN_POOL")
+// EXTRA app_id:secret pairs beyond the primary (comma-separated), for pool tokens
+// minted under a different Qobuz app_id. The primary pair is seeded by the store
+// itself, so this holds only the additional pairs. Public creds (from Qobuz's own
+// web/app bundles), but kept out of the repo like the primary — build-injected.
+val qbdlxAppSecrets = qbdlxProp("qbdlx.appSecrets", "QBDLX_APP_SECRETS")
 
 // AES-256-GCM encrypt the pool at build time (mirrors the runtime
 // QbdlxPoolCipher — keep the two in sync). The fixture test guards the RUNTIME
@@ -84,7 +87,11 @@ val qbdlxTokenPoolEnc = encryptPool(qbdlxTokenPool)
 val qbdlxPoolFp = poolFp(qbdlxTokenPool)
 
 val qbdlxConfigured = qbdlxAppId.isNotBlank() && qbdlxAppSecret.isNotBlank() && qbdlxTokenPool.isNotBlank()
-val arcodConfigured = arcodStreamBase.isNotBlank()
+// What makes an ARCOD build usable is the /v2/stash integration key — the old
+// private stream base is no longer the gate (those routes were retired when the
+// operator moved Stash to /v2/stash). Keyless build → arcod can only 403, so the
+// registries skip it entirely.
+val arcodConfigured = arcodStashKey.isNotBlank()
 
 android {
     namespace = "com.stash.data.download"
@@ -94,8 +101,13 @@ android {
         // env at build time so it never lives in the public repo. Empty when
         // unconfigured — ARCOD streaming then no-ops and the registry fails over.
         buildConfigField("String", "ARCOD_STREAM_BASE", "\"$arcodStreamBase\"")
+        buildConfigField("String", "ARCOD_STASH_KEY", "\"$arcodStashKey\"")
+        // Public host root for ARCOD's /v2/stash routes (Fufu published it openly;
+        // only X-Stash-Key is private). Hardcoded, not injected.
+        buildConfigField("String", "ARCOD_API_BASE", "\"https://api.arcod.xyz\"")
         buildConfigField("String", "QBDLX_APP_ID", "\"$qbdlxAppId\"")
         buildConfigField("String", "QBDLX_APP_SECRET", "\"$qbdlxAppSecret\"")
+        buildConfigField("String", "QBDLX_APP_SECRETS", "\"$qbdlxAppSecrets\"")
         buildConfigField("String", "QBDLX_TOKEN_POOL", "\"$qbdlxTokenPoolEnc\"")
         buildConfigField("String", "QBDLX_POOL_FP", "\"$qbdlxPoolFp\"")
         buildConfigField("Boolean", "QBDLX_CONFIGURED", "$qbdlxConfigured")

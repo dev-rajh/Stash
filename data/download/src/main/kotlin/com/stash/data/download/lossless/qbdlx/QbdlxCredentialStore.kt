@@ -23,6 +23,12 @@ data class QbdlxTokenChoice(
     val live: Boolean,
 )
 
+/** A user-connected Qobuz account: its token plus the app_id/secret it was minted under. */
+data class QbdlxLoginCredential(val token: String, val appId: String, val appSecret: String)
+
+/** A parsed pool member: token, ISO-2 country, and the app_id it must be signed under. */
+private data class PoolEntry(val token: String, val country: String, val appId: String)
+
 /**
  * Its own preferences DataStore (mirrors
  * [com.stash.data.download.lossless.arcod.ArcodCredentialStore]) so the qbdlx
@@ -55,16 +61,115 @@ private val Context.qbdlxCredentialsDataStore: DataStore<Preferences> by prefere
  *    currently dead) — drives the Settings "paste a token" surface and gates
  *    the source off.
  *
- * `app_id` + `app_secret` are constant and read directly from BuildConfig by the
- * client/signer; only the rotating tokens are managed here.
+ * Also the signing authority ([QbdlxSigningResolver]): each pool token is tagged
+ * with the app_id it was minted under, a user-connected account carries its own
+ * pair, and [signingFor] hands the client the right (app_id, app_secret) so a
+ * token is never signed with a mismatched secret (which silently downgrades it to
+ * a 30-second preview).
  */
 @Singleton
 class QbdlxCredentialStore @Inject constructor(
     @ApplicationContext private val context: Context,
     poolProvider: QbdlxPoolProvider,
     private val remotePool: QbdlxRemotePool,
-) {
+) : QbdlxSigningResolver {
     private val pastedTokenKey = stringPreferencesKey("pasted_token")
+
+    // ── Signing credentials (app_id → app_secret) ───────────────────────────
+    // Read from BuildConfig directly, like QbdlxApiClient.appId, and exposed as
+    // internal vars so tests can override without a constructor param (an @Inject
+    // constructor can't carry defaults). QBDLX_APP_SECRETS is a "appId:secret,
+    // appId:secret" map (primary first) that build.gradle composes; empty in an
+    // older build just leaves the single primary pair, which stays valid.
+    internal var primaryAppId: String = com.stash.data.download.BuildConfig.QBDLX_APP_ID
+    internal var primaryAppSecret: String = com.stash.data.download.BuildConfig.QBDLX_APP_SECRET
+    internal var appSecretsRaw: String = com.stash.data.download.BuildConfig.QBDLX_APP_SECRETS
+
+    /**
+     * app_id → app_secret for every credential pair we can sign with. The primary
+     * pair is always present (so a token with no explicit app_id, or one whose
+     * app_id we don't have a secret for, still signs under the primary). Cheap to
+     * rebuild each call — the map is a handful of entries.
+     */
+    private fun appSecretMap(): Map<String, String> {
+        val map = LinkedHashMap<String, String>()
+        map[primaryAppId] = primaryAppSecret
+        appSecretsRaw.split(",").forEach { pair ->
+            val i = pair.indexOf(':')
+            if (i > 0) {
+                val appId = pair.take(i).trim()
+                val secret = pair.substring(i + 1).trim()
+                if (appId.isNotEmpty() && secret.isNotEmpty()) map[appId] = secret
+            }
+        }
+        return map
+    }
+
+    /**
+     * The (app_id, app_secret) to sign [token]'s requests with:
+     *  1. a user-connected account signs with its own stored pair;
+     *  2. a pool token signs with the app_id it's tagged with → that app_id's
+     *     secret (or the primary secret if we don't have that app_id's);
+     *  3. anything unknown falls back to the primary pair.
+     */
+    override suspend fun signingFor(token: String): QbdlxSigning {
+        loginCredential()?.let { if (it.token == token) return QbdlxSigning(it.appId, it.appSecret) }
+        val appId = poolAppId(token) ?: primaryAppId
+        // Use the tag's app_id only if we actually have its secret; otherwise fall
+        // back to the full primary PAIR (never a tagged-app_id / primary-secret mix,
+        // which is exactly the mismatch that yields previews).
+        val secret = appSecretMap()[appId] ?: return QbdlxSigning(primaryAppId, primaryAppSecret)
+        return QbdlxSigning(appId, secret)
+    }
+
+    private fun poolAppId(token: String): String? = pool().firstOrNull { it.token == token }?.appId
+
+    // ── User-connected account (bring-your-own Qobuz) ───────────────────────
+    private val loginTokenKey = stringPreferencesKey("login_token")
+    private val loginAppIdKey = stringPreferencesKey("login_app_id")
+    private val loginAppSecretKey = stringPreferencesKey("login_app_secret")
+    private val loginEmailKey = stringPreferencesKey("login_email")
+
+    @Volatile private var cachedLogin: QbdlxLoginCredential? = null
+    @Volatile private var loginLoaded = false
+
+    /** The connected account's email, for a "Connected as …" label. Null when none. */
+    suspend fun connectedEmail(): String? =
+        context.qbdlxCredentialsDataStore.data.first()[loginEmailKey]?.takeIf { it.isNotBlank() }
+
+    /** The user-connected account, or null. Cached in memory after the first read. */
+    suspend fun loginCredential(): QbdlxLoginCredential? {
+        if (!loginLoaded) {
+            val p = runCatching { context.qbdlxCredentialsDataStore.data.first() }.getOrNull()
+            val t = p?.get(loginTokenKey)
+            val a = p?.get(loginAppIdKey)
+            val s = p?.get(loginAppSecretKey)
+            cachedLogin = if (!t.isNullOrBlank() && !a.isNullOrBlank() && !s.isNullOrBlank())
+                QbdlxLoginCredential(t, a, s) else null
+            loginLoaded = true
+        }
+        return cachedLogin
+    }
+
+    /** Persist a connected account (token + the app_id/secret it was minted under). */
+    suspend fun setUserCredential(token: String, appId: String, appSecret: String, email: String? = null) {
+        recordAlive(token)
+        context.qbdlxCredentialsDataStore.edit {
+            it[loginTokenKey] = token; it[loginAppIdKey] = appId; it[loginAppSecretKey] = appSecret
+            if (email.isNullOrBlank()) it.remove(loginEmailKey) else it[loginEmailKey] = email
+        }
+        cachedLogin = QbdlxLoginCredential(token, appId, appSecret)
+        loginLoaded = true
+    }
+
+    /** Disconnect the account. */
+    suspend fun clearUserCredential() {
+        context.qbdlxCredentialsDataStore.edit {
+            it.remove(loginTokenKey); it.remove(loginAppIdKey); it.remove(loginAppSecretKey); it.remove(loginEmailKey)
+        }
+        cachedLogin = null
+        loginLoaded = true
+    }
 
     /** Runtime-refreshed pool, cached so a cold start doesn't wait on the network. */
     private val cachedPoolKey = stringPreferencesKey("cached_pool")
@@ -115,7 +220,7 @@ class QbdlxCredentialStore @Inject constructor(
      * per [REFRESH_MIN_INTERVAL_MS] so a genuinely dead pool cannot spin.
      */
     private suspend fun refreshIfExhausted() {
-        if (pool().any { !isDead(it.first) }) return
+        if (pool().any { !isDead(it.token) }) return
         val now = clock()
         if (lastRefreshAttempt != 0L && now - lastRefreshAttempt < REFRESH_MIN_INTERVAL_MS) return
         lastRefreshAttempt = now
@@ -167,13 +272,30 @@ class QbdlxCredentialStore @Inject constructor(
     @Volatile
     private var activePrimary: String? = null
 
-    /** Parsed pool: (token, ISO-2 country). Split on the LAST ':' defensively. */
-    private fun pool(): List<Pair<String, String>> =
+    /**
+     * Parsed pool. Each entry is `token:country[:appId]`:
+     *  - `token`            → primary app_id, no country
+     *  - `token:country`    → primary app_id (the legacy/bundled shape)
+     *  - `token:country:appId` → tagged app_id (the remote pool, which spans
+     *    more than one app_id — the tag is what lets us sign each token correctly
+     *    instead of dropping the ones we couldn't sign).
+     * Countries are ISO-2 and app_ids are 9-digit, so the tail is unambiguous;
+     * the token (never containing ':') is whatever is left in front.
+     */
+    private fun pool(): List<PoolEntry> =
         poolRaw.split(",")
             .mapNotNull { entry ->
                 val e = entry.trim().ifEmpty { return@mapNotNull null }
-                val i = e.lastIndexOf(':')
-                if (i <= 0) e to "" else e.substring(0, i) to e.substring(i + 1)
+                val parts = e.split(":")
+                when (parts.size) {
+                    1 -> PoolEntry(parts[0], "", primaryAppId)
+                    2 -> PoolEntry(parts[0], parts[1], primaryAppId)
+                    else -> PoolEntry(
+                        token = parts.dropLast(2).joinToString(":"),
+                        country = parts[parts.size - 2],
+                        appId = parts.last(),
+                    )
+                }
             }
 
     /** True when [token] is within its dead cooldown. Cleans up expired entries. */
@@ -209,13 +331,13 @@ class QbdlxCredentialStore @Inject constructor(
      * [live] is a point-in-time hint (isDead at compute time), not a live flow.
      */
     suspend fun poolForPicker(): List<QbdlxTokenChoice> =
-        pool().sortedWith(compareBy({ it.first.hashCode() }, { it.first }))
-            .mapIndexed { i, (token, country) ->
+        pool().sortedWith(compareBy({ it.token.hashCode() }, { it.token }))
+            .mapIndexed { i, entry ->
                 QbdlxTokenChoice(
                     label = "Token ${i + 1}",
-                    token = token,
-                    country = country,
-                    live = !isDead(token),
+                    token = entry.token,
+                    country = entry.country,
+                    live = !isDead(entry.token),
                 )
             }
 
@@ -230,15 +352,19 @@ class QbdlxCredentialStore @Inject constructor(
      */
     suspend fun activeToken(): String? {
         ensureCacheLoaded()
+        // A user-connected account is the user's OWN paid subscription — it wins
+        // over the shared pool and the anonymous paste, since it's the one token
+        // guaranteed to be signed correctly (its app_id/secret are stored with it).
+        loginCredential()?.let { if (!isDead(it.token)) return it.token }
         pastedToken()?.let { if (!isDead(it)) return it }
         // Only reached when the pasted token is absent/dead. Costs nothing unless
         // the whole pool is exhausted, which is precisely when it can help.
         refreshIfExhausted()
         pinnedToken()?.let { p ->
-            if (!isDead(p) && pool().any { it.first == p }) return p
+            if (!isDead(p) && pool().any { it.token == p }) return p
         }
         activePrimary?.let { if (!isDead(it)) return it }
-        val next = pool().map { it.first }
+        val next = pool().map { it.token }
             .filter { !isDead(it) }
             .sortedWith(compareBy({ it.hashCode() }, { it }))
             .firstOrNull() ?: return null
@@ -251,13 +377,13 @@ class QbdlxCredentialStore @Inject constructor(
      * the rest, capped at [MAX_REGION_TRIES].
      */
     suspend fun tokensForRegion(country: String?): List<String> {
-        val live = pool().filter { !isDead(it.first) }
+        val live = pool().filter { !isDead(it.token) }
         val sorted = if (country.isNullOrBlank()) {
             live
         } else {
-            live.sortedByDescending { it.second.equals(country, ignoreCase = true) }
+            live.sortedByDescending { it.country.equals(country, ignoreCase = true) }
         }
-        return sorted.map { it.first }.take(MAX_REGION_TRIES)
+        return sorted.map { it.token }.take(MAX_REGION_TRIES)
     }
 
     /** Mark [token] dead for the cooldown window (auth failure). Auto-retried after. */
@@ -296,20 +422,24 @@ class QbdlxCredentialStore @Inject constructor(
      */
     suspend fun allDead(): Boolean {
         ensureCacheLoaded()
+        // A live connected account is a usable credential all on its own.
+        loginCredential()?.let { if (!isDead(it.token)) return false }
         val pasted = pastedToken()
         // Lets a fully-dead build heal itself: allDead() drives the Settings
         // badge AND gates the source off entirely, so refreshing here means
         // qbdlx can come back without the user doing anything.
         refreshIfExhausted()
-        val poolTokens = pool().map { it.first }
+        val poolTokens = pool().map { it.token }
         if (poolTokens.isEmpty() && pasted == null) return true // no credentials at all
         pasted?.let { if (!isDead(it)) return false }
         return poolTokens.all { isDead(it) }
     }
 
-    /** Test-only: wipe persisted pasted state + in-memory dead flags. */
+    /** Test-only: wipe persisted pasted/login state + in-memory dead flags. */
     internal suspend fun clearPersistedForTest() {
         deadUntil.clear()
+        cachedLogin = null
+        loginLoaded = false
         context.qbdlxCredentialsDataStore.edit { it.clear() }
     }
 

@@ -61,7 +61,20 @@ internal fun likedPlaylistArtUrl(trackArtUrls: Sequence<String?>): String? =
         trackArtUrls.firstOrNull { !it.isNullOrBlank() }
     )
 
-internal fun shouldDeactivateMissingSpotifyPlaylists(
+/**
+ * Whether a sync may soft-hide playlists that the remote didn't return this run.
+ *
+ * BOTH conditions are required, and each guards a real data-loss bug:
+ *  - `REFRESH` — ACCUMULATE's whole promise is "never remove anything". Hiding a
+ *    playlist the user still has is a removal from their point of view.
+ *  - `inventoryComplete` — a partial fetch (one failed leg) must never be read as
+ *    "the rest are gone" (#343/#348).
+ *
+ * Applies to EVERY source. It was originally Spotify-only, and YouTube open-coded
+ * just the inventory half — so an ACCUMULATE sync still hid YouTube playlists,
+ * including user-created ones. Keep both sources on this one predicate.
+ */
+internal fun shouldDeactivateMissingPlaylists(
     syncMode: SyncMode,
     inventoryComplete: Boolean,
 ): Boolean = syncMode == SyncMode.REFRESH && inventoryComplete
@@ -122,6 +135,7 @@ class PlaylistFetchWorker @AssistedInject constructor(
     private val syncHistoryDao: SyncHistoryDao,
     private val remoteSnapshotDao: RemoteSnapshotDao,
     private val syncStateManager: SyncStateManager,
+    private val syncLog: com.stash.core.data.sync.SyncLog,
     private val syncNotificationManager: SyncNotificationManager,
     private val syncPreferencesManager: SyncPreferencesManager,
     private val spotifyAuthHealthProbe: SpotifyAuthHealthProbe,
@@ -216,6 +230,10 @@ class PlaylistFetchWorker @AssistedInject constructor(
         )
         val syncId = syncHistoryDao.insert(syncEntry)
         val diagnostics = java.util.Collections.synchronizedList(mutableListOf<SyncStepResult>())
+        // Starts a fresh terminal for this run. Previous lines are cleared here
+        // rather than at the end, so the last run stays readable until a new one
+        // begins — reading it AFTER the fact is the point.
+        syncLog.beginRun("Looking for new music…")
 
         try {
             // Step 2: Authenticating phase.
@@ -376,7 +394,28 @@ class PlaylistFetchWorker @AssistedInject constructor(
         } else try {
             when (val result = spotifyApiClient.getDailyMixes()) {
                 is SyncResult.Success -> {
-                    val dailyMixes = result.data
+                    // Fold in the yearly recaps ("Your Top Songs 2024", "Your
+                    // All-Time Top Songs"). They only appear on the home feed for
+                    // a few weeks each December, so without this a sync in any
+                    // other month can never find them — the long-standing "why
+                    // don't we pull yearly mixes" gap.
+                    //
+                    // Additive and best-effort: anything but Success is ignored,
+                    // so a change on Spotify's side costs these extra playlists,
+                    // never the mixes the home feed already found.
+                    val yearly = when (val y = spotifyApiClient.getYearlyMixes()) {
+                        is SyncResult.Success -> y.data
+                        else -> emptyList()
+                    }
+                    val seenIds = result.data.mapTo(mutableSetOf()) { it.id }
+                    val extraYearly = yearly.filter { seenIds.add(it.id) }
+                    if (extraYearly.isNotEmpty()) {
+                        Log.d(TAG, "fetchSpotifyPlaylists: +${extraYearly.size} yearly recap(s)")
+                        syncLog.success(
+                            "Your recaps — " + extraYearly.joinToString(", ") { it.name },
+                        )
+                    }
+                    val dailyMixes = result.data + extraYearly
                     diagnostics.add(SyncStepResult("SPOTIFY", "getDailyMixes", StepStatus.SUCCESS, dailyMixes.size))
                     Log.d(TAG, "fetchSpotifyPlaylists: found ${dailyMixes.size} daily mixes")
 
@@ -690,17 +729,21 @@ class PlaylistFetchWorker @AssistedInject constructor(
                     if (e is CancellationException) throw e
                     inventoryComplete = false
                     Log.w(TAG, "fetchSpotifyPlaylists: snapshot failed for '${playlist.name}'", e)
+                    syncLog.warn("${playlist.name} — couldn't fetch tracks (kept as-is)")
                 }
                 reportPlaylistFetched()
             }
 
-            if (shouldDeactivateMissingSpotifyPlaylists(syncPreferencesManager.spotifySyncMode.first(), inventoryComplete)) {
+            if (shouldDeactivateMissingPlaylists(syncPreferencesManager.spotifySyncMode.first(), inventoryComplete)) {
                 val currentIds = customPlaylists.map { it.id }
                 val hidden = playlistDao.deactivateMissingSpotifyCustomPlaylists(
                     currentSourceIds = currentIds,
                     hasCurrentIds = currentIds.isNotEmpty(),
                 )
-                if (hidden > 0) Log.i(TAG, "Deactivated $hidden missing Spotify custom playlist(s)")
+                if (hidden > 0) {
+                    Log.i(TAG, "Deactivated $hidden missing Spotify custom playlist(s)")
+                    syncLog.warn("Hid $hidden Spotify playlist(s) no longer in your account")
+                }
             }
             diagnostics.add(
                 SyncStepResult(

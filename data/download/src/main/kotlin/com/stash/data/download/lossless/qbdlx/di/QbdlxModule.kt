@@ -9,9 +9,11 @@ import com.stash.data.download.lossless.LosslessSource
 import com.stash.data.download.lossless.qbdlx.HttpQbdlxRemotePool
 import com.stash.data.download.lossless.qbdlx.QbdlxPoolCipher
 import com.stash.data.download.lossless.qbdlx.QbdlxPoolProvider
+import com.stash.data.download.lossless.qbdlx.QbdlxCredentialStore
 import com.stash.data.download.lossless.qbdlx.QbdlxRemotePool
 import com.stash.data.download.lossless.qbdlx.QbdlxQobuzSource
 import com.stash.data.download.lossless.qbdlx.QbdlxSigner
+import com.stash.data.download.lossless.qbdlx.QbdlxSigningResolver
 import com.stash.data.download.lossless.qbdlx.QobuzAlbumFetcherImpl
 import com.stash.data.download.lossless.qbdlx.QobuzDiscographyProvider
 import dagger.Binds
@@ -64,10 +66,22 @@ abstract class QbdlxModule {
     @Singleton
     abstract fun bindQbdlxRemotePool(impl: HttpQbdlxRemotePool): QbdlxRemotePool
 
+    /**
+     * The credential store IS the signing authority — it knows each token's
+     * app_id (pool tag / connected account) and the matching secret.
+     */
+    @Binds
+    @Singleton
+    abstract fun bindQbdlxSigningResolver(impl: QbdlxCredentialStore): QbdlxSigningResolver
+
     companion object {
+        // Stateless now: the app_secret is chosen PER REQUEST by the resolver,
+        // because the pool spans multiple app_ids (each with its own secret) and a
+        // connected account carries its own — a single bundled secret would sign
+        // mismatched tokens wrong and silently serve previews.
         @Provides
         @Singleton
-        fun provideQbdlxSigner(): QbdlxSigner = QbdlxSigner(BuildConfig.QBDLX_APP_SECRET)
+        fun provideQbdlxSigner(): QbdlxSigner = QbdlxSigner()
 
         @Provides
         @Singleton

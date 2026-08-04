@@ -824,6 +824,10 @@ class DiffWorkerTest {
                 syncPreferencesManager = syncPreferencesManager,
                 blocklistGuard = blocklistGuard,
                 streamingPreference = streamingPreference,
+                // Undo capture is a safety net, not behaviour under test here —
+                // the real DAO from the in-memory DB keeps it honest.
+                syncUndoDao = db.syncUndoDao(),
+                syncLog = com.stash.core.data.sync.SyncLog(),
             )
         })
         .build()

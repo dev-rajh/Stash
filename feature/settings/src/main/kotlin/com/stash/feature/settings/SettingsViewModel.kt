@@ -41,6 +41,8 @@ import com.stash.data.download.lossless.LosslessSourcePreferences
 import com.stash.data.download.lossless.arcod.ArcodCredentialStore
 import com.stash.data.download.lossless.qbdlx.QbdlxCredentialStore
 import com.stash.data.download.lossless.qbdlx.QbdlxTokenChoice
+import com.stash.data.download.lossless.qbdlx.QobuzAccountConnector
+import com.stash.data.download.lossless.qbdlx.QobuzLoginResult
 import com.stash.data.download.lossless.qobuz.QobuzSource
 import com.stash.data.download.prefs.StreamingQualityPreferences
 import com.stash.feature.settings.components.squidCaptchaStatus
@@ -104,6 +106,7 @@ class SettingsViewModel @Inject constructor(
     private val qobuzSource: QobuzSource,
     private val arcodCredentialStore: ArcodCredentialStore,
     private val qbdlxCredentialStore: QbdlxCredentialStore,
+    private val qobuzAccountConnector: QobuzAccountConnector,
     private val likePreferences: LikePreferences,
     private val trackDao: TrackDao,
     private val settingsDeepLinkController: com.stash.core.data.navigation.SettingsDeepLinkController,
@@ -120,9 +123,10 @@ class SettingsViewModel @Inject constructor(
     // ── ListenBrainz ────────────────────────────────────────────────────────
     //
     // Exposed as standalone StateFlows rather than threaded through the big
-    // combine(...) below, which addresses its sources by numeric index
-    // (values[27], values[28]…). Adding four more inputs there would shift every
-    // later index — a silent, type-correct way to hand the UI the wrong value.
+    // combine(...) below. That combine no longer uses numeric indices (see
+    // [Values]), but it is still 38 sources feeding one monolithic UiState, and
+    // ListenBrainz belongs to one screen — keeping it separate is the right shape
+    // regardless.
 
     private val _listenBrainzTokenInput = MutableStateFlow("")
     val listenBrainzTokenInput: StateFlow<String> = _listenBrainzTokenInput
@@ -181,6 +185,22 @@ class SettingsViewModel @Inject constructor(
             started = SharingStarted.WhileSubscribed(5_000),
             initialValue = false,
         )
+
+    /**
+     * Issue #112 — submit only the primary artist to Last.fm. Exposed as its
+     * own flow rather than folded into the main `combine`, which is index-based
+     * (`values[N]`) and would need every downstream index shifted.
+     */
+    val scrobbleFirstArtistOnly: StateFlow<Boolean> =
+        lastFmSessionPreference.firstArtistOnly.stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5_000),
+            initialValue = false,
+        )
+
+    fun onScrobbleFirstArtistOnlyChanged(enabled: Boolean) {
+        viewModelScope.launch { lastFmSessionPreference.setFirstArtistOnly(enabled) }
+    }
 
     fun onListenBrainzTokenChange(value: String) {
         _listenBrainzTokenInput.value = value
@@ -401,6 +421,18 @@ class SettingsViewModel @Inject constructor(
     private val _qbdlxPinnedToken = MutableStateFlow<String?>(null)
     val qbdlxPinnedToken: StateFlow<String?> = _qbdlxPinnedToken
 
+    /** Connected Qobuz account email (null = not connected) — the bring-your-own-account state. */
+    private val _qobuzConnectedEmail = MutableStateFlow<String?>(null)
+    val qobuzConnectedEmail: StateFlow<String?> = _qobuzConnectedEmail
+
+    /** True while a connect attempt is in flight (spinner + disabled button). */
+    private val _qobuzConnecting = MutableStateFlow(false)
+    val qobuzConnecting: StateFlow<Boolean> = _qobuzConnecting
+
+    /** Last connect error to show, or null. Cleared on a new attempt / disconnect. */
+    private val _qobuzConnectError = MutableStateFlow<String?>(null)
+    val qobuzConnectError: StateFlow<String?> = _qobuzConnectError
+
     init {
         // Refresh on construction so the Diagnostics card shows the
         // correct enabled/disabled state on first frame. Cheap (a
@@ -410,6 +442,7 @@ class SettingsViewModel @Inject constructor(
         refreshDiagnostics()
         refreshQbdlxExpired()
         refreshQbdlxTokens()
+        refreshQobuzConnected()
     }
 
     /**
@@ -483,47 +516,52 @@ class SettingsViewModel @Inject constructor(
         homeSectionsPreference.order,
         homeSectionsPreference.hidden,
     ) { values ->
+        // Read strictly in the order the flows are declared above. See [Values]:
+        // there are no positional indices to renumber, and requireExhausted()
+        // below turns "a flow was added and nobody updated the reads" into an
+        // immediate, named failure instead of silently shifted data.
+        val v = Values(values)
+        val spotifyAuth = v.next<AuthState>()
+        val youTubeAuth = v.next<AuthState>()
+        val trackCount = v.next<Int>()
+        val storageBytes = (v.next<LibrarySizeBreakdown>()).totalBytes
+        val quality = v.next<QualityTier>()
+        val theme = v.next<ThemeMode>()
+        val externalTree = v.next<Uri?>()
+        val moveState = v.next<MoveLibraryState>()
+        val lastFmSession = v.next<LastFmSession?>()
+        val pendingScrobbles = v.next<Int>()
+        val downloadNetworkMode = v.next<DownloadNetworkMode>()
+        val local = v.next<LocalState>()
+        val ytHistoryEnabled = v.next<Boolean>()
+        val ytHistoryHealth = v.next<YouTubeScrobblerHealth>()
+        val ytPendingCount = v.next<Int>()
+        val losslessEnabled = v.next<Boolean>()
+        val squidWtfCaptchaCookie = (v.next<String?>()).orEmpty()
+        val losslessQualityTier = v.next<LosslessQualityTier>()
+        val lastKnownBadCookie = v.next<String?>()
+        val autoSaveEnabled = v.next<Boolean>()
+        val autoSaveThreshold = v.next<Int>()
+        val heartDefaultStash = v.next<Boolean>()
+        val heartDefaultSpotify = v.next<Boolean>()
+        val heartDefaultYtMusic = v.next<Boolean>()
+        val autoSavedCount7d = v.next<Int>()
+        val youtubeFallbackEnabled = v.next<Boolean>()
+        val stashMixesEnabled = v.next<Boolean>()
+        val mirrorLikesSpotify = v.next<Boolean>()
+        val mirrorLikesYtMusic = v.next<Boolean>()
+        val arcodConnected = !(v.next<String?>()).isNullOrBlank()
+        val streamingWifiTier = v.next<LosslessQualityTier>()
+        val streamingCellularTier = v.next<LosslessQualityTier>()
+        val streamingSaveData = v.next<Boolean>()
+        val amoledDark = v.next<Boolean>()
+        val qobuzDiscoveryEnabled = v.next<Boolean>()
+        val ambientAnimationEnabled = v.next<Boolean>()
         @Suppress("UNCHECKED_CAST")
-        val spotifyAuth = values[0] as AuthState
-        val youTubeAuth = values[1] as AuthState
-        val trackCount = values[2] as Int
-        val storageBytes = (values[3] as LibrarySizeBreakdown).totalBytes
-        val quality = values[4] as QualityTier
-        val theme = values[5] as ThemeMode
-        val externalTree = values[6] as Uri?
-        val moveState = values[7] as MoveLibraryState
-        val lastFmSession = values[8] as LastFmSession?
-        val pendingScrobbles = values[9] as Int
-        val downloadNetworkMode = values[10] as DownloadNetworkMode
-        val local = values[11] as LocalState
-        val ytHistoryEnabled = values[12] as Boolean
-        val ytHistoryHealth = values[13] as YouTubeScrobblerHealth
-        val ytPendingCount = values[14] as Int
-        val losslessEnabled = values[15] as Boolean
-        val squidWtfCaptchaCookie = (values[16] as String?).orEmpty()
-        val losslessQualityTier = values[17] as LosslessQualityTier
-        val lastKnownBadCookie = values[18] as String?
-        val autoSaveEnabled = values[19] as Boolean
-        val autoSaveThreshold = values[20] as Int
-        val heartDefaultStash = values[21] as Boolean
-        val heartDefaultSpotify = values[22] as Boolean
-        val heartDefaultYtMusic = values[23] as Boolean
-        val autoSavedCount7d = values[24] as Int
-        val youtubeFallbackEnabled = values[25] as Boolean
-        val stashMixesEnabled = values[26] as Boolean
-        val mirrorLikesSpotify = values[27] as Boolean
-        val mirrorLikesYtMusic = values[28] as Boolean
-        val arcodConnected = !(values[29] as String?).isNullOrBlank()
-        val streamingWifiTier = values[30] as LosslessQualityTier
-        val streamingCellularTier = values[31] as LosslessQualityTier
-        val streamingSaveData = values[32] as Boolean
-        val amoledDark = values[33] as Boolean
-        val qobuzDiscoveryEnabled = values[34] as Boolean
-        val ambientAnimationEnabled = values[35] as Boolean
+        val homeSectionOrder = v.next<List<com.stash.core.data.prefs.HomeSection>>()
         @Suppress("UNCHECKED_CAST")
-        val homeSectionOrder = values[36] as List<com.stash.core.data.prefs.HomeSection>
-        @Suppress("UNCHECKED_CAST")
-        val homeSectionsHidden = values[37] as Set<com.stash.core.data.prefs.HomeSection>
+        val homeSectionsHidden = v.next<Set<com.stash.core.data.prefs.HomeSection>>()
+        v.requireExhausted()
 
         val lastFmState: LastFmAuthState = local.lastFmAuthOverride
             ?: when {
@@ -1321,6 +1359,49 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
+    private fun refreshQobuzConnected() {
+        viewModelScope.launch { _qobuzConnectedEmail.value = qobuzAccountConnector.connectedEmail() }
+    }
+
+    /**
+     * Connect the user's own Qobuz account (bring-your-own-account): logs in,
+     * and on success the token is stored with its signing pair so it serves real
+     * FLAC. Maps each failure to a message; never surfaces the password.
+     */
+    fun onConnectQobuz(email: String, password: String) {
+        if (email.isBlank() || password.isBlank()) {
+            _qobuzConnectError.value = "Enter your Qobuz email and password."
+            return
+        }
+        viewModelScope.launch {
+            _qobuzConnecting.value = true
+            _qobuzConnectError.value = null
+            when (qobuzAccountConnector.connect(email, password)) {
+                is QobuzLoginResult.Success -> {
+                    _qobuzConnectedEmail.value = qobuzAccountConnector.connectedEmail()
+                    _qbdlxExpired.value = qbdlxCredentialStore.allDead()
+                }
+                QobuzLoginResult.InvalidCredentials ->
+                    _qobuzConnectError.value = "Wrong email or password."
+                QobuzLoginResult.FreeAccount ->
+                    _qobuzConnectError.value = "That account has no lossless subscription — Qobuz only serves FLAC to paid plans."
+                QobuzLoginResult.Error ->
+                    _qobuzConnectError.value = "Couldn't reach Qobuz. Check your connection and try again."
+            }
+            _qobuzConnecting.value = false
+        }
+    }
+
+    /** Disconnect the connected Qobuz account. */
+    fun onDisconnectQobuz() {
+        viewModelScope.launch {
+            qobuzAccountConnector.disconnect()
+            _qobuzConnectedEmail.value = null
+            _qobuzConnectError.value = null
+            _qbdlxExpired.value = qbdlxCredentialStore.allDead()
+        }
+    }
+
     // -- Streaming quality (per-network tiers + Save Data) -------------------
 
     /** Persist the lossless tier requested when streaming on Wi-Fi. */
@@ -1500,4 +1581,47 @@ class SettingsViewModel @Inject constructor(
         val file: java.io.File,
         val contentUri: android.net.Uri,
     )
+}
+
+/**
+ * Sequential typed reader over the untyped `Array<Any?>` that Kotlin's vararg
+ * `combine` hands back.
+ *
+ * ## Why this exists
+ *
+ * `SettingsUiState` is assembled from 38 flows. Kotlin's `combine` is only typed up
+ * to five, so beyond that the lambda receives `Array<Any?>` and the values were read
+ * positionally: `values[27] as Boolean`, `values[28] as Boolean`, and so on.
+ *
+ * That made the flow list and the read list two parallel lists kept in sync by hand.
+ * Insert a source in the middle and every later index silently shifts — the cast
+ * still succeeds, the type still checks, and the UI quietly renders the wrong
+ * value. No test catches it, because every field still holds a valid value of the
+ * right type. It had already bent three separate changes around itself: two dead
+ * preferences survive cleanup because deleting them is unsafe, and ListenBrainz was
+ * exposed as standalone StateFlows specifically to avoid touching this.
+ *
+ * Reading sequentially removes the renumbering entirely — adding a flow means adding
+ * one `next()` in the matching position, with no indices to update. [requireExhausted]
+ * then turns the remaining mistake (a flow added or removed without a matching read)
+ * into an immediate, named failure instead of silently shifted data.
+ *
+ * **What this does not fix:** reordering two same-typed flows is still silent. The
+ * real remedy for that is structural — this is a hub-and-spoke Settings UI, so each
+ * spoke should observe its own small typed state rather than every screen sharing one
+ * 38-source object. That is a larger change and deliberately not attempted here.
+ */
+private class Values(private val raw: Array<Any?>) {
+    private var cursor = 0
+
+    @Suppress("UNCHECKED_CAST")
+    fun <T> next(): T = raw[cursor++] as T
+
+    /** Fails loudly if the flow list and the read list have drifted apart. */
+    fun requireExhausted() {
+        check(cursor == raw.size) {
+            "SettingsViewModel.uiState read $cursor of ${raw.size} combined flows — " +
+                "a flow was added or removed without a matching next() call."
+        }
+    }
 }

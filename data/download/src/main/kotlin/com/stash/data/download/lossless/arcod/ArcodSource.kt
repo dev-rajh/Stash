@@ -84,10 +84,16 @@ class ArcodSource @Inject constructor(
             // 3. Acquire a FLAC URL under the shared ArcodJobGate (at most ONE
             // ARCOD op in flight app-wide so a sync's parallel workers can't
             // hammer the operator's single Qobuz account). Prefer the FAST
-            // single-GET stream endpoint — same full Range-capable FLAC the
-            // streaming path uses, with NO server-side render/poll. Fall back to
-            // the legacy job-render lifecycle only when the single GET can't run
-            // (stream base unconfigured) or returns nothing.
+            // single-GET stream endpoint — now the `/v2/stash/stream` route — with
+            // NO server-side render/poll. Fall back to the legacy job-render
+            // lifecycle only when the single GET can't run or returns nothing.
+            //
+            // NOTE (2026-08-01): the job path still posts to the older
+            // `arcod.xyz/api/v2/downloads` route. It's kept because it is the
+            // website's own download API and has NOT been verified as retired —
+            // but if it has been, its failure calls reportFailure() and would trip
+            // this source's breaker off a merely transient stream miss. Worth
+            // confirming with the operator before trusting it.
             val resolved = jobGate.withJob {
                 resolveViaStream(item) ?: resolveViaJob(query, item)
             } ?: return null

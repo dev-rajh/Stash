@@ -77,11 +77,16 @@ node_modules/
 .claude/
 CLAUDE.md
 
-# Local spike/experiment artifacts — never commit (huge binaries, screenshots)
+# Local spike/experiment artifacts — never commit (huge binaries, screenshots).
+# The bare globs only matched spike/'s top level, leaving spike/clap/*.onnx and
+# the WAV fixtures stageable — hundreds of MB one `git add spike/` away.
 spike/*.png
 spike/*.flac
 spike/*.txt
 spike/*.xml
+spike/**/*.onnx
+spike/**/*.wav
+spike/**/__pycache__/
 
 # CLAP sonic-recommendation spike fixtures — 515MB of ONNX models + WAVs that
 # live under androidTest so the on-device spike can read them. Never commit.

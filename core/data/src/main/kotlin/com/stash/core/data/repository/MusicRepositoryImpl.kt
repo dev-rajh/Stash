@@ -59,6 +59,22 @@ class MusicRepositoryImpl @Inject constructor(
     //
     // Buffer is generous so emits from a cascade-delete loop don't suspend
     // the caller (we use tryEmit).
+    /**
+     * Deleted track ids, consumed by PlayerRepositoryImpl to evict them from the
+     * live queue. Every event is load-bearing: a missed one leaves a deleted track
+     * playable, pointing at a file that no longer exists — the exact symptom a user
+     * reported (a removed song carrying on playing).
+     *
+     * Emitted with `emit`, NOT `tryEmit`. All five call sites are suspend functions,
+     * so real backpressure is available: a slow consumer makes the deleter wait
+     * instead of silently dropping the notification. `tryEmit` never suspends — on a
+     * full buffer it returns false, and all five sites ignored the result, so a bulk
+     * delete (`cleanOrphanedMixTracks`, a multi-select removal) could exceed the
+     * buffer and lose evictions with nothing logged.
+     *
+     * The buffer still exists so the common single-delete case never blocks; it is
+     * headroom now rather than the only thing standing between us and data loss.
+     */
     private val _trackDeletions = MutableSharedFlow<Long>(
         replay = 0,
         extraBufferCapacity = 64,
@@ -466,7 +482,7 @@ class MusicRepositoryImpl @Inject constructor(
         // work without another code change.
         track.albumArtPath?.let { deleteTrackFile(it) }
         trackDao.delete(track.toEntity())
-        _trackDeletions.tryEmit(track.id)
+        _trackDeletions.emit(track.id)
         return true
     }
 
@@ -728,7 +744,7 @@ class MusicRepositoryImpl @Inject constructor(
                 deleted = 0, keptProtected = 0, keptElsewhere = 0, blacklisted = 0,
             )
             blocklistGuard.block(track, com.stash.core.data.blocklist.BlockSource.PLAYLIST_DELETE)
-            _trackDeletions.tryEmit(trackId)
+            _trackDeletions.emit(trackId)
             return MusicRepository.CascadeRemovalSummary(
                 deleted = 1, keptProtected = 0, keptElsewhere = 0, blacklisted = 1,
             )
@@ -770,7 +786,7 @@ class MusicRepositoryImpl @Inject constructor(
         track.filePath?.let { deleteTrackFile(it) }
         track.albumArtPath?.let { deleteTrackFile(it) }
         trackDao.delete(track)
-        _trackDeletions.tryEmit(trackId)
+        _trackDeletions.emit(trackId)
         return MusicRepository.CascadeRemovalSummary(
             deleted = 1, keptProtected = 0, keptElsewhere = 0, blacklisted = 0,
         )
@@ -828,7 +844,7 @@ class MusicRepositoryImpl @Inject constructor(
         // re-like on a different source can't resurrect the track.
         val track = trackDao.getById(trackId) ?: return
         blocklistGuard.block(track, com.stash.core.data.blocklist.BlockSource.OTHER)
-        _trackDeletions.tryEmit(trackId)
+        _trackDeletions.emit(trackId)
     }
 
     override suspend fun unblacklistTrack(trackId: Long) {
@@ -899,7 +915,7 @@ class MusicRepositoryImpl @Inject constructor(
             track.filePath?.let { deleteTrackFile(it) }
             // Delete locally-stored album art if present.
             track.albumArtPath?.let { deleteTrackFile(it) }
-            _trackDeletions.tryEmit(track.id)
+            _trackDeletions.emit(track.id)
         }
 
         android.util.Log.i(
