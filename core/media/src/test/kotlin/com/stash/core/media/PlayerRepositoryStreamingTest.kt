@@ -75,6 +75,7 @@ class PlayerRepositoryStreamingTest {
             playbackResumer = PlaybackResumer(playbackStateStore, trackDao),
             radioGenerator = mockk(relaxed = true),
             trackIdentityEvents = trackIdentityEvents,
+            playbackSessionBus = PlaybackSessionBus(),
         )
         // Tests that don't care about disk existence get a "file is there"
         // default; the not-downloaded tests can override per-test.
@@ -105,6 +106,7 @@ class PlayerRepositoryStreamingTest {
             playbackResumer = PlaybackResumer(playbackStateStore, trackDao),
             radioGenerator = mockk(relaxed = true),
             trackIdentityEvents = trackIdentityEvents,
+            playbackSessionBus = PlaybackSessionBus(),
         )
 
         val empty = File.createTempFile("stash-empty", ".flac").apply { deleteOnExit() }

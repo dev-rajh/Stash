@@ -51,6 +51,7 @@ class LosslessSourcePreferences @Inject constructor(
     private val captchaCookieKey = stringPreferencesKey("squid_wtf_captcha_verified_at")
     private val captchaCookieSetAtKey = longPreferencesKey("squid_wtf_captcha_set_at_ms")
     private val bannerDismissedKey = booleanPreferencesKey("home_banner_dismissed")
+    private val arcodRescueDismissedKey = booleanPreferencesKey("arcod_rescue_dismissed")
     private val qualityTierKey = stringPreferencesKey("lossless_quality_tier")
     private val youtubeFallbackKey = booleanPreferencesKey("youtube_fallback_enabled")
     // Retained only so [purgeAntraCredentials] can delete the harvested
@@ -211,6 +212,21 @@ class LosslessSourcePreferences @Inject constructor(
 
     suspend fun setBannerDismissed(dismissed: Boolean) {
         context.losslessDataStore.edit { prefs -> prefs[bannerDismissedKey] = dismissed }
+    }
+
+    /**
+     * Whether the user has dismissed the "connect ARCOD" rescue banner that
+     * Home shows while qbdlx looks dead and no second lossless source is
+     * connected. Forever-dismissed, same semantics as [bannerDismissed] —
+     * the user has seen the offer and said no; the source-health signal
+     * re-detecting an outage must not resurrect it.
+     */
+    val arcodRescueDismissed: Flow<Boolean> = context.losslessDataStore.data.map { prefs ->
+        prefs[arcodRescueDismissedKey] ?: false
+    }
+
+    suspend fun setArcodRescueDismissed(dismissed: Boolean) {
+        context.losslessDataStore.edit { prefs -> prefs[arcodRescueDismissedKey] = dismissed }
     }
 
     /**

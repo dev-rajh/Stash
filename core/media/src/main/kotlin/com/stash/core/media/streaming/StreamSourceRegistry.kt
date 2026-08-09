@@ -71,6 +71,7 @@ class StreamSourceRegistry @Inject constructor(
     private val qbdlx: QbdlxStreamResolver,
     private val youtube: YouTubeStreamResolver,
     private val streamingPreference: StreamingPreference,
+    private val losslessSourceHealth: LosslessSourceHealth,
 ) {
 
     /**
@@ -225,6 +226,16 @@ class StreamSourceRegistry @Inject constructor(
                     Log.w(TAG, "$name threw on resolve for ${track.id} '${track.title}'", e)
                 }
                 .getOrNull()
+            // Feed the Home rescue-banner signal: a qbdlx null here is a miss
+            // (dead token OR catalog gap — the streak threshold tells them
+            // apart), a non-null is a serve that resets the streak.
+            if (name == "qbdlx") {
+                if (result != null) {
+                    losslessSourceHealth.recordQbdlxServed()
+                } else {
+                    losslessSourceHealth.recordQbdlxMiss()
+                }
+            }
             if (result != null) {
                 // Diagnostic: which source actually served the stream. Helps
                 // explain "this track played but at lower quality" reports.

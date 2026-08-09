@@ -72,14 +72,18 @@ class ArcodTokenRefresher @Inject constructor(
 
                 sharedClient.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) {
-                        store.markStale()
+                        // Wipe the session ONLY on a definitive auth rejection
+                        // (4xx — Supabase's "Invalid Refresh Token: Already
+                        // Used" is a 400). A 5xx is the server having a bad
+                        // moment, not a verdict on our token; wiping there
+                        // turned every transient hiccup into a forced manual
+                        // reconnect (seen live 2026-08-06: "ARCOD is down",
+                        // 0-byte credential store, healthy API).
+                        if (response.code in 400..499) store.markStale()
                         return@withLock null
                     }
                     val payload = response.body?.string()
-                        ?: run {
-                            store.markStale()
-                            return@withLock null
-                        }
+                        ?: return@withLock null
                     val parsed = JSON.decodeFromString<RefreshResponse>(payload)
                     val expiresAtMs = System.currentTimeMillis() + parsed.expiresIn * 1000L
                     store.save(
@@ -92,7 +96,10 @@ class ArcodTokenRefresher @Inject constructor(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                store.markStale()
+                // Transport failures and garbled bodies keep the session: the
+                // refresh token is still valid and the next attempt can
+                // succeed. Being offline at the wrong moment must never
+                // destroy auth state.
                 null
             }
         }

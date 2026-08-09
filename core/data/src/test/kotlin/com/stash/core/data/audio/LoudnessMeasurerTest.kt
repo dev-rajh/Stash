@@ -26,7 +26,14 @@ class LoudnessMeasurerTest {
 
     private val fakeBridge = FakeFFmpegBridge()
     private val fakeTrackDao = io.mockk.mockk<com.stash.core.data.db.dao.TrackDao>(relaxed = true)
-    private val measurer = LoudnessMeasurer(fakeBridge, fakeTrackDao)
+    // These tests exercise measure() directly, which is charging-agnostic —
+    // only the download-time measureAndPersistInBackground defers off power
+    // (see LoudnessMeasurerDeferralTest). Charging = true keeps them honest
+    // either way.
+    private val alwaysCharging = io.mockk.mockk<ChargingMonitor> {
+        io.mockk.every { isCharging() } returns true
+    }
+    private val measurer = LoudnessMeasurer(fakeBridge, fakeTrackDao, alwaysCharging)
 
     private val createdTempFiles = mutableListOf<File>()
 
@@ -49,6 +56,26 @@ class LoudnessMeasurerTest {
         r as LoudnessMeasurer.Result.Success
         assertEquals(-14.2f, r.lufs, 0.01f)
         assertEquals(-0.3f, r.truePeakDbfs, 0.01f)
+    }
+
+    @Test
+    fun parsesTheSummaryNotTheFirstProgressLine() {
+        // Production stderr contains a per-frame progress line for every 100ms
+        // of audio BEFORE the Summary block, and the first frames always read
+        // `I: -70.0 LUFS` (the gating floor — nothing integrated yet). The
+        // parser must anchor to the Summary. This is not hypothetical: every
+        // one of the 857 measured tracks on the reference device had stored
+        // exactly -70.0, because the old first-match parse always won on
+        // frame line one. The Summary-only `normal.txt` fixture could never
+        // catch it.
+        fakeBridge.nextOutput = resource("ffmpeg_output/full_run_with_frame_lines.txt")
+
+        val r = runBlocking { measurer.measure(tempFile("dummy.flac")) }
+
+        assertTrue("expected Success, got $r", r is LoudnessMeasurer.Result.Success)
+        r as LoudnessMeasurer.Result.Success
+        assertEquals(-9.8f, r.lufs, 0.01f)
+        assertEquals(0.3f, r.truePeakDbfs, 0.01f)
     }
 
     @Test
@@ -83,7 +110,7 @@ class LoudnessMeasurerTest {
         val pausingBridge = PausingFakeFFmpegBridge(
             output = resource("ffmpeg_output/normal.txt"),
         )
-        val serialMeasurer = LoudnessMeasurer(pausingBridge, fakeTrackDao)
+        val serialMeasurer = LoudnessMeasurer(pausingBridge, fakeTrackDao, alwaysCharging)
         val file = tempFile("dummy.mp3")
 
         val first = async { serialMeasurer.measure(file) }

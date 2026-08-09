@@ -81,13 +81,64 @@ class ArcodTokenRefresherTest {
         assertThat(request.body.readUtf8()).contains("refreshtok")
     }
 
-    @Test fun `refresh on non-2xx returns null and marks store stale`() = runTest {
+    @Test fun `refresh on 400 returns null and marks store stale`() = runTest {
+        // Supabase's "Invalid Refresh Token: Already Used" (the rotation bug's
+        // signature) comes back as a 400 — a definitive rejection. Only then
+        // may the session be wiped.
         server.enqueue(MockResponse().setResponseCode(400).setBody("""{"error":"bad refresh"}"""))
 
         val result = refresher.refresh()
 
         assertThat(result).isNull()
         assertThat(store.isConnected()).isFalse()
+    }
+
+    @Test fun `refresh on 401 returns null and marks store stale`() = runTest {
+        server.enqueue(MockResponse().setResponseCode(401).setBody("""{"error":"unauthorized"}"""))
+
+        val result = refresher.refresh()
+
+        assertThat(result).isNull()
+        assertThat(store.isConnected()).isFalse()
+    }
+
+    @Test fun `refresh on 500 returns null but KEEPS the session for retry`() = runTest {
+        // A Supabase outage is not an auth rejection. Wiping credentials here
+        // forced a manual reconnect after every transient server hiccup —
+        // observed live 2026-08-06 as "ARCOD is down" with a 0-byte
+        // credential store while the service itself was healthy.
+        server.enqueue(MockResponse().setResponseCode(500).setBody("oops"))
+
+        val result = refresher.refresh()
+
+        assertThat(result).isNull()
+        assertThat(store.isConnected()).isTrue()
+        assertThat(store.session()!!.refreshToken).isEqualTo("refreshtok")
+    }
+
+    @Test fun `refresh on network failure returns null but KEEPS the session`() = runTest {
+        // Offline / flaky Wi-Fi mid-refresh must never destroy auth state —
+        // the next attempt with the same refresh token is still valid.
+        server.enqueue(
+            MockResponse().setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.DISCONNECT_AT_START),
+        )
+
+        val result = refresher.refresh()
+
+        assertThat(result).isNull()
+        assertThat(store.isConnected()).isTrue()
+        assertThat(store.session()!!.refreshToken).isEqualTo("refreshtok")
+    }
+
+    @Test fun `refresh on unparseable 200 body returns null but KEEPS the session`() = runTest {
+        // A garbled success response is a server anomaly, not a rejection of
+        // our token — keep the session and let a later attempt succeed.
+        server.enqueue(MockResponse().setResponseCode(200).setBody("not json"))
+
+        val result = refresher.refresh()
+
+        assertThat(result).isNull()
+        assertThat(store.isConnected()).isTrue()
     }
 
     @Test fun `refresh with no refresh token returns null and makes no request`() = runTest {

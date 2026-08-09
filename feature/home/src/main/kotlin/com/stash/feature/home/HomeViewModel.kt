@@ -83,6 +83,8 @@ class HomeViewModel @Inject constructor(
     private val homeSectionsPreference: com.stash.core.data.prefs.HomeSectionsPreference,
     private val metadataBackfillState: MetadataBackfillState,
     private val homeDiscoveryRepository: HomeDiscoveryRepository,
+    private val losslessSourceHealth: com.stash.core.media.streaming.LosslessSourceHealth,
+    private val arcodCredentialStore: com.stash.data.download.lossless.arcod.ArcodCredentialStore,
     @ApplicationContext private val context: Context,
 ) : ViewModel() {
 
@@ -296,6 +298,32 @@ class HomeViewModel @Inject constructor(
     }
 
     /**
+     * "Connect ARCOD" rescue banner: offered exactly when it helps —
+     * lossless is ON but qbdlx (the shared-pool source) has missed enough
+     * consecutive resolves to look dead, no ARCOD session is connected to
+     * take over, and the user hasn't already declined. Every leg re-emits
+     * live, so connecting ARCOD (token appears) or the pool recovering
+     * (streak resets) retires the banner on its own.
+     */
+    private val arcodRescueFlow = combine(
+        losslessSourceHealth.qbdlxLooksDown,
+        arcodCredentialStore.accessToken,
+        losslessPrefs.enabled,
+        losslessPrefs.arcodRescueDismissed,
+    ) { qbdlxDown, arcodToken, losslessOn, dismissed ->
+        qbdlxDown && arcodToken == null && losslessOn && !dismissed
+    }
+
+    /**
+     * The two lossless banners travel as a pair so [uiState]'s combine
+     * stays within the 5-flow typed overload.
+     */
+    private val losslessBannersFlow = combine(
+        losslessPromptFlow,
+        arcodRescueFlow,
+    ) { prompt, arcodRescue -> prompt to arcodRescue }
+
+    /**
      * v0.9.35: drives [HomeUiState.metadataBackfillBanner]. Pure-mapped
      * from [MetadataBackfillState.snapshot] so the banner sealed type
      * doesn't have to plumb through the raw DataStore record. Hidden in
@@ -386,15 +414,16 @@ class HomeViewModel @Inject constructor(
 
     val uiState: StateFlow<HomeUiState> = combine(
         homePlaylistFlow,
-        losslessPromptFlow,
+        losslessBannersFlow,
         tipJarRepository.state,
         metadataBackfillBannerFlow,
         discoveryFlow,
-    ) { home, losslessPrompt, tipJar, metadataBackfillBanner, discovery ->
+    ) { home, (losslessPrompt, showArcodRescue), tipJar, metadataBackfillBanner, discovery ->
         HomeUiState(
             hero = home.hero,
             isLoading = false,
             losslessPrompt = losslessPrompt,
+            showArcodRescue = showArcodRescue,
             tipJar = tipJar,
             metadataBackfillBanner = metadataBackfillBanner,
             selectedGenre = discovery.selectedGenre,
@@ -420,6 +449,13 @@ class HomeViewModel @Inject constructor(
      * through to DataStore; the prompt Flow re-emits null on the
      * next tick and the banner disappears.
      */
+    /** Hide the "connect ARCOD" rescue banner forever (user declined the offer). */
+    fun dismissArcodRescue() {
+        viewModelScope.launch {
+            losslessPrefs.setArcodRescueDismissed(true)
+        }
+    }
+
     fun dismissLosslessBanner() {
         viewModelScope.launch {
             losslessPrefs.setBannerDismissed(true)

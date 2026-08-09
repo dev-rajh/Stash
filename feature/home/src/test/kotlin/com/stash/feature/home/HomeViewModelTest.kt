@@ -151,6 +151,47 @@ class HomeViewModelTest {
     }
 
     // ------------------------------------------------------------------
+    // ARCOD rescue banner
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `arcod rescue shows when qbdlx looks dead, lossless on, no arcod`() = runTest {
+        val health = com.stash.core.media.streaming.LosslessSourceHealth().apply {
+            repeat(com.stash.core.media.streaming.LosslessSourceHealth.QBDLX_DOWN_THRESHOLD) {
+                recordQbdlxMiss()
+            }
+        }
+        val vm = buildVm(losslessEnabled = true, losslessSourceHealth = health, arcodToken = null)
+
+        val state = vm.uiState.first { !it.isLoading }
+
+        assertThat(state.showArcodRescue).isTrue()
+    }
+
+    @Test
+    fun `arcod rescue hidden when arcod is already connected`() = runTest {
+        val health = com.stash.core.media.streaming.LosslessSourceHealth().apply {
+            repeat(com.stash.core.media.streaming.LosslessSourceHealth.QBDLX_DOWN_THRESHOLD) {
+                recordQbdlxMiss()
+            }
+        }
+        val vm = buildVm(losslessEnabled = true, losslessSourceHealth = health, arcodToken = "tok")
+
+        val state = vm.uiState.first { !it.isLoading }
+
+        assertThat(state.showArcodRescue).isFalse()
+    }
+
+    @Test
+    fun `arcod rescue hidden while qbdlx is healthy`() = runTest {
+        val vm = buildVm(losslessEnabled = true, arcodToken = null)
+
+        val state = vm.uiState.first { !it.isLoading }
+
+        assertThat(state.showArcodRescue).isFalse()
+    }
+
+    // ------------------------------------------------------------------
     // Helpers
     // ------------------------------------------------------------------
 
@@ -176,6 +217,10 @@ class HomeViewModelTest {
         playerRepository: PlayerRepository = mock(),
         discoveryAlbums: List<AlbumSummary> = emptyList(),
         homeDiscovery: HomeDiscoveryRepository? = null,
+        losslessEnabled: Boolean = false,
+        losslessSourceHealth: com.stash.core.media.streaming.LosslessSourceHealth =
+            com.stash.core.media.streaming.LosslessSourceHealth(),
+        arcodToken: String? = null,
     ): HomeViewModel {
         val musicRepo = mock<MusicRepository> {
             on { getAllPlaylists() } doReturn flowOf(playlists)
@@ -192,8 +237,12 @@ class HomeViewModelTest {
             onBlocking { current() } doReturn streamingEnabled
         }
         val losslessPrefs = mock<LosslessSourcePreferences> {
-            on { enabled } doReturn flowOf(false)
+            on { enabled } doReturn flowOf(losslessEnabled)
             on { bannerDismissed } doReturn flowOf(false)
+            // Feeds the arcodRescueFlow combine — an unstubbed Flow is null
+            // and the banners pair would never emit (same trap as the DAO
+            // flows below).
+            on { arcodRescueDismissed } doReturn flowOf(false)
         }
         // init {} reads isStale() (suspend, primitive Boolean) — stub it so the
         // cold-start warm-up coroutine doesn't NPE on an unboxed null. `state`
@@ -244,6 +293,12 @@ class HomeViewModelTest {
             },
             homeSectionsPreference = mock {
                 on { visibleSections } doReturn flowOf(com.stash.core.data.prefs.HomeSection.entries.toList())
+            },
+            // Defaults: fresh health (starts healthy) + no ARCOD token, so
+            // the rescue banner stays out of existing tests.
+            losslessSourceHealth = losslessSourceHealth,
+            arcodCredentialStore = mock {
+                on { accessToken } doReturn flowOf(arcodToken)
             },
             context = mock(),
         )

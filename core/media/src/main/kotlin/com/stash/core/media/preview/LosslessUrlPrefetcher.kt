@@ -54,6 +54,12 @@ class LosslessUrlPrefetcher @Inject constructor(
     fun warmUp(track: TrackItem) {
         val key = track.videoId
         cache[key]?.let { if (it.isFresh()) return }
+        // Evict here rather than on a timer. The cache only ever grows at
+        // this line, so pruning on insert bounds it exactly as well as the
+        // 60s loop that used to do it from StashApplication — and that loop
+        // ran for the entire life of the process, waking every minute to
+        // sweep a map that is empty unless the user is browsing.
+        cancelStale()
         cache[key] = CachedDeferred(
             deferred = scope.async {
                 concurrency.withPermit {
@@ -99,11 +105,15 @@ class LosslessUrlPrefetcher @Inject constructor(
     }
 
     /**
-     * Evicts all cache entries whose TTL has elapsed. Intended to be called
-     * on a periodic timer (e.g. every 60s from `StashApplication`) to bound
-     * memory growth across long browse sessions. Stale entries whose
-     * [Deferred] is still running are also cancelled here — if the URL would
-     * have expired by the time the lookup completes it is unusable anyway.
+     * Evicts all cache entries whose TTL has elapsed, bounding memory across
+     * long browse sessions. Called from [warmUp] — the only place the cache
+     * grows — rather than from a timer.
+     *
+     * Eviction drops the entry; it does not cancel a still-running
+     * [Deferred]. Cancelling one would be unsafe: [lookup] awaits the
+     * deferred it just stored, and a concurrent sweep could cancel the very
+     * resolve a user is waiting on. In-flight work is bounded by the
+     * resolver's own timeouts instead.
      */
     fun cancelStale() {
         val now = System.currentTimeMillis()

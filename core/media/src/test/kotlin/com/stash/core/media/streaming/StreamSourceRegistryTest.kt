@@ -51,7 +51,10 @@ class StreamSourceRegistryTest {
         coEvery { isForceAmzOnly() } returns false
     }
 
-    private fun registry() = StreamSourceRegistry(kennyy, qobuz, arcod, amz, qbdlx, youtube, streamingPreference)
+    private fun registry() = StreamSourceRegistry(
+        kennyy, qobuz, arcod, amz, qbdlx, youtube, streamingPreference,
+        LosslessSourceHealth(),
+    )
 
     private fun stubStreamUrl(origin: String) = StreamUrl(
         url = "https://example.test/$origin.flac",

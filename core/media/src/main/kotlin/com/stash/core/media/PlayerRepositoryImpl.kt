@@ -44,6 +44,7 @@ import com.stash.core.model.isUnavailableForDisplay
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -61,7 +62,9 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.shareIn
 import kotlinx.coroutines.flow.SharingStarted
@@ -96,6 +99,7 @@ class PlayerRepositoryImpl @Inject constructor(
     private val playbackResumer: PlaybackResumer,
     private val radioGenerator: com.stash.core.data.radio.RadioStationGenerator,
     private val trackIdentityEvents: com.stash.core.data.sync.TrackIdentityEvents,
+    private val playbackSessionBus: PlaybackSessionBus,
 ) : PlayerRepository {
 
     /**
@@ -164,6 +168,20 @@ class PlayerRepositoryImpl @Inject constructor(
         // music was already playing (e.g. via Android Auto).
         scope.launch {
             ensureController()
+        }
+
+        // Idle-stop handshake. The service flips this false just before it
+        // stops itself: release the controller so OUR binding doesn't keep
+        // the stopped service (and the whole process) alive. It flips true
+        // in the service's onCreate: reconnect so state observation works
+        // for playback the app didn't start (media button / Bluetooth) —
+        // the deafness that killed the previous repo-side idle design.
+        // The last _playerState snapshot is deliberately kept on release so
+        // the mini player still shows the paused track; play() already
+        // rebuilds from the persisted queue when the timeline comes back
+        // empty.
+        scope.launch {
+            playbackSessionBus.sessionAlive.collect { alive -> onSessionAliveChanged(alive) }
         }
 
         // Evict deleted tracks from the live queue. Without this, ExoPlayer's
@@ -242,30 +260,27 @@ class PlayerRepositoryImpl @Inject constructor(
     override val playerState: StateFlow<PlayerState> = _playerState.asStateFlow()
 
     /**
-     * Playback position ticker: 250 ms while playing, 1 s while paused (just
-     * enough to catch a seek-while-paused). Collectors receive 0 when nothing
-     * is playing.
+     * Playback position ticker: 250 ms while playing, and SILENT while
+     * paused — see [positionTicker] for why, and for the tests that pin it.
      *
      * ONE shared ticker (audit finding): the old cold flow ran a private
      * 4 Hz Main-thread poll PER collector — every retained NowPlayingViewModel
      * (activity-scoped MiniPlayer + nav entries; a heap dump showed 6 live)
      * plus ListeningRecorder each span their own timer, forever, even while
-     * paused. shareIn collapses them to one; distinctUntilChanged keeps
-     * identical positions (i.e. the whole time playback is paused) from
-     * reaching collectors at all.
+     * paused. shareIn collapses them to one.
+     *
+     * That collapse was not enough on its own: [ListeningRecorder] subscribes
+     * from a process-scoped coroutine, so `WhileSubscribed` never dropped to
+     * zero subscribers and the loop kept polling for the life of the process.
+     * Gating the poll on `isPlaying` inside the flow fixes every collector at
+     * once, whatever their scope — measured at 56 mAh/5h49m of cached-state
+     * drain before the fix.
      */
-    override val currentPosition: Flow<Long> = flow {
-        while (true) {
-            emit(controllerDeferred?.currentPosition ?: 0L)
-            val interval = if (_playerState.value.isPlaying) {
-                POSITION_UPDATE_INTERVAL_MS
-            } else {
-                PAUSED_POSITION_UPDATE_INTERVAL_MS
-            }
-            delay(interval)
-        }
-    }
-        .distinctUntilChanged()
+    override val currentPosition: Flow<Long> = positionTicker(
+        playerState = _playerState,
+        pollIntervalMs = POSITION_UPDATE_INTERVAL_MS,
+        readPositionMs = { controllerDeferred?.currentPosition ?: 0L },
+    )
         .flowOn(Dispatchers.Main)
         .shareIn(scope, SharingStarted.WhileSubscribed(), replay = 1)
 
@@ -273,6 +288,9 @@ class PlayerRepositoryImpl @Inject constructor(
      * Internal as a test seam: gate/queue tests inject a mock controller here. */
     @Volatile
     internal var controllerDeferred: MediaController? = null
+
+    /** Serialises controller construction — see [ensureController]. */
+    private val controllerBuildMutex = Mutex()
 
     /**
      * v0.9.14: True while a "Shuffle Library" queue is active. Set by
@@ -388,7 +406,17 @@ class PlayerRepositoryImpl @Inject constructor(
 
     override suspend fun play() {
         cascadeGuard.onUserTransport()
-        ensureController()?.play()
+        val controller = ensureController() ?: return
+        // An empty timeline means the service died and took ExoPlayer's queue
+        // with it — the OS reclaims background services routinely. play() on
+        // an empty player is a silent no-op, i.e. a dead play button; rebuild
+        // from the persisted queue instead. resumeLastQueue ends in
+        // prepare() + play(), so playback still starts.
+        if (controller.mediaItemCount == 0) {
+            resumeLastQueue()
+            return
+        }
+        controller.play()
     }
 
     override suspend fun pause() {
@@ -1533,26 +1561,57 @@ class PlayerRepositoryImpl @Inject constructor(
     /**
      * Lazily builds and connects a [MediaController] to [StashPlaybackService].
      * Returns the connected controller or null on failure.
+     *
+     * Single-flight behind [controllerBuildMutex]: the init-time connect, the
+     * session-alive handshake and any early command can all race here, and
+     * two winners would mean two live controllers — the loser's binding is
+     * never released, which would pin an idle-stopped service (and the whole
+     * process) alive forever. A cached-but-disconnected controller (service
+     * stopped between builds) is released and rebuilt rather than returned.
      */
     private suspend fun ensureController(): MediaController? {
-        controllerDeferred?.let { return it }
+        controllerDeferred?.let { if (it.isConnected) return it }
 
-        return try {
-            val sessionToken = SessionToken(
-                context,
-                ComponentName(context, StashPlaybackService::class.java),
-            )
-            val controller = MediaController.Builder(context, sessionToken)
-                .buildAsync()
-                .await()
+        return controllerBuildMutex.withLock {
+            controllerDeferred?.let {
+                if (it.isConnected) return it
+                it.release()
+                controllerDeferred = null
+            }
+            try {
+                val sessionToken = SessionToken(
+                    context,
+                    ComponentName(context, StashPlaybackService::class.java),
+                )
+                val controller = MediaController.Builder(context, sessionToken)
+                    .buildAsync()
+                    .await()
 
-            controller.addListener(playerListener)
-            controllerDeferred = controller
-            // Sync initial state
-            updateState(controller)
-            controller
-        } catch (e: Exception) {
-            null
+                controller.addListener(playerListener)
+                controllerDeferred = controller
+                // Sync initial state
+                updateState(controller)
+                controller
+            } catch (e: Exception) {
+                null
+            }
+        }
+    }
+
+    /**
+     * Idle-stop handshake (see [PlaybackSessionBus]). `false` → the service
+     * is about to stop itself: release our controller so the binding doesn't
+     * keep it alive, but KEEP the last [_playerState] snapshot so the UI
+     * still shows the paused track. `true` → the service is up (possibly
+     * started by a media button while we held no controller): reconnect so
+     * state observation and listen-recording resume.
+     */
+    internal suspend fun onSessionAliveChanged(alive: Boolean) {
+        if (alive) {
+            ensureController()
+        } else {
+            controllerDeferred?.release()
+            controllerDeferred = null
         }
     }
 
@@ -1599,6 +1658,23 @@ class PlayerRepositoryImpl @Inject constructor(
         }
 
         override fun onPlaybackStateChanged(playbackState: Int) {
+            controllerDeferred?.let { updateState(it) }
+        }
+
+        /**
+         * Seeks (and repeat-one wraparounds, and auto-advances) move the
+         * position without any other event firing. While PLAYING the ticker
+         * would catch it within 250 ms anyway; while PAUSED nothing else
+         * does, which is the only reason the old ticker kept polling at 1 Hz
+         * forever. Refreshing state here means a seek-while-paused lands
+         * immediately instead of up to a second later, and lets the ticker
+         * stay silent whenever playback is stopped.
+         */
+        override fun onPositionDiscontinuity(
+            oldPosition: Player.PositionInfo,
+            newPosition: Player.PositionInfo,
+            reason: Int,
+        ) {
             controllerDeferred?.let { updateState(it) }
         }
 
@@ -2067,10 +2143,6 @@ class PlayerRepositoryImpl @Inject constructor(
         private const val TAG = "StashPlayer"
         private const val POSITION_UPDATE_INTERVAL_MS = 250L
 
-        /** Ticker interval while playback is paused — catches seek-while-paused
-         *  without burning 4 Hz wakeups on a stationary position. */
-        private const val PAUSED_POSITION_UPDATE_INTERVAL_MS = 1_000L
-
         /** Auto-grow fires once the remaining queue tail drops below this many tracks. */
         private const val RADIO_GROW_THRESHOLD = 5
         private const val LIBRARY_SHUFFLE_GROW_THRESHOLD = 5
@@ -2240,3 +2312,41 @@ internal fun shouldPersistPosition(
 
 /** Minimum position drift before an unforced persist write. */
 internal const val POSITION_PERSIST_MIN_DELTA_MS = 5_000L
+
+/**
+ * Playback-position stream: polls the player [pollIntervalMs] apart WHILE
+ * PLAYING, and not at all otherwise.
+ *
+ * A paused player's position only moves when the user seeks, and a seek
+ * arrives as a [PlayerState] update (see `onPositionDiscontinuity`), so
+ * there is nothing for a paused poll to discover. The previous version
+ * polled forever regardless — a `while (true)` loop waking the main thread
+ * every second for the entire life of the process, long after playback
+ * stopped. `distinctUntilChanged` hid it from consumers (the repeated
+ * positions were identical), so it cost battery without ever showing up as
+ * an emission. Hence the unit tests count polls, not emissions.
+ *
+ * Top-level + `internal` so the test can exercise it on virtual time
+ * without booting the repository (same idea as [shouldPersistPosition]).
+ */
+@OptIn(ExperimentalCoroutinesApi::class)
+internal fun positionTicker(
+    playerState: Flow<PlayerState>,
+    pollIntervalMs: Long,
+    readPositionMs: () -> Long,
+): Flow<Long> = playerState
+    .map { it.isPlaying to it.positionMs }
+    .distinctUntilChanged()
+    .flatMapLatest { (isPlaying, statePositionMs) ->
+        if (isPlaying) {
+            flow {
+                while (true) {
+                    emit(readPositionMs())
+                    delay(pollIntervalMs)
+                }
+            }
+        } else {
+            flowOf(statePositionMs)
+        }
+    }
+    .distinctUntilChanged()

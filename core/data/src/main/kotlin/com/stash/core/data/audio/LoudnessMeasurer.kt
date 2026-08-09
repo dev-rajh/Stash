@@ -61,6 +61,7 @@ import javax.inject.Singleton
 class LoudnessMeasurer @Inject constructor(
     private val bridge: FFmpegBridge,
     private val trackDao: TrackDao,
+    private val chargingMonitor: ChargingMonitor,
 ) {
     // NOT a constructor parameter — Hilt doesn't honour Kotlin default values,
     // so injecting CoroutineDispatcher would require a project-wide @Qualifier
@@ -116,7 +117,15 @@ class LoudnessMeasurer @Inject constructor(
         if (!stderr.contains("Summary:")) {
             return Result.Failed("no summary block")
         }
-        val lufsMatch = LUFS_REGEX.find(stderr)
+        // Parse ONLY the text after "Summary:". ebur128 also prints a
+        // progress line per 100ms of audio ABOVE it, and the first frames
+        // always read `I: -70.0 LUFS` (the gating floor) — a first-match
+        // scan over the whole stream stored exactly -70.0 for every track
+        // ever measured on device. The true-peak regex only ever matched
+        // inside the Summary (progress lines say TPK:, not Peak:), which is
+        // why peaks were always right while loudness was always wrong.
+        val summary = stderr.substringAfter("Summary:")
+        val lufsMatch = LUFS_REGEX.find(summary)
             ?: return Result.Failed("could not parse integrated loudness")
         val lufsRaw = lufsMatch.groupValues[1]
         // Explicitly reject -inf / inf BEFORE toFloatOrNull, because Kotlin's
@@ -133,7 +142,7 @@ class LoudnessMeasurer @Inject constructor(
         if (lufs.isInfinite() || lufs.isNaN()) {
             return Result.Failed("integrated loudness is inf/NaN (track too short?)")
         }
-        val peakMatch = PEAK_REGEX.find(stderr)
+        val peakMatch = PEAK_REGEX.find(summary)
             ?: return Result.Failed("could not parse true peak")
         val peak = peakMatch.groupValues[1].toFloatOrNull()
             ?: return Result.Failed("could not parse true peak number")
@@ -160,6 +169,23 @@ class LoudnessMeasurer @Inject constructor(
      * so the daily backfill worker won't pick it up again immediately.
      */
     fun measureAndPersistInBackground(trackId: Long, file: File) {
+        // Off power, hand this to LoudnessBackfillWorker instead of doing it
+        // now. A full ffmpeg decode per downloaded track is the single most
+        // expensive thing the download pipeline does, and downloads run in
+        // OFFLINE mode — so the users who picked offline listening are
+        // exactly the ones paying for it, on battery, hundreds of tracks at
+        // a time during a sync.
+        //
+        // The worker already measures precisely these rows (its query is
+        // `loudness_measured_at IS NULL`) and already waits for
+        // charging + device-idle + battery-not-low, so deferring costs no
+        // measurement — it just moves the CPU to where it is free. Leave the
+        // row untouched: stamping it (even as failed) would drop it out of
+        // that query and it would never be level-matched at all.
+        if (!chargingMonitor.isCharging()) {
+            Log.i(TAG, "not charging — deferring loudness for track $trackId to the backfill worker")
+            return
+        }
         backgroundScope.launch {
             when (val r = measure(file)) {
                 is Result.Success -> runCatching {

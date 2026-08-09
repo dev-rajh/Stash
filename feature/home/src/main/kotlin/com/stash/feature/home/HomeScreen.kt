@@ -156,6 +156,7 @@ private const val HOME_RAIL_LIMIT = 12
 fun HomeScreen(
     modifier: Modifier = Modifier,
     onNavigateToSettings: () -> Unit = {},
+    onNavigateToArcodConnect: () -> Unit = {},
     onNavigateToPlaylist: (Long) -> Unit = {},
     onNavigateToAlbum: (AlbumSummary) -> Unit = {},
     onSeeAllPlaylists: (String) -> Unit = {},
@@ -317,6 +318,22 @@ fun HomeScreen(
                         onNavigateToSettings()
                     },
                     onDismiss = viewModel::dismissLosslessBanner,
+                    modifier = Modifier.padding(horizontal = 16.dp),
+                )
+            }
+        }
+
+        // ── ARCOD rescue ─────────────────────────────────────────────
+        // Shown while the qbdlx pool looks dead, lossless is ON and no
+        // ARCOD account is connected — the one moment the second source
+        // is the difference between FLAC and a silent YouTube fallback.
+        // Tap goes STRAIGHT into the connect flow; X declines forever.
+        if (uiState.showArcodRescue) {
+            item {
+                Spacer(Modifier.height(6.dp))
+                ArcodRescueBanner(
+                    onConnect = onNavigateToArcodConnect,
+                    onDismiss = viewModel::dismissArcodRescue,
                     modifier = Modifier.padding(horizontal = 16.dp),
                 )
             }
@@ -820,6 +837,68 @@ private fun LosslessConnectBanner(
                 Icon(
                     imageVector = Icons.Default.Close,
                     contentDescription = "Dismiss lossless banner",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+        }
+    }
+}
+
+/**
+ * "Connect ARCOD" rescue banner. Same visual grammar as
+ * [LosslessConnectBanner] but on the error accent: this one isn't an
+ * upsell, it's a repair — the user's chosen lossless experience is
+ * currently degraded and one tap fixes it.
+ */
+@Composable
+private fun ArcodRescueBanner(
+    onConnect: () -> Unit,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val accent = MaterialTheme.colorScheme.error
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        color = accent.copy(alpha = 0.10f),
+        shape = RoundedCornerShape(12.dp),
+        border = androidx.compose.foundation.BorderStroke(1.dp, accent.copy(alpha = 0.35f)),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onConnect)
+                .padding(start = 12.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Lossless is struggling",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                Text(
+                    text = "The main FLAC source isn't responding. Connect ARCOD — a free second source — to keep hi-res going.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Text(
+                text = "Connect →",
+                style = MaterialTheme.typography.labelSmall,
+                color = accent,
+            )
+            Box(
+                modifier = Modifier
+                    .size(32.dp)
+                    .clip(CircleShape)
+                    .clickable(onClick = onDismiss),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Close,
+                    contentDescription = "Dismiss ARCOD banner",
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.size(18.dp),
                 )

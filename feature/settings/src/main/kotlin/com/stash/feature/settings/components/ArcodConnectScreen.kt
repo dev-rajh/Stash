@@ -92,6 +92,16 @@ fun ArcodConnectScreen(
             val session = parseSupabaseSession(inner) ?: continue
             captured = true
             statusText = "Connected — saving and closing."
+            // Single-source refresh: the app is now the sole owner of this
+            // session, so remove it from the page's localStorage. WebView
+            // destroy() does NOT clear DOM storage — a later Connect screen
+            // would boot supabase-js on this same stored session, and its
+            // auto-refresh would rotate the token family, silently burning
+            // the refresh token we are about to persist ("Invalid Refresh
+            // Token: Already Used" → credentials wiped → lossless dead until
+            // manual reconnect). Recurred live 2026-08-06.
+            wv.evaluateJavascript("localStorage.removeItem('$SUPABASE_AUTH_TOKEN_KEY')", null)
+            Log.d(TAG, "harvested session removed from WebView localStorage")
             onConnected(session.accessToken, session.refreshToken, session.expiresAtMs)
             // Brief beat so the success text is visible before the pop.
             delay(400)

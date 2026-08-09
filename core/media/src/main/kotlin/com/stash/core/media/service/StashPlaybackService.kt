@@ -31,6 +31,7 @@ import com.stash.core.media.equalizer.EqController
 import com.stash.core.media.equalizer.LoudnessController
 import com.stash.core.media.equalizer.StashRenderersFactory
 import com.stash.core.media.equalizer.computeGain
+import com.stash.core.media.equalizer.watchDspActivation
 import com.stash.core.media.PlaybackResumer
 import com.stash.core.media.ResumePlayGate
 import com.stash.core.media.ResumeStreamResolver
@@ -46,6 +47,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.flatMapLatest
@@ -85,6 +88,7 @@ class StashPlaybackService : MediaLibraryService() {
     @Inject lateinit var playbackResumer: PlaybackResumer
     @Inject lateinit var resumeStreamResolver: ResumeStreamResolver
     @Inject lateinit var crossfadePreference: CrossfadePreference
+    @Inject lateinit var playbackSessionBus: com.stash.core.media.PlaybackSessionBus
 
     /** Deps for the full-timeline lazy-resolve chain (LazyResolvingDataSource). */
     @Inject lateinit var streamResolver: com.stash.core.media.streaming.StreamSourceRegistry
@@ -206,6 +210,15 @@ class StashPlaybackService : MediaLibraryService() {
 
         /** How often the sleep-timer notification's remaining-time text refreshes. */
         private const val SLEEP_TIMER_TICK_MS = 60_000L
+
+        /**
+         * How long the player must sit idle (paused / queue ended / errored
+         * out) before the service stops itself. Long enough that a podcast
+         * pause or a phone call never loses the session; short enough that a
+         * forgotten pause doesn't keep the process undying all day — the
+         * measured cost of that was ~10 mA around the clock.
+         */
+        internal const val IDLE_STOP_TIMEOUT_MS = 5 * 60_000L
     }
 
     private var mediaSession: MediaLibrarySession? = null
@@ -249,6 +262,16 @@ class StashPlaybackService : MediaLibraryService() {
 
     /** The player [playerListener] is currently attached to (moves on swap). */
     private var listenedPlayer: Player? = null
+
+    /**
+     * Feed for [idleStopTicker]: true while the master player is idle (see
+     * [isPlayerIdle]). Starts true — a service created without playback
+     * (boot-time notification population, a connect that never plays) must
+     * count down from creation, that lingering record was half the measured
+     * idle drain. Updated from [playerListener] and re-read from the new
+     * master after a crossfade swap.
+     */
+    private val playerIdle = MutableStateFlow(true)
 
     /**
      * Forces playback to start when a real *play* request restores a queue
@@ -304,6 +327,14 @@ class StashPlaybackService : MediaLibraryService() {
                 prefetchPollJob?.cancel(); prefetchPollJob = null
                 crossfadePollJob?.cancel(); crossfadePollJob = null
             }
+        }
+
+        override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+            refreshPlayerIdle()
+        }
+
+        override fun onPlaybackStateChanged(playbackState: Int) {
+            refreshPlayerIdle()
         }
 
         override fun onPlayerError(error: PlaybackException) {
@@ -404,6 +435,17 @@ class StashPlaybackService : MediaLibraryService() {
         } else null
 
         val sessionBuilder = MediaLibrarySession.Builder(this, player, StashSessionCallback())
+            // #387: hand the platform session a throwaway copy of each artwork
+            // bitmap so an Android-15 AOSP ROM recycling media3's shared cached
+            // instance can't crash setMetadata. Wraps the default
+            // cache→datasource chain (kept, so artwork isn't re-decoded).
+            .setBitmapLoader(
+                SafeBitmapLoader(
+                    androidx.media3.session.CacheBitmapLoader(
+                        androidx.media3.datasource.DataSourceBitmapLoader(this),
+                    ),
+                ),
+            )
         if (sessionActivity != null) {
             sessionBuilder.setSessionActivity(sessionActivity)
         }
@@ -418,8 +460,31 @@ class StashPlaybackService : MediaLibraryService() {
         listenedPlayer = player
 
         // Cache crossfade prefs for the poll's prepare/fire decisions.
-        serviceScope.launch { crossfadePreference.enabled.collect { crossfadeEnabled = it } }
+        serviceScope.launch { crossfadePreference.enabled.collect { onCrossfadeEnabledChanged(it) } }
         serviceScope.launch { crossfadePreference.durationMs.collect { crossfadeDurationMs = it } }
+
+        // The service is up — tell the repository so it (re)connects its
+        // controller. This is the half the reverted design was missing: it
+        // makes state observation recover for playback the app didn't start
+        // (media button, Bluetooth, Android Auto).
+        playbackSessionBus.onServiceCreated()
+
+        // Idle self-stop: after IDLE_STOP_TIMEOUT_MS of no playback intent
+        // the service stops itself (see performIdleStop). Logged at the
+        // wiring site — the last idle design died precisely because a green
+        // unit suite said nothing about whether the watcher actually ran.
+        serviceScope.launch {
+            android.util.Log.i("StashPlayback", "idle-stop watcher armed (timeout ${IDLE_STOP_TIMEOUT_MS}ms)")
+            idleStopTicker(playerIdle, IDLE_STOP_TIMEOUT_MS).collect { performIdleStop() }
+        }
+
+        // Closes a race: play() can land between performIdleStop's "stopping"
+        // signal and the repo's release — Media3 then restarts playback on
+        // THIS instance, so no onCreate re-announces the session and the repo
+        // would stay deaf while music plays. Any exit from idle re-announces.
+        serviceScope.launch {
+            playerIdle.collect { idle -> if (!idle) playbackSessionBus.onServiceCreated() }
+        }
 
         // Sleep-timer status notification — separate from the media notification
         // (Media3's default provider owns that one); mirrors the "Resuming…"
@@ -517,14 +582,23 @@ class StashPlaybackService : MediaLibraryService() {
                 /* bufferForPlaybackAfterRebufferMs = */ 2_000,
             )
             .build()
-        return ExoPlayer.Builder(this)
-            .setRenderersFactory(StashRenderersFactory(this, eqController, loudnessController))
+        val renderersFactory = StashRenderersFactory(this, eqController, loudnessController)
+        val player = ExoPlayer.Builder(this)
+            .setRenderersFactory(renderersFactory)
             .setMediaSourceFactory(mediaSourceFactory)
             .setLoadControl(loadControl)
             .setAudioAttributes(audioAttributes, /* handleAudioFocus = */ false)
             .setHandleAudioBecomingNoisy(true)
             .setWakeMode(C.WAKE_MODE_LOCAL)
             .build()
+        // Disabled DSP stages are dropped from the audio pipeline entirely
+        // (StashRenderersFactory kdoc); this watcher re-applies the pipeline
+        // when a toggle crosses an active/inactive boundary so EQ/loudness
+        // changes still land mid-track.
+        renderersFactory.builtSink?.let { sink ->
+            watchDspActivation(serviceScope, eqController, loudnessController, player, sink)
+        }
+        return player
     }
 
     /**
@@ -533,13 +607,46 @@ class StashPlaybackService : MediaLibraryService() {
      * is playing; the swap callback restarts it against the new master.
      */
     @OptIn(UnstableApi::class)
+    /**
+     * Starts the arm-poll — but only when crossfade is actually on.
+     *
+     * Every tick of this loop calls [evaluateCrossfade], whose first act is
+     * to return when `!crossfadeEnabled`. That check used to live INSIDE the
+     * tick, so a feature that is off by default still woke the service four
+     * times a second for the whole of every track, forever, to decide it had
+     * nothing to do. The gate belongs around the loop, and this is the one
+     * choke point all three call sites (transition, isPlaying, post-swap)
+     * route through. Flipping the pref on mid-playback is handled by
+     * [onCrossfadeEnabledChanged].
+     */
     private fun startCrossfadePoll(player: Player) {
         crossfadePollJob?.cancel()
+        crossfadePollJob = null
+        if (!crossfadeEnabled) return
         crossfadePollJob = serviceScope.launch {
             while (isActive && player.isPlaying) {
                 evaluateCrossfade(player)
                 delay(CROSSFADE_POLL_INTERVAL_MS)
             }
+        }
+    }
+
+    /**
+     * Keeps the poll in step with the preference. Turning crossfade on
+     * mid-track has to start a poll that [startCrossfadePoll] would have
+     * refused to start while it was off; turning it off has to stop the one
+     * that is running rather than leaving it spinning until the track ends.
+     */
+    internal fun onCrossfadeEnabledChanged(enabled: Boolean) {
+        val wasEnabled = crossfadeEnabled
+        crossfadeEnabled = enabled
+        if (enabled == wasEnabled) return
+        val master = crossfadeEngine?.masterPlayer
+        if (enabled) {
+            if (master?.isPlaying == true) startCrossfadePoll(master)
+        } else {
+            crossfadePollJob?.cancel()
+            crossfadePollJob = null
         }
     }
 
@@ -604,10 +711,57 @@ class StashPlaybackService : MediaLibraryService() {
         onTrackTransitionForLoudness(newMaster.currentMediaItem)
         updateCustomLayout()
         prefetchOrchestrator.resetSession()
+        // Re-read idleness from the NEW master directly: the fade's
+        // pauseAtEndOfMediaItems flipped the OLD master's playWhenReady while
+        // the listener was still attached to it, and no event fires on the
+        // new master until its next state change — without this the shutdown
+        // countdown would arm in the middle of audible playback.
+        playerIdle.value = isPlayerIdle(newMaster.playWhenReady, newMaster.playbackState)
         if (newMaster.isPlaying) {
             startPrefetchPoll(newMaster)
             startCrossfadePoll(newMaster)
         }
+    }
+
+    /**
+     * Publishes the master player's idleness into [playerIdle]. Skipped while
+     * a crossfade transition is running — the engine deliberately pauses the
+     * outgoing player mid-fade, and reading that as "user stopped listening"
+     * would arm the shutdown countdown during audible playback.
+     * [onCrossfadeSwap] re-reads from the new master once the swap lands.
+     */
+    private fun refreshPlayerIdle() {
+        if (crossfadeEngine?.isTransitioning() == true) return
+        val master = crossfadeEngine?.masterPlayer ?: return
+        playerIdle.value = isPlayerIdle(master.playWhenReady, master.playbackState)
+    }
+
+    /**
+     * Stops the service after the idle timeout. The repository is told first
+     * so it releases its MediaController — that binding would otherwise keep
+     * a stopped service alive indefinitely. Clients that are still genuinely
+     * bound (Android Auto in a moving car) keep the service alive through
+     * `stopSelf()` exactly as bindings are meant to; the ticker re-fires and
+     * this retries after they unbind.
+     *
+     * Resume paths from the stopped state are all pre-existing and
+     * device-proven: media button / Bluetooth ride `onPlaybackResumption`,
+     * and the in-app play button falls back to `resumeLastQueue()` when it
+     * finds an empty timeline.
+     */
+    private fun performIdleStop() {
+        val master = crossfadeEngine?.masterPlayer
+        if (master != null && !isPlayerIdle(master.playWhenReady, master.playbackState)) {
+            // Belt and braces: the ticker's view lagged reality somehow.
+            return
+        }
+        android.util.Log.i(
+            "StashPlayback",
+            "idle-stop: no playback for ${IDLE_STOP_TIMEOUT_MS}ms — stopping service",
+        )
+        playbackSessionBus.onServiceStopping()
+        ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+        stopSelf()
     }
 
     /**
@@ -863,6 +1017,10 @@ class StashPlaybackService : MediaLibraryService() {
     }
 
     override fun onDestroy() {
+        // Idempotent with performIdleStop's signal; covers every OTHER death
+        // path (swipe-away, system kill) so the repo never holds a controller
+        // for a session that no longer exists.
+        playbackSessionBus.onServiceStopping()
         likeObserverJob?.cancel()
         prefetchPollJob?.cancel()
         crossfadePollJob?.cancel()
@@ -1554,3 +1712,56 @@ class StashPlaybackService : MediaLibraryService() {
         }
     }
 }
+
+/**
+ * Whether the player is "idle" for the purposes of the service's own
+ * shutdown countdown.
+ *
+ * `playWhenReady` (the user's intent) is the primary signal, NOT `isPlaying`:
+ * a rebuffer flips `isPlaying` false while the user still expects sound, and
+ * arming a shutdown countdown during a stall would be wrong. The two terminal
+ * states are idle regardless of intent — a finished queue (ENDED) and an
+ * errored-out player (IDLE) both leave `playWhenReady` true forever, and were
+ * exactly the "service alive 1h15m after last play" measurement.
+ */
+internal fun isPlayerIdle(playWhenReady: Boolean, playbackState: Int): Boolean =
+    !playWhenReady ||
+        playbackState == Player.STATE_ENDED ||
+        playbackState == Player.STATE_IDLE
+
+/**
+ * Service-owned idle-shutdown countdown: emits after [timeoutMs] of
+ * uninterrupted idleness, then keeps emitting every [timeoutMs] while the
+ * idleness persists, and goes silent the moment playback resumes.
+ *
+ * The repeat matters: a stop attempt can be a no-op (a bound Android Auto
+ * client keeps the service alive through `stopSelf()`), and a one-shot
+ * emission would never retry after the client unbinds.
+ *
+ * Why the SERVICE owns this: the previous design released the
+ * MediaController from the repository after an idle timeout and was reverted
+ * on device evidence — with no controller the repository goes deaf, so
+ * media-button/Bluetooth playback ran with stale UI state and silently lost
+ * listening history. The service stopping itself needs no controller at all.
+ *
+ * Top-level + `internal` so tests drive it on virtual time without booting
+ * the service (same idea as `positionTicker` in PlayerRepositoryImpl).
+ */
+@kotlinx.coroutines.ExperimentalCoroutinesApi
+internal fun idleStopTicker(
+    idle: kotlinx.coroutines.flow.Flow<Boolean>,
+    timeoutMs: Long,
+): kotlinx.coroutines.flow.Flow<Unit> = idle
+    .distinctUntilChanged()
+    .flatMapLatest { isIdle ->
+        if (isIdle) {
+            kotlinx.coroutines.flow.flow {
+                while (true) {
+                    delay(timeoutMs)
+                    emit(Unit)
+                }
+            }
+        } else {
+            kotlinx.coroutines.flow.emptyFlow()
+        }
+    }

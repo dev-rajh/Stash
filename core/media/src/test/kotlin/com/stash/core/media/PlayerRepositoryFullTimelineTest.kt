@@ -70,7 +70,11 @@ class PlayerRepositoryFullTimelineTest {
             playbackResumer = PlaybackResumer(playbackStateStore, trackDao),
             radioGenerator = mockk(relaxed = true),
             trackIdentityEvents = trackIdentityEvents,
+            playbackSessionBus = PlaybackSessionBus(),
         )
+        // The seam mock must read as CONNECTED or ensureController treats it
+        // as a zombie from a stopped service and rebuilds a real one.
+        every { controller.isConnected } returns true
         repo.controllerDeferred = controller
     }
 

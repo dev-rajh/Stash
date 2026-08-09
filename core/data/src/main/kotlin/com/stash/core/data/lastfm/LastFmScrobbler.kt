@@ -37,6 +37,7 @@ class LastFmScrobbler @Inject constructor(
     private val listeningEventDao: ListeningEventDao,
     private val trackDao: TrackDao,
     private val credentials: LastFmCredentials,
+    private val rateLimitGate: LastFmRateLimitGate,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -109,6 +110,14 @@ class LastFmScrobbler @Inject constructor(
      * submission works fine for the low volumes we expect here.
      */
     private suspend fun drainQueue(session: LastFmSession) {
+        // Offline, every submission in this pass is doomed, and a pass runs
+        // on EVERY recorded listen. Backing off after consecutive failures
+        // turns a session's worth of guaranteed-to-fail requests — each one
+        // paying DNS plus a connect timeout and holding the radio awake —
+        // into one probe per cooldown. Rows are never dropped, only deferred.
+        val now = System.currentTimeMillis()
+        if (rateLimitGate.isOpen(SCROBBLE_GATE_KEY, now)) return
+
         val pending = runCatching { listeningEventDao.pendingScrobbles(limit = 100) }
             .getOrElse {
                 Log.w(TAG, "Failed to load pending scrobbles", it)
@@ -122,11 +131,24 @@ class LastFmScrobbler @Inject constructor(
                 runCatching { listeningEventDao.markScrobbled(event.id) }
                 continue
             }
-            submit(session, event, track)
+            if (!submit(session, event, track)) {
+                // Stop at the first failure rather than marching the rest of
+                // the backlog into the same wall: nothing about row 2 can
+                // succeed for a reason row 1 did not already disprove. The
+                // remaining rows stay pending for the next trigger.
+                rateLimitGate.recordRateLimited(SCROBBLE_GATE_KEY, now)
+                return
+            }
         }
+        rateLimitGate.recordSuccess(SCROBBLE_GATE_KEY)
     }
 
-    private suspend fun submit(session: LastFmSession, event: ListeningEventEntity, track: TrackEntity) {
+    /** True when the event was accepted (or is permanently unscrobblable). */
+    private suspend fun submit(
+        session: LastFmSession,
+        event: ListeningEventEntity,
+        track: TrackEntity,
+    ): Boolean {
         val result = apiClient.scrobble(
             sessionKey = session.sessionKey,
             artist = scrobbleArtist(track.artist),
@@ -136,10 +158,11 @@ class LastFmScrobbler @Inject constructor(
         )
         if (result.isSuccess) {
             runCatching { listeningEventDao.markScrobbled(event.id) }
-        } else {
-            Log.w(TAG, "Scrobble failed for event ${event.id}", result.exceptionOrNull())
-            // Leave unscrobbled; next trigger retries.
+            return true
         }
+        Log.w(TAG, "Scrobble failed for event ${event.id}", result.exceptionOrNull())
+        // Leave unscrobbled; next trigger retries.
+        return false
     }
 
     /**
@@ -150,6 +173,13 @@ class LastFmScrobbler @Inject constructor(
 
     companion object {
         private const val TAG = "LastFmScrobbler"
+
+        /**
+         * Breaker key for scrobble submission. Distinct from the read-path
+         * API keys sharing [LastFmRateLimitGate], so a throttled read key
+         * never blocks writes and a dead network never blocks reads.
+         */
+        const val SCROBBLE_GATE_KEY = "scrobble-submit"
     }
 }
 

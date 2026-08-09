@@ -32,6 +32,14 @@ data class HomeUiState(
     val losslessPrompt: LosslessPromptState? = null,
 
     /**
+     * True when Home should offer the "connect ARCOD" rescue: lossless is
+     * ON but the qbdlx pool has missed enough consecutive resolves to look
+     * dead, no ARCOD account is connected, and the user hasn't dismissed
+     * the offer. Tap routes straight into the ARCOD connect flow.
+     */
+    val showArcodRescue: Boolean = false,
+
+    /**
      * v0.9.13: live tip-jar state. Drives the Home pill (compact
      * `$X/$Y` indicator) and the Tip Jar bottom sheet. Sourced from
      * [com.stash.core.data.tipjar.TipJarRepository] which fetches

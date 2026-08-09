@@ -64,6 +64,9 @@ fun StashNavHost(
                         launchSingleTop = true
                     }
                 },
+                // ARCOD rescue banner: skip the Settings detour and land
+                // directly in the connect flow the banner is offering.
+                onNavigateToArcodConnect = { navController.navigate(ArcodConnectRoute) },
                 onNavigateToPlaylist = { playlistId ->
                     navController.navigate(PlaylistDetailRoute(playlistId))
                 },

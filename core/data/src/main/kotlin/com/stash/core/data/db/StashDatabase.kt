@@ -92,7 +92,7 @@ import com.stash.core.data.db.entity.TrackTagEntity
         SyncUndoPlaylistEntity::class,
         SyncUndoMembershipEntity::class,
     ],
-    version = 40,
+    version = 41,
     exportSchema = true,
 )
 @TypeConverters(Converters::class)
@@ -997,6 +997,40 @@ abstract class StashDatabase : RoomDatabase() {
                       AND type = 'DAILY_MIX'
                       AND is_active = 1
                       AND source_id LIKE '37i9dQZF1D%'
+                    """.trimIndent(),
+                )
+            }
+        }
+
+        /**
+         * v40 → v41: un-stamp every loudness measurement that stored the
+         * ebur128 gating floor (-70.0 LUFS).
+         *
+         * LoudnessMeasurer's parser used to first-match `I: ... LUFS` across
+         * the WHOLE ffmpeg stderr, and ebur128 prints a progress line per
+         * 100ms of audio above the Summary whose first frames always read
+         * `I: -70.0 LUFS` — so every track ever measured on device stored
+         * exactly -70.0 (true peaks were correct: `Peak:` only occurs in the
+         * Summary). 857 of 857 measured rows on the reference device.
+         *
+         * The parser is fixed alongside this migration; this clears the
+         * poisoned rows back to "never measured" (`loudness_measured_at`
+         * NULL) so `LoudnessBackfillWorker`'s `tracksNeedingLoudness` query
+         * picks them up on the charger. Rows with NULL lufs but a non-NULL
+         * stamp are deliberate failure sentinels for broken files — left
+         * alone. No real master integrates at or below -69.9 LUFS, so the
+         * threshold cannot claw back a legitimate measurement.
+         */
+        val MIGRATION_40_41 = object : Migration(40, 41) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    UPDATE tracks
+                    SET loudness_lufs = NULL,
+                        true_peak_dbfs = NULL,
+                        loudness_measured_at = NULL
+                    WHERE loudness_lufs IS NOT NULL
+                      AND loudness_lufs <= -69.9
                     """.trimIndent(),
                 )
             }

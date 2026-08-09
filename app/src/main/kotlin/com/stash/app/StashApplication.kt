@@ -38,7 +38,6 @@ import com.stash.core.data.sync.workers.TagEnrichmentWorker
 import com.stash.core.data.sync.workers.TrackInfoEnrichmentWorker
 import com.stash.core.data.sync.workers.UpdateCheckWorker
 import com.stash.core.data.sync.workers.constraintsForManualTrigger
-import com.stash.core.media.preview.LosslessUrlPrefetcher
 import com.stash.core.media.streaming.KennyyHealthProbe
 import com.stash.core.media.streaming.SquidCookieAutoRefresher
 import com.stash.data.download.lossless.LosslessRetryScheduler
@@ -122,9 +121,6 @@ class StashApplication : Application(), Configuration.Provider {
     lateinit var downloadNetworkPreference: DownloadNetworkPreference
 
     @Inject
-    lateinit var losslessPrefetcher: LosslessUrlPrefetcher
-
-    @Inject
     lateinit var losslessSourcePreferences: com.stash.data.download.lossless.LosslessSourcePreferences
 
     @Inject
@@ -132,6 +128,9 @@ class StashApplication : Application(), Configuration.Provider {
 
     @Inject
     lateinit var streamingQualityPreferences: com.stash.data.download.prefs.StreamingQualityPreferences
+
+    @Inject
+    lateinit var connectivityMonitor: com.stash.core.media.streaming.ConnectivityMonitor
 
     /**
      * v0.9.17: eager-bound observer that enqueues [LosslessRetryWorker]
@@ -283,17 +282,10 @@ class StashApplication : Application(), Configuration.Provider {
                 }
             }.onFailure { Log.w("StashStartup", "lyrics miss-stamp reset failed", it) }
         }
-        // Prune stale lossless prefetch entries every 60s. Bounded
-        // memory growth across long browse sessions.
-        applicationScope.launch {
-            while (true) {
-                kotlinx.coroutines.delay(60_000)
-                // One bad prune tick must not silently end pruning for the
-                // whole session (unbounded memory growth thereafter).
-                runCatching { losslessPrefetcher.cancelStale() }
-                    .onFailure { Log.w("StashStartup", "prefetch prune tick failed", it) }
-            }
-        }
+        // (The lossless prefetch cache now prunes itself on insert — see
+        // LosslessUrlPrefetcher.warmUp. It used to be swept by a 60s loop
+        // launched here, which woke for the entire life of the process to
+        // sweep a map that is empty unless the user is browsing.)
         applicationScope.launch {
             // Best-effort prewarm: initialize, freshen yt-dlp to the latest
             // nightly, and warm the player-JS + QuickJS + EJS caches so the
@@ -302,11 +294,28 @@ class StashApplication : Application(), Configuration.Provider {
             // once-per-session gate with the download path (DownloadExecutor),
             // so whichever runs first does the work and the other returns
             // immediately — downloads are still hard-gated on a fresh binary.
-            ytDlpManager.ensureFreshened()
+            //
+            // Gated, because this is speculative work with a real price: a
+            // nightly binary download plus a throwaway YouTube extraction
+            // through QuickJS, on EVERY cold start, for a user who may never
+            // preview or stream anything. Offline it cannot even succeed.
+            //
+            // Skipping it in offline mode does not slow downloads down where
+            // anyone can feel it: the download path calls ensureFreshened()
+            // itself, inside a worker, where the one-off cost is invisible.
+            // The latency this prewarm exists to hide is the first PREVIEW,
+            // and previews only happen with streaming on.
+            if (connectivityMonitor.isConnected() && streamingPreference.current()) {
+                ytDlpManager.ensureFreshened()
+            }
         }
         // Warm up music.youtube.com TLS + DNS in the first 2s of launch so
         // the first search request doesn't pay the full handshake cost.
+        // Search still works in offline mode, so this is gated on having a
+        // network at all rather than on the streaming preference — offline
+        // it is a guaranteed-to-fail request that wakes the radio.
         applicationScope.launch {
+            if (!connectivityMonitor.isConnected()) return@launch
             runCatching {
                 okHttpClient.newCall(
                     Request.Builder().url("https://music.youtube.com/").head().build(),

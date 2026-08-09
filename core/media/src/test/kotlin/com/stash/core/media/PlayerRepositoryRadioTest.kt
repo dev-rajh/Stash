@@ -63,7 +63,11 @@ class PlayerRepositoryRadioTest {
             playbackResumer = PlaybackResumer(playbackStateStore, trackDao),
             radioGenerator = radioGenerator,
             trackIdentityEvents = trackIdentityEvents,
+            playbackSessionBus = PlaybackSessionBus(),
         )
+        // The seam mock must read as CONNECTED or ensureController treats it
+        // as a zombie from a stopped service and rebuilds a real one.
+        every { controller.isConnected } returns true
         repo.controllerDeferred = controller
     }
 
@@ -104,6 +108,7 @@ class PlayerRepositoryRadioTest {
             playbackResumer = PlaybackResumer(playbackStateStore, trackDao),
             radioGenerator = radioGenerator,
             trackIdentityEvents = trackIdentityEvents,
+            playbackSessionBus = PlaybackSessionBus(),
         )
 
         val started = coldRepo.startRadio(RadioSeed.Song("t", "a"))

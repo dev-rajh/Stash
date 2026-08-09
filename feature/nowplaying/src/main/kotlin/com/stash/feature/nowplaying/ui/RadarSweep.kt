@@ -37,6 +37,14 @@ fun RadarSweep(
     color: Color,
     modifier: Modifier = Modifier,
 ) {
+    // Bail BEFORE creating any animation. The caller composes this whenever
+    // a track is showing, so for all but the second or two of actual tuning
+    // this composable exists with nothing to draw — and an infinite
+    // transition declared above the guard keeps asking the frame clock for
+    // callbacks regardless, animating an arc that is never painted for as
+    // long as Now Playing is open.
+    if (!tuning && !lock) return
+
     val transition = rememberInfiniteTransition(label = "radarSweep")
     val angle by transition.animateFloat(
         initialValue = 0f,
@@ -46,12 +54,14 @@ fun RadarSweep(
     )
     // Lock: arc sweeps open to a full circle quickly, then the caller
     // removes the composable (fade handled by state, not alpha here).
+    // Tuning always precedes lock in practice, so this state exists before
+    // lock flips and still animates 40° -> 360°; a lock with no preceding
+    // tuning would simply appear already closed.
     val sweepDegrees by animateFloatAsState(
         targetValue = if (lock) 360f else 40f,
         animationSpec = tween(durationMillis = 220),
         label = "radarSweepDegrees",
     )
-    if (!tuning && !lock) return
     Canvas(modifier = modifier) {
         val stroke = Stroke(width = 1.6.dp.toPx(), cap = StrokeCap.Round)
         val inset = stroke.width

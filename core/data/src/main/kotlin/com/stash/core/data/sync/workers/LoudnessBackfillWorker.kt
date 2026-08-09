@@ -139,8 +139,17 @@ open class LoudnessBackfillWorker @AssistedInject constructor(
         /** Output-data key signalling an empty queue (nothing left to measure). */
         const val KEY_DONE = "done"
 
-        /** Max tracks measured per worker run — see class kdoc. */
-        private const val BATCH_SIZE = 20
+        /**
+         * Max tracks measured per worker run — see class kdoc.
+         *
+         * Raised from 20 once downloads stopped measuring on battery: this
+         * worker is now the primary path, not a mop-up for the odd missed
+         * row, so a 500-track sync has to be able to drain. The real limiter
+         * is [MAX_RUN_MS], and every run is already charging + device-idle,
+         * so a bigger batch costs the user nothing — where 20/run meant a
+         * heavy sync took days of charge cycles to level-match.
+         */
+        private const val BATCH_SIZE = 250
 
         /**
          * Soft per-run budget. WorkManager itself enforces a 10-minute hard

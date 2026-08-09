@@ -5,7 +5,9 @@ import android.os.Process
 import android.util.Log
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.BufferedReader
+import java.io.BufferedWriter
 import java.io.File
+import java.io.FileWriter
 import java.io.InputStreamReader
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -30,6 +32,10 @@ open class LogcatCapture @Inject constructor(
 
     @Volatile private var started = false
 
+    /** Open handle + its running size, both guarded by the [append] lock. */
+    private var writer: BufferedWriter? = null
+    private var bytesWritten = 0L
+
     /** Start the background tail. Idempotent. Call once at app init. */
     @Synchronized
     fun start() {
@@ -52,17 +58,49 @@ open class LogcatCapture @Inject constructor(
         }.apply { isDaemon = true; name = "stash-logcat-capture"; start() }
     }
 
-    /** Append one line; rotate active->rotated when the active file passes [maxBytes]. */
+    /**
+     * Append one line; rotate active->rotated when the active file passes
+     * [maxBytes].
+     *
+     * Holds ONE writer open across lines. This used to be an `appendText`
+     * per line, which is an open + write + close every time, on top of an
+     * `mkdirs` and two `stat`s to check the rotation cap — around six
+     * syscalls and a fresh file handle per log line, under the same lock the
+     * reader thread needs. That is cheap when the app is quiet and awful
+     * exactly when it is not: an error loop or GC storm is when the app logs
+     * hardest, and it is the run this capture exists to record.
+     *
+     * Still flushed every line — dropping the tail of the log before a crash
+     * would defeat the point — but a flush is one write, not a reopen.
+     */
     @Synchronized
     internal fun append(line: String) {
         runCatching {
-            dir.mkdirs()
-            if (active.exists() && active.length() >= maxBytes) {
-                rotated.delete()
-                active.renameTo(rotated)
-            }
-            active.appendText(line + "\n")
+            if (bytesWritten >= maxBytes) rotate()
+            val out = writer ?: openWriter().also { writer = it }
+            out.write(line)
+            out.write("\n")
+            out.flush()
+            // Counted rather than stat'ed. UTF-8 multi-byte lines make this
+            // an under-estimate, so the cap is approximate by design — it is
+            // a diagnostics ceiling, not a quota.
+            bytesWritten += line.length + 1
         }
+    }
+
+    /** Close, roll active->rotated, and reopen empty. */
+    private fun rotate() {
+        runCatching { writer?.close() }
+        writer = null
+        rotated.delete()
+        active.renameTo(rotated)
+        bytesWritten = 0
+    }
+
+    private fun openWriter(): BufferedWriter {
+        dir.mkdirs()
+        bytesWritten = if (active.exists()) active.length() else 0L
+        return BufferedWriter(FileWriter(active, /* append = */ true))
     }
 
     /** Return the last [maxLines] lines across the rotated + active files. */
