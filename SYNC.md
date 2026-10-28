@@ -47,10 +47,12 @@ upstream's file as the base, then re-apply only these:
 3. **Song page (Now Playing)** — file size in the quality line
    (`trackQualityText(track, effectiveSize)` + `humanReadableSize`; DB value
    with disk/SAF fallback via `NowPlayingViewModel.observeCurrentFileSize`);
-   one-line file path (`FilePathLine` + `displayPath`); "Appears in" chip row
-   (`AppearsInRow`, backed by `observeContainingPlaylists` →
-   `PlaylistDao.observePlaylistsContainingTrack` →
-   `MusicRepository.getPlaylistsContainingTrack`), navigated via
+   file path + "Appears in" chips (`TrackInfoFooter`, backed by
+   `observeContainingPlaylists` → `PlaylistDao.observePlaylistsContainingTrack`
+   → `MusicRepository.getPlaylistsContainingTrack`), rendered at the very END
+   of the Now Playing stack, under the Up next line — never between the
+   quality line and the progress bar (owner: the main stack keeps the
+   upstream rhythm; the info is a quiet footer). Navigation via
    `onNavigateToPlaylist` threaded through `NowPlayingScreen` →
    `PlayerSheetOverlay` → `StashScaffold` → `PlaylistDetailRoute`.
 4. **Seek-bar remaining toggle** — tap the elapsed label to flip to
@@ -76,6 +78,12 @@ Upstream built its own versions; upstream wins, the fork's variant is dropped:
 - Test-file changes in the fork that reference removed fork APIs (e.g.
   `sleepTimerManager = mockk(...)` in NowPlaying tests) — restore the upstream
   version of the test file.
+- Library "Recently downloaded" rail (`RecentlyDownloadedRail` +
+  its `TracksTab` header hook): removed at owner request (2026-10-29).
+  If upstream's merge re-adds it, remove it again — this is a standing fork
+  deviation.
+- `gradle.properties` must never carry `org.gradle.java.home` (CI runners
+  have no Homebrew); the local JDK path lives in `~/.gradle/gradle.properties`.
 
 ## Resolution shortcuts by file
 

@@ -1260,24 +1260,6 @@ fun NowPlayingScreen(
                                                 onClick = { showSignalPath = true },
                                             )
                                         }
-                                        // Where the file lives, one line — only for downloaded tracks.
-                                        val displayedPath = track.filePath
-                                            ?.takeIf { it.isNotBlank() }
-                                            ?.let(::displayPath)
-                                        if (displayedPath != null) {
-                                            Spacer(modifier = Modifier.height(StackRhythm.ArtistToQuality))
-                                            FilePathLine(path = displayedPath)
-                                        }
-                                        // "Appears in": playlists the track is a member of. A compact,
-                                        // horizontally scrolling chip row so the fixed-height stack
-                                        // stays within its rhythm even with several memberships.
-                                        if (uiState.containingPlaylists.isNotEmpty()) {
-                                            Spacer(modifier = Modifier.height(StackRhythm.ArtistToQuality))
-                                            AppearsInRow(
-                                                playlists = uiState.containingPlaylists,
-                                                onPlaylistClick = onNavigateToPlaylist,
-                                            )
-                                        }
                                     }
 
                                     if (room != null) com.stash.feature.nowplaying.listen.PickLine(room)
@@ -1299,6 +1281,23 @@ fun NowPlayingScreen(
                                         inRoom = room != null,
                                         onOpen = { if (room != null) showSession = true else showQueue = true },
                                     )
+
+                                    // Fork: the reference info — where the file lives and the playlists
+                                    // the track is a member of — sits at the very END of the stack, under
+                                    // Up next. The main stack above stays exactly the upstream rhythm
+                                    // (art, title, quality, progress, controls); this quiet footer only
+                                    // appears for downloaded tracks and hides when there's nothing to show.
+                                    val displayedPath = track?.filePath
+                                        ?.takeIf { it.isNotBlank() }
+                                        ?.let(::displayPath)
+                                    if (displayedPath != null || uiState.containingPlaylists.isNotEmpty()) {
+                                        Spacer(modifier = Modifier.height(StackRhythm.ControlsToUpNext))
+                                        TrackInfoFooter(
+                                            path = displayedPath,
+                                            playlists = uiState.containingPlaylists,
+                                            onPlaylistClick = onNavigateToPlaylist,
+                                        )
+                                    }
                                     },
                                 )
 
@@ -2423,66 +2422,58 @@ private fun Modifier.marqueeWhileShown(): Modifier =
 // ---------------------------------------------------------------------------
 
 /**
- * One-line, ellipsised display of where the track's file lives. A quiet
- * caption under the quality line: it's reference information, not a control.
+ * The stack's quiet footer: where the file lives (one ellipsised line) and
+ * the playlists the track is a member of ("Appears in" chips). Sits under Up
+ * next, at the very end of the page — the main stack above keeps the upstream
+ * rhythm untouched. Nothing renders when there's nothing to show (streaming
+ * tracks have no path; unassigned tracks have no memberships).
  */
 @Composable
-private fun FilePathLine(path: String) {
-    Text(
-        text = path,
-        style = MaterialTheme.typography.labelSmall,
-        color = npInk().copy(alpha = 0.55f),
-        maxLines = 1,
-        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 24.dp),
-    )
-}
-
-/**
- * Compact, horizontally scrolling "Appears in" chips for the playlists the
- * playing track belongs to. A row (rather than the fork's vertical list)
- * because Now Playing's stack is fixed-height: the art yields a little, the
- * layout never overflows.
- */
-@Composable
-private fun AppearsInRow(
+private fun TrackInfoFooter(
+    path: String?,
     playlists: List<com.stash.core.model.Playlist>,
     onPlaylistClick: (Long) -> Unit,
 ) {
     Column(modifier = Modifier.fillMaxWidth()) {
-        Text(
-            text = "Appears in",
-            style = MaterialTheme.typography.labelSmall,
-            color = npInk().copy(alpha = 0.6f),
-            modifier = Modifier.padding(horizontal = 24.dp),
-        )
-        Spacer(modifier = Modifier.height(6.dp))
-        androidx.compose.foundation.lazy.LazyRow(
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 24.dp),
-            horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp),
-        ) {
-            items(playlists.size, key = { playlists[it].id }) { i ->
-                val playlist = playlists[i]
-                androidx.compose.material3.SuggestionChip(
-                    onClick = { onPlaylistClick(playlist.id) },
-                    label = {
-                        Text(
-                            text = playlist.name,
-                            style = MaterialTheme.typography.labelMedium,
-                            maxLines = 1,
-                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                        )
-                    },
-                    icon = {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.QueueMusic,
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp),
-                        )
-                    },
-                )
+        if (path != null) {
+            Text(
+                text = path,
+                style = MaterialTheme.typography.labelSmall,
+                color = npInk().copy(alpha = 0.55f),
+                maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 24.dp),
+            )
+        }
+        if (playlists.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(6.dp))
+            androidx.compose.foundation.lazy.LazyRow(
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 24.dp),
+                horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp),
+            ) {
+                items(playlists.size, key = { playlists[it].id }) { i ->
+                    val playlist = playlists[i]
+                    androidx.compose.material3.SuggestionChip(
+                        onClick = { onPlaylistClick(playlist.id) },
+                        label = {
+                            Text(
+                                text = playlist.name,
+                                style = MaterialTheme.typography.labelMedium,
+                                maxLines = 1,
+                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                            )
+                        },
+                        icon = {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.QueueMusic,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                            )
+                        },
+                    )
+                }
             }
         }
     }

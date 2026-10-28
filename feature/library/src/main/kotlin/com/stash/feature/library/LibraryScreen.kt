@@ -650,25 +650,6 @@ private fun LibraryContent(
         var searchOpen by remember { mutableStateOf(searchQuery.isNotEmpty()) }
         var sortFilterOpen by remember { mutableStateOf(false) }
 
-        // Recent-downloads rail — the scrolling leading content of the Songs
-        // landing (scrolls away while the compact header + category chips stay
-        // pinned). The old purple shuffle hero is gone — it duplicated the
-        // header's shuffle action.
-        // Songs landing only — noise above the other grids. Handed ONLY to
-        // TracksTab: with the pager, neighbor pages compose mid-swipe, so
-        // gating on activeTab here would flash the rail onto other pages.
-        val libraryHeader: @Composable () -> Unit = {
-            Column {
-                if (state.recentlyAdded.isNotEmpty()) {
-                    RecentlyDownloadedRail(
-                        tracks = state.recentlyAdded.take(12),
-                        onTrackClick = onTrackClick,
-                    )
-                }
-                Spacer(Modifier.height(4.dp))
-            }
-        }
-
         // "On this device" opens from the header's disk icon, not a chip: it's a different place
         // (files in folders you picked), not another view of the library. The disk icon (or Back)
         // returns to the library page you came from.
@@ -949,7 +930,7 @@ private fun LibraryContent(
                         onCreatePlaylistWithTrack = onCreatePlaylistWithTrack,
                         onDownloadTrack = onDownloadTrack,
                         onRemoveDownloadTrack = onRemoveDownloadTrack,
-                        header = libraryHeader,
+                        header = {},
                         noMatch = noMatchMessage("songs", state.searchQuery, state.sourceFilter),
                         onClearFilters = clearSearchAndFilter,
                         alphabetical = alphabetical,
@@ -1028,36 +1009,6 @@ private fun ActiveFilterChip(label: String, onClear: () -> Unit) {
         },
         modifier = Modifier.padding(horizontal = 20.dp),
     )
-}
-
-@Composable
-private fun RecentlyDownloadedRail(
-    tracks: List<Track>,
-    onTrackClick: (Track) -> Unit,
-) {
-    Column {
-        Text(
-            text = "RECENTLY DOWNLOADED",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.secondary,
-            modifier = Modifier.padding(start = 20.dp, top = 12.dp, bottom = 8.dp),
-        )
-        LazyRow(
-            contentPadding = PaddingValues(horizontal = 20.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            items(tracks, key = { it.id }) { track ->
-                com.stash.core.ui.components.AlbumSquareCard(
-                    title = track.title,
-                    artist = track.artist,
-                    thumbnailUrl = track.albumArtUrl,
-                    year = null,
-                    isLossless = track.fileFormat.equals("flac", ignoreCase = true),
-                    onClick = { onTrackClick(track) },
-                )
-            }
-        }
-    }
 }
 
 // ── Liked subcategory (browse + sift likes by origin) ───────────────────────
