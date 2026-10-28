@@ -58,8 +58,27 @@ enum class LibraryTab { PLAYLISTS, TRACKS, LIKED, ARTISTS, ALBUMS, DEVICE }
 /** Source sift for the Liked subcategory: all likes, or one origin. */
 enum class LikedFilter { ALL, STASH, SPOTIFY, YOUTUBE }
 
-/** Sort options applicable to every content tab. DURATION is offered for Songs (and Artists). */
-enum class SortOrder { RECENT, ALPHABETICAL, MOST_PLAYED, DURATION }
+/**
+ * Sort options applicable to every content tab. DURATION is offered for Songs
+ * (and Artists). Track-centric fields (artist, play recency) fall back to the
+ * nearest sensible ordering on the Playlists / Artists / Albums tabs, which
+ * don't carry those columns — see the `when` blocks in [LibraryViewModel].
+ *
+ * DURATION keeps its original name (rather than the fork's LONGEST) so a
+ * stored preference written by an older build still deserialises.
+ */
+enum class SortOrder {
+    RECENT,            // Recently added (newest first)
+    OLDEST,            // Oldest added first
+    ALPHABETICAL,      // Title / name A–Z
+    ALPHABETICAL_DESC, // Title / name Z–A
+    ARTIST,            // Artist A–Z
+    MOST_PLAYED,
+    LEAST_PLAYED,
+    DURATION,          // Longest duration first
+    SHORTEST,          // Shortest duration first
+    RECENTLY_PLAYED,   // Most recently played first
+}
 
 /**
  * Top-level filter applied to the Tracks tab. Originally just service

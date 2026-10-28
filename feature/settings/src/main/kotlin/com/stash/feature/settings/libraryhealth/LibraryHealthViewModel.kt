@@ -122,6 +122,94 @@ class LibraryHealthViewModel @Inject constructor(
     fun dismissRestoreResult() = _state.update { it.copy(restoreQueued = null) }
 
     /**
+     * Finds downloaded tracks whose recorded file is gone because the user
+     * replaced it out-of-band — e.g. swapped an `song.m4a` for a `song.flac`
+     * of the same base name in the same folder — and relinks the row to the
+     * replacement (new path, format, size, quality). Rows with no replacement
+     * found are cleared and re-queued so the normal download path restores
+     * them. Phase 1 (existence checks, one SAF round-trip per row) reports
+     * progress; phase 2 relinks.
+     */
+    fun runRelinkScan() {
+        if (_state.value.relink is RelinkStatus.Running) return
+        // Flip to Running synchronously, before the IO work, so the button
+        // gives instant feedback. The existence-check phase below is the slow
+        // part (each SAF file is a content-resolver round-trip), so without
+        // this the UI sat on "Scan" for seconds before anything happened.
+        _state.update { it.copy(relink = RelinkStatus.Running(processed = 0, total = 0)) }
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                val refs = runCatching { trackDao.getDownloadedFileRefs() }
+                    .onFailure { Log.w(TAG, "getDownloadedFileRefs failed", it) }
+                    .getOrDefault(emptyList())
+
+                // Phase 1: find downloaded rows whose recorded file is gone
+                // (the user replaced it with a different-format file). Progress
+                // is reported across this loop since it's where the time goes.
+                _state.update { it.copy(relink = RelinkStatus.Running(processed = 0, total = refs.size)) }
+                val missing = mutableListOf<Pair<Long, String>>()
+                refs.forEachIndexed { i, ref ->
+                    val path = ref.filePath
+                    if (path != null && !localFileOps.exists(path)) missing += ref.id to path
+                    if ((i + 1) % 25 == 0) {
+                        _state.update { it.copy(relink = RelinkStatus.Running(processed = i + 1, total = refs.size)) }
+                    }
+                }
+
+                // Phase 2: relink each missing file to a same-name replacement.
+                val relinkedNames = mutableListOf<String>()
+                var clearedCount = 0
+                for ((id, oldPath) in missing) {
+                    val newPath = localFileOps.findReplacementSibling(oldPath, AUDIO_EXTENSIONS)
+                    if (newPath == null) {
+                        runCatching {
+                            trackDao.clearDownloadState(id)
+                            musicRepository.queueDownload(id)
+                        }
+                            .onSuccess { clearedCount++ }
+                            .onFailure { e -> Log.w(TAG, "clearDownloadState failed for trackId=$id", e) }
+                        continue
+                    }
+                    val meta = metadataExtractor.extract(newPath)
+                    val format = meta?.format?.takeIf { it.isNotBlank() && it != "unknown" }
+                        ?: newPath.substringAfterLast('.', "").lowercase()
+                    runCatching {
+                        trackDao.relinkReplacedFile(
+                            trackId = id,
+                            filePath = newPath,
+                            fileFormat = format,
+                            sizeBytes = localFileOps.sizeBytes(newPath),
+                            qualityKbps = meta?.bitrateKbps ?: 0,
+                            sampleRateHz = meta?.sampleRateHz,
+                            bitsPerSample = meta?.bitsPerSample,
+                        )
+                        relinkedNames += fileNameOf(newPath)
+                    }.onFailure { e -> Log.w(TAG, "relinkReplacedFile failed for trackId=$id", e) }
+                }
+
+                Log.i(TAG, "relink scan complete: scanned=${refs.size} relinked=${relinkedNames.size}")
+                _state.update {
+                    it.copy(
+                        relink = RelinkStatus.Done(
+                            relinked = relinkedNames.size,
+                            cleared = clearedCount,
+                            scanned = missing.size,
+                            relinkedNames = relinkedNames,
+                        ),
+                    )
+                }
+            }
+            refresh()
+        }
+    }
+
+    /** Last path segment for a result list, decoded from SAF URIs when needed. */
+    private fun fileNameOf(path: String): String {
+        val decoded = runCatching { java.net.URLDecoder.decode(path, "UTF-8") }.getOrDefault(path)
+        return decoded.substringAfterLast('/').substringAfterLast(':')
+    }
+
+    /**
      * Walks every downloaded track that's still at default format/kbps,
      * reads the file's actual codec/bitrate, and writes them to the DB.
      * Idempotent — safe to re-run; rows already populated are skipped by
@@ -331,6 +419,16 @@ class LibraryHealthViewModel @Inject constructor(
         private const val TAG = "LibraryHealthVM"
 
         /**
+         * Extensions the relink scan considers a valid replacement, lossless
+         * first — [LocalFileOps.findReplacementSibling] picks the earliest
+         * ranking candidate, so a `.flac` sibling beats a `.wav` one.
+         */
+        private val AUDIO_EXTENSIONS = listOf(
+            "flac", "alac", "wav", "aiff", "ape", "tta", "wv",
+            "m4a", "aac", "mp3", "ogg", "opus",
+        )
+
+        /**
          * Where the database and file work runs. A test points it at its Main test dispatcher, so
          * the work finishes inside the test instead of resuming onto Main after the test has reset
          * it (which surfaced as an uncaught exception in whichever test class ran next).
@@ -355,6 +453,8 @@ data class LibraryHealthState(
      */
     val restorableDownloads: Int = 0,
     val restoreQueued: Int? = null,
+    /** Progress of the user-initiated "replaced files" relink scan. */
+    val relink: RelinkStatus = RelinkStatus.Idle,
 )
 
 /**
@@ -367,6 +467,24 @@ sealed interface BackfillStatus {
     data object Idle : BackfillStatus
     data class Running(val processed: Int, val total: Int) : BackfillStatus
     data class Done(val processed: Int, val total: Int) : BackfillStatus
+}
+
+/**
+ * Lifecycle of the user-initiated "replaced files" relink scan. [Done] carries
+ * what changed: [relinked] rows now point at the swapped-in file, [cleared]
+ * rows had no replacement and were re-queued for download, [scanned] is how
+ * many recorded files were found missing. [relinkedNames] lists the file names
+ * that changed, transiently, so the user can see the scan's effect.
+ */
+sealed interface RelinkStatus {
+    data object Idle : RelinkStatus
+    data class Running(val processed: Int, val total: Int) : RelinkStatus
+    data class Done(
+        val relinked: Int,
+        val cleared: Int,
+        val scanned: Int,
+        val relinkedNames: List<String> = emptyList(),
+    ) : RelinkStatus
 }
 
 /**

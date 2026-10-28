@@ -13,7 +13,7 @@ import com.stash.core.model.Track
  * Returns null only when the codec is blank — in that case the caller
  * should render no line at all.
  */
-internal fun trackQualityText(track: Track): String? {
+internal fun trackQualityText(track: Track, fileSizeBytes: Long = 0L): String? {
     // v0.9.13 fix: tracks downloaded before format-tracking was wired (pre-v0.9.11)
     // default to file_format = "opus" regardless of the actual codec — so a FLAC
     // file would render "OPUS · 4233 kbps", which is the source of "every track says
@@ -38,6 +38,10 @@ internal fun trackQualityText(track: Track): String? {
             add("${bitDepth}-bit/${"%.1f".format(sampleRateKHz)} kHz")
         }
         if (bitrate != null) add("$bitrate kbps")
+        // File size sits right after the bitrate so the two on-disk metrics
+        // read together. Only present for downloaded tracks (streams = 0).
+        val fileSize = fileSizeBytes.takeIf { it > 0 }?.let(::humanReadableSize)
+        if (fileSize != null) add(fileSize)
         // Flag the YouTube fallback so the user can tell when a track is
         // playing from yt-dlp/InnerTube extraction rather than Qobuz. The
         // codec ("AAC") alone doesn't convey this — Qobuz also serves AAC
@@ -53,4 +57,16 @@ internal fun trackQualityText(track: Track): String? {
             "youtube" -> add("via YT")
         }
     }.joinToString(" · ")
+}
+
+/**
+ * Formats a byte count as a compact human-readable size for the quality
+ * line, e.g. `28.4 MB` / `912 KB`. Uses binary (1024) units to match what
+ * file managers report for the same files on disk.
+ */
+private fun humanReadableSize(bytes: Long): String = when {
+    bytes >= 1L shl 30 -> "%.1f GB".format(bytes.toDouble() / (1L shl 30))
+    bytes >= 1L shl 20 -> "%.1f MB".format(bytes.toDouble() / (1L shl 20))
+    bytes >= 1L shl 10 -> "%.0f KB".format(bytes.toDouble() / (1L shl 10))
+    else -> "$bytes B"
 }

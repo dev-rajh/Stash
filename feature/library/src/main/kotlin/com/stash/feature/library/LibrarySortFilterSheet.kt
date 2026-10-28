@@ -57,9 +57,19 @@ fun LibrarySortFilterSheet(
 ) {
     val sorts = buildList {
         add(SortOrder.RECENT to "Recently added")
+        add(SortOrder.OLDEST to "Oldest added")
         add(SortOrder.ALPHABETICAL to "A – Z")
-        if (showMostPlayed) add(SortOrder.MOST_PLAYED to "Most played")
-        if (showDuration) add(SortOrder.DURATION to "Duration")
+        add(SortOrder.ALPHABETICAL_DESC to "Z – A")
+        if (showMostPlayed) {
+            add(SortOrder.MOST_PLAYED to "Most played")
+            add(SortOrder.LEAST_PLAYED to "Least played")
+            add(SortOrder.RECENTLY_PLAYED to "Recently played")
+        }
+        if (showDuration) {
+            add(SortOrder.DURATION to "Longest")
+            add(SortOrder.SHORTEST to "Shortest")
+        }
+        add(SortOrder.ARTIST to "Artist")
     }
     val filters = buildList {
         add("All" to SourceFilter.ALL)

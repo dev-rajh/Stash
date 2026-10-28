@@ -4,6 +4,8 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
@@ -108,6 +110,8 @@ fun GlowingProgressBar(
     // A released seek's target, held as the display value until the reported progress catches
     // up (or SEEK_HOLD_MS passes): see [seekArrived].
     var pendingSeek by remember { mutableStateOf<Float?>(null) }
+    // Left time label: false = elapsed (default), true = remaining (-m:ss).
+    var showRemaining by remember { mutableStateOf(false) }
 
     // The gesture detectors are keyed on Unit and read these live. Keyed on totalMs, they were
     // torn down whenever the duration changed mid-drag (a stream's estimate replaced by the
@@ -278,15 +282,27 @@ fun GlowingProgressBar(
                 .padding(horizontal = 4.dp),
             contentAlignment = Alignment.Center,
         ) {
+            // Left label toggles between elapsed and remaining (-m:ss) on tap.
+            // Right label is always the song's full length.
+            val interactionSource = remember { MutableInteractionSource() }
             Text(
-                text = formatTime(displayMs),
+                text = if (showRemaining) {
+                    "-${formatTime((totalMs - displayMs).coerceAtLeast(0L))}"
+                } else {
+                    formatTime(displayMs)
+                },
                 style = MaterialTheme.typography.labelSmall,
                 color = ink.copy(alpha = 0.7f),
-                modifier = Modifier.align(Alignment.CenterStart),
+                modifier = Modifier
+                    .align(Alignment.CenterStart)
+                    .clickable(
+                        interactionSource = interactionSource,
+                        indication = null,
+                    ) { showRemaining = !showRemaining },
             )
             center()
             Text(
-                text = "-${formatTime((totalMs - displayMs).coerceAtLeast(0L))}",
+                text = formatTime(totalMs),
                 style = MaterialTheme.typography.labelSmall,
                 color = ink.copy(alpha = 0.7f),
                 modifier = Modifier.align(Alignment.CenterEnd),

@@ -123,6 +123,13 @@ fun LibraryHealthScreen(
 
         Spacer(Modifier.height(20.dp))
 
+        RelinkSection(
+            status = state.relink,
+            onRunScan = viewModel::runRelinkScan,
+        )
+
+        Spacer(Modifier.height(20.dp))
+
         QualityInfoRefreshSection(onClick = viewModel::runQualityInfoBackfill)
 
         Spacer(Modifier.height(20.dp))
@@ -697,4 +704,94 @@ private fun humanizeFormat(format: String): String = when (format.lowercase()) {
     "vorbis" -> "Vorbis"
     "unknown" -> stringResource(R.string.settings_library_health_format_unknown)
     else -> format
+}
+
+
+/**
+ * "Replaced files": the user-initiated relink scan. Swapped a downloaded
+ * track for a better version yourself — replaced an M4A with a FLAC of the
+ * same name in the same folder? This finds those files and updates the
+ * library with the new path, format, and quality; tracks with no replacement
+ * are re-queued for download.
+ */
+@Composable
+private fun RelinkSection(
+    status: com.stash.feature.settings.libraryhealth.RelinkStatus,
+    onRunScan: () -> Unit,
+) {
+    SectionHeader(title = "Replaced files")
+    GlassCard {
+        Column(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
+            Text(
+                text = "Relink upgraded files",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = "Swapped a downloaded track for a better version yourself — e.g. " +
+                    "replaced an M4A with a FLAC of the same name in the same folder? " +
+                    "This finds those files and updates the library with the new path, " +
+                    "format, and quality.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(12.dp))
+            when (status) {
+                com.stash.feature.settings.libraryhealth.RelinkStatus.Idle -> {
+                    Button(onClick = onRunScan) {
+                        Text("Scan for replacements")
+                    }
+                }
+                is com.stash.feature.settings.libraryhealth.RelinkStatus.Running -> {
+                    Text(
+                        text = if (status.total == 0) "Scanning…"
+                        else "Scanning… ${status.processed} / ${status.total}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    if (status.total == 0) {
+                        // Indeterminate until the candidate count is known.
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    } else {
+                        LinearProgressIndicator(
+                            progress = { status.processed.toFloat() / status.total.coerceAtLeast(1).toFloat() },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                }
+                is com.stash.feature.settings.libraryhealth.RelinkStatus.Done -> {
+                    Text(
+                        text = if (status.scanned == 0) {
+                            "No missing files found — everything in your library is where " +
+                                "Stash expects it."
+                        } else {
+                            "Relinked ${status.relinked} and cleared ${status.cleared} of ${status.scanned} missing " +
+                                "track(s)."
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    // Temporary "what changed" list so the user can see which
+                    // files got updated. It's part of the transient Done state,
+                    // so it clears on the next scan or when the screen is left.
+                    if (status.relinkedNames.isNotEmpty()) {
+                        Spacer(Modifier.height(8.dp))
+                        status.relinkedNames.forEach { name ->
+                            Text(
+                                text = "\u2022 $name",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Button(onClick = onRunScan) {
+                        Text("Scan again")
+                    }
+                }
+            }
+        }
+    }
 }

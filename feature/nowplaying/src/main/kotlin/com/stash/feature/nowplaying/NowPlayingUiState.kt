@@ -1,6 +1,7 @@
 package com.stash.feature.nowplaying
 
 import com.stash.core.model.PlaybackSource
+import com.stash.core.model.Playlist
 import com.stash.core.model.RepeatMode
 import com.stash.core.model.Track
 import com.stash.core.ui.components.PlaylistInfo
@@ -13,6 +14,10 @@ import com.stash.core.ui.components.PlaylistInfo
  */
 data class NowPlayingUiState(
     val currentTrack: Track? = null,
+    /** Active playlists the current track is a member of ("Appears in"). Empty hides the section. */
+    val containingPlaylists: List<Playlist> = emptyList(),
+    /** On-disk size of the current track's file, resolved per track (0 = unknown / streaming). */
+    val currentFileSizeBytes: Long = 0,
     /**
      * [currentTrack] is a library row (Room answered for it), so its lyrics are stored and its
      * sync offset kept. False for a stream playing under a transient id until a listen persists

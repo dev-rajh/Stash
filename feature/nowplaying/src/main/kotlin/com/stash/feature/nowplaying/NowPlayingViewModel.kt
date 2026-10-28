@@ -66,6 +66,7 @@ import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.mapLatest
 import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.flow.firstOrNull
@@ -878,6 +879,8 @@ class NowPlayingViewModel @Inject constructor(
         prefetchLyricsWhileForeground()
         prefetchBackCoverWhileForeground()
         observeUserPlaylists()
+        observeContainingPlaylists()
+        observeCurrentFileSize()
     }
 
     // ------------------------------------------------------------------
@@ -1030,6 +1033,67 @@ class NowPlayingViewModel @Inject constructor(
 
     // observeLikeStateForCurrentTrack removed in v0.9.13 — subsumed by
     // observePlayerStateLive's Room-bound currentTrack flow above.
+
+    /**
+     * Observes the set of active playlists the currently-playing track
+     * belongs to, for the Now Playing "Appears in" list. Keyed on the track
+     * id (re-queries only when the song changes, not on every 250ms position
+     * tick); streaming-only tracks (synthetic id, no library row) resolve to
+     * an empty list and the section hides itself.
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private fun observeContainingPlaylists() {
+        uiState
+            .map { it.currentTrack?.id }
+            .distinctUntilChanged()
+            .flatMapLatest { id ->
+                if (id == null || id <= 0L) flowOf(emptyList())
+                else musicRepository.getPlaylistsContainingTrack(id)
+            }
+            .onEach { playlists ->
+                _uiState.update { it.copy(containingPlaylists = playlists) }
+            }
+            .launchIn(viewModelScope)
+    }
+
+    /**
+     * Resolves the current track's on-disk file size for the quality line.
+     * The Room `file_size_bytes` column is often 0 — legacy rows, and SAF
+     * `content://` libraries the backfill can't stat via java.io.File.
+     * Reading it here (off the main thread, keyed on the file path so it
+     * only runs when the song changes) makes the size show regardless of
+     * whether the column was ever populated.
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private fun observeCurrentFileSize() {
+        uiState
+            .map { it.currentTrack?.filePath }
+            .distinctUntilChanged()
+            .onEach { path ->
+                val size = withContext(Dispatchers.IO) { resolveFileSize(path) }
+                _uiState.update { it.copy(currentFileSizeBytes = size) }
+            }
+            .launchIn(viewModelScope)
+    }
+
+    /**
+     * Reads a file's size in bytes, handling both absolute paths and SAF
+     * `content://` document URIs. Returns 0 on any failure (missing file,
+     * revoked permission, stream-only track with no path).
+     */
+    private fun resolveFileSize(path: String?): Long {
+        if (path.isNullOrBlank()) return 0L
+        return runCatching {
+            if (path.startsWith("content://")) {
+                appContext.contentResolver
+                    .openFileDescriptor(android.net.Uri.parse(path), "r")
+                    ?.use { it.statSize }
+                    ?.takeIf { it > 0 } ?: 0L
+            } else {
+                java.io.File(path).length()
+            }
+        }.getOrDefault(0L)
+    }
 
     // ------------------------------------------------------------------
     // User Actions

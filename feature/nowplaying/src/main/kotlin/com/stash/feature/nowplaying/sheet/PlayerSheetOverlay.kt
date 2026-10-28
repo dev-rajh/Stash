@@ -81,6 +81,7 @@ fun PlayerSheetOverlay(
     state: PlayerSheetState,
     onNavigateToArtist: (id: String, name: String, avatarUrl: String?, focusAlbum: String?) -> Unit,
     onNavigateToAlbum: (albumId: String, name: String, artUrl: String?, artistName: String) -> Unit,
+    onNavigateToPlaylist: (Long) -> Unit = {},
     modifier: Modifier = Modifier,
     viewModel: NowPlayingViewModel = hiltViewModel(),
 ) {
@@ -126,6 +127,7 @@ fun PlayerSheetOverlay(
                     onDismiss = state::collapse,
                     onNavigateToArtist = onNavigateToArtist,
                     onNavigateToAlbum = onNavigateToAlbum,
+                    onNavigateToPlaylist = onNavigateToPlaylist,
                     viewModel = viewModel,
                     sheet = state,
                 )

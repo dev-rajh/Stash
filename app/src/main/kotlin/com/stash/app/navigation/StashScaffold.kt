@@ -462,6 +462,10 @@ fun StashScaffold(
                 ),
             )
         },
+        onNavigateToPlaylist = { playlistId ->
+            playerSheet.collapse()
+            navController.navigate(PlaylistDetailRoute(playlistId))
+        },
     )
 
     // Above the player too: a heads-up shows over Now Playing, above the system bar there, and

@@ -447,40 +447,53 @@ class LibraryViewModel @Inject constructor(
         // -- Apply sort order --
         val sortedTracks = when (controls.sortOrder) {
             SortOrder.RECENT -> filteredTracks.sortedByDescending { it.dateAdded }
+            SortOrder.OLDEST -> filteredTracks.sortedBy { it.dateAdded }
             SortOrder.ALPHABETICAL -> filteredTracks.sortedWith(compareBy(alphabeticalOrder) { it.title })
+            SortOrder.ALPHABETICAL_DESC -> filteredTracks.sortedWith(compareByDescending(alphabeticalOrder) { it.title })
+            SortOrder.ARTIST -> filteredTracks.sortedWith(compareBy(alphabeticalOrder) { it.artist })
             SortOrder.MOST_PLAYED -> filteredTracks.sortedByDescending { it.playCount }
+            SortOrder.LEAST_PLAYED -> filteredTracks.sortedBy { it.playCount }
             SortOrder.DURATION -> filteredTracks.sortedByDescending { it.durationMs }
+            SortOrder.SHORTEST -> filteredTracks.sortedBy { it.durationMs }
+            SortOrder.RECENTLY_PLAYED -> filteredTracks.sortedByDescending { it.lastPlayed ?: 0L }
         }
+        // Playlists don't carry play counts, durations, or per-track artists:
+        // the A–Z family falls back to name, the played/duration families to
+        // trackCount so every option still produces a visible ordering.
         val sortedPlaylists = when (controls.sortOrder) {
             // RECENT uses date_added (stable across syncs) not last_synced
             // — the latter reshuffles the list every sync run. See
             // PlaylistEntity.dateAdded + migration v12→v13 (issue #13).
-            SortOrder.RECENT -> filteredPlaylists.sortedByDescending { it.dateAdded }
-            SortOrder.ALPHABETICAL -> filteredPlaylists.sortedWith(compareBy(alphabeticalOrder) { it.name })
+            SortOrder.RECENT, SortOrder.RECENTLY_PLAYED -> filteredPlaylists.sortedByDescending { it.dateAdded }
+            SortOrder.OLDEST -> filteredPlaylists.sortedBy { it.dateAdded }
+            SortOrder.ALPHABETICAL, SortOrder.ARTIST -> filteredPlaylists.sortedWith(compareBy(alphabeticalOrder) { it.name })
+            SortOrder.ALPHABETICAL_DESC -> filteredPlaylists.sortedWith(compareByDescending(alphabeticalOrder) { it.name })
             // Playlists don't track a per-playlist play_count; use
             // trackCount as the most-relevant "size" signal so this
             // chip produces a visible ordering change instead of a
             // silent no-op.
-            SortOrder.MOST_PLAYED -> filteredPlaylists.sortedByDescending { it.trackCount }
-            // Playlists have no duration — fall back to the RECENT ordering.
-            SortOrder.DURATION -> filteredPlaylists.sortedByDescending { it.dateAdded }
+            SortOrder.MOST_PLAYED, SortOrder.DURATION -> filteredPlaylists.sortedByDescending { it.trackCount }
+            SortOrder.LEAST_PLAYED, SortOrder.SHORTEST -> filteredPlaylists.sortedBy { it.trackCount }
         }.let { sorted ->
             val (pinned, rest) = sorted.partition { it.pinned }
             pinned.sortedBy { it.name.lowercase() } + rest
         }
         // Sort artists/albums — default by track count descending (most tracks first)
         val sortedArtists = when (controls.sortOrder) {
-            SortOrder.RECENT -> filteredArtists.sortedByDescending { it.trackCount }
-            SortOrder.ALPHABETICAL -> filteredArtists.sortedWith(compareBy(alphabeticalOrder) { it.name })
-            SortOrder.MOST_PLAYED -> filteredArtists.sortedByDescending { it.trackCount }
+            SortOrder.ALPHABETICAL, SortOrder.ARTIST -> filteredArtists.sortedWith(compareBy(alphabeticalOrder) { it.name })
+            SortOrder.ALPHABETICAL_DESC -> filteredArtists.sortedWith(compareByDescending(alphabeticalOrder) { it.name })
             SortOrder.DURATION -> filteredArtists.sortedByDescending { it.totalDurationMs }
+            SortOrder.SHORTEST -> filteredArtists.sortedBy { it.totalDurationMs }
+            SortOrder.LEAST_PLAYED, SortOrder.OLDEST -> filteredArtists.sortedBy { it.trackCount }
+            else -> filteredArtists.sortedByDescending { it.trackCount }
         }
         val sortedAlbums = when (controls.sortOrder) {
-            SortOrder.RECENT -> filteredAlbums.sortedByDescending { it.trackCount }
             SortOrder.ALPHABETICAL -> filteredAlbums.sortedWith(compareBy(alphabeticalOrder) { it.name })
-            SortOrder.MOST_PLAYED -> filteredAlbums.sortedByDescending { it.trackCount }
+            SortOrder.ALPHABETICAL_DESC -> filteredAlbums.sortedWith(compareByDescending(alphabeticalOrder) { it.name })
+            SortOrder.ARTIST -> filteredAlbums.sortedWith(compareBy(alphabeticalOrder) { it.artist })
             // Albums carry no duration projection — fall back to track count.
-            SortOrder.DURATION -> filteredAlbums.sortedByDescending { it.trackCount }
+            SortOrder.LEAST_PLAYED, SortOrder.SHORTEST, SortOrder.OLDEST -> filteredAlbums.sortedBy { it.trackCount }
+            else -> filteredAlbums.sortedByDescending { it.trackCount }
         }
 
         // Split into multi-track (primary) and single-track (collapsed)
@@ -918,6 +931,18 @@ class LibraryViewModel @Inject constructor(
     }
 
     /**
+     * Play the currently-visible track list in order from the top — the
+     * filled Play button beside the header's shuffle. Honours the active
+     * sort + source filter + search since it plays exactly what's on screen.
+     * No-op when nothing in the current view is playable on disk.
+     */
+    fun playLibrary() {
+        val tracks = uiState.value.tracks
+        val first = tracks.firstOrNull { it.filePath != null } ?: return
+        playTrack(first, tracks)
+    }
+
+    /**
      * Load all downloaded tracks for [playlist] and begin playback from the first track.
      * Only tracks with a non-null [Track.filePath] (i.e. downloaded) are queued.
      */
@@ -1233,9 +1258,19 @@ internal fun sortLikedTracks(tracks: List<Track>, order: SortOrder): List<Track>
         val (stamped, synced) = tracks.partition { it.likedAtOrNull() != null }
         stamped.sortedByDescending { it.likedAtOrNull() } + synced
     }
+    // The mirror: oldest like on top; undated synced likes stay at the end.
+    SortOrder.OLDEST -> {
+        val (stamped, synced) = tracks.partition { it.likedAtOrNull() != null }
+        stamped.sortedBy { it.likedAtOrNull() } + synced
+    }
     SortOrder.ALPHABETICAL -> tracks.sortedWith(compareBy(alphabeticalOrder) { it.title })
+    SortOrder.ALPHABETICAL_DESC -> tracks.sortedWith(compareByDescending(alphabeticalOrder) { it.title })
+    SortOrder.ARTIST -> tracks.sortedWith(compareBy(alphabeticalOrder) { it.artist })
     SortOrder.MOST_PLAYED -> tracks.sortedByDescending { it.playCount }
+    SortOrder.LEAST_PLAYED -> tracks.sortedBy { it.playCount }
     SortOrder.DURATION -> tracks.sortedByDescending { it.durationMs }
+    SortOrder.SHORTEST -> tracks.sortedBy { it.durationMs }
+    SortOrder.RECENTLY_PLAYED -> tracks.sortedByDescending { it.lastPlayed ?: 0L }
 }
 
 private fun Track.likedAtOrNull(): Long? =

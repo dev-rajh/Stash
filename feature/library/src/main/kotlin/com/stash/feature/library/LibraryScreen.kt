@@ -261,6 +261,7 @@ fun LibraryScreen(
             onShuffleLibrary = {
                 if (state.streamingMode) viewModel.shuffleVisible(state.tracks) else viewModel.shuffleLibrary()
             },
+            onPlayLibrary = viewModel::playLibrary,
             onShuffleLiked = viewModel::shuffleLiked,
             onShuffleDevice = deviceViewModel::shuffle,
             onTabSelected = viewModel::selectTab,
@@ -574,6 +575,7 @@ private fun LibraryContent(
     searchQuery: String,
     importState: com.stash.data.download.files.LocalImportState,
     onShuffleLibrary: () -> Unit,
+    onPlayLibrary: () -> Unit,
     onShuffleLiked: () -> Unit,
     onShuffleDevice: () -> Unit,
     onTabSelected: (LibraryTab) -> Unit,
@@ -694,6 +696,25 @@ private fun LibraryContent(
             // at: the liked list on the Liked tab (issue #402 — it used to
             // shuffle the whole library there), the whole library elsewhere.
             val likedTabActive = state.activeTab == LibraryTab.LIKED
+            // Filled Play beside the shuffle: plays the visible list in order
+            // from the top (active sort + filter + search). The Liked tab has
+            // its own play entry, and "On this device" is a different pool.
+            if (!likedTabActive && !deviceTabActive) {
+                androidx.compose.material3.FilledIconButton(
+                    onClick = onPlayLibrary,
+                    modifier = Modifier.size(40.dp),
+                    colors = androidx.compose.material3.IconButtonDefaults.filledIconButtonColors(
+                        containerColor = chrome.accent,
+                        contentColor = Color.White,
+                    ),
+                ) {
+                    Icon(
+                        Icons.Filled.PlayArrow,
+                        contentDescription = "Play library",
+                        modifier = Modifier.size(22.dp),
+                    )
+                }
+            }
             IconButton(
                 onClick = { onTabSelected(if (deviceTabActive) lastLibraryTab else LibraryTab.DEVICE) },
                 modifier = Modifier.semantics { this.selected = deviceTabActive },

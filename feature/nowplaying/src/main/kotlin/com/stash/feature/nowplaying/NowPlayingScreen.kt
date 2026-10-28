@@ -48,8 +48,11 @@ import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Repeat
@@ -157,6 +160,8 @@ fun NowPlayingScreen(
     onDismiss: () -> Unit,
     onNavigateToArtist: (id: String, name: String, avatarUrl: String?, focusAlbum: String?) -> Unit,
     onNavigateToAlbum: (albumId: String, name: String, artUrl: String?, artistName: String) -> Unit,
+    /** Opens a playlist from the "Appears in" row; the player collapses behind it. */
+    onNavigateToPlaylist: (Long) -> Unit = {},
     viewModel: NowPlayingViewModel = hiltViewModel(),
     sheet: PlayerSheetState? = null,
 ) {
@@ -1237,7 +1242,12 @@ fun NowPlayingScreen(
                                     // stream rather than a local file), a small wifi glyph prefixes
                                     // the line so the user knows playback is using their connection.
                                     if (track != null) {
-                                        val qualityText = trackQualityText(track)
+                                        // Prefer the DB's file size; fall back to the size the
+                                        // ViewModel resolved from disk/SAF for the current track
+                                        // (SAF content:// rows never get file_size_bytes backfilled).
+                                        val effectiveSize = track.fileSizeBytes.takeIf { it > 0 }
+                                            ?: uiState.currentFileSizeBytes
+                                        val qualityText = trackQualityText(track, effectiveSize)
                                         if (qualityText != null) {
                                             Spacer(modifier = Modifier.height(StackRhythm.ArtistToQuality))
                                             // The live verdict ("Bit-perfect", "Hi-Res") rides on the end;
@@ -1248,6 +1258,24 @@ fun NowPlayingScreen(
                                                 qualityText = if (badge != null) "$qualityText \u00B7 $badge" else qualityText,
                                                 isStreaming = uiState.isStreaming,
                                                 onClick = { showSignalPath = true },
+                                            )
+                                        }
+                                        // Where the file lives, one line — only for downloaded tracks.
+                                        val displayedPath = track.filePath
+                                            ?.takeIf { it.isNotBlank() }
+                                            ?.let(::displayPath)
+                                        if (displayedPath != null) {
+                                            Spacer(modifier = Modifier.height(StackRhythm.ArtistToQuality))
+                                            FilePathLine(path = displayedPath)
+                                        }
+                                        // "Appears in": playlists the track is a member of. A compact,
+                                        // horizontally scrolling chip row so the fixed-height stack
+                                        // stays within its rhythm even with several memberships.
+                                        if (uiState.containingPlaylists.isNotEmpty()) {
+                                            Spacer(modifier = Modifier.height(StackRhythm.ArtistToQuality))
+                                            AppearsInRow(
+                                                playlists = uiState.containingPlaylists,
+                                                onPlaylistClick = onNavigateToPlaylist,
                                             )
                                         }
                                     }
@@ -2388,3 +2416,91 @@ private fun Modifier.marqueeWhileShown(): Modifier =
         // Compose's default 1.2 s pause between loops plus 2 s (owner, 2026-10-22).
         repeatDelayMillis = 3_200,
     ) else this
+
+
+// ---------------------------------------------------------------------------
+// Track file info + "Appears in" (fork ports)
+// ---------------------------------------------------------------------------
+
+/**
+ * One-line, ellipsised display of where the track's file lives. A quiet
+ * caption under the quality line: it's reference information, not a control.
+ */
+@Composable
+private fun FilePathLine(path: String) {
+    Text(
+        text = path,
+        style = MaterialTheme.typography.labelSmall,
+        color = npInk().copy(alpha = 0.55f),
+        maxLines = 1,
+        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 24.dp),
+    )
+}
+
+/**
+ * Compact, horizontally scrolling "Appears in" chips for the playlists the
+ * playing track belongs to. A row (rather than the fork's vertical list)
+ * because Now Playing's stack is fixed-height: the art yields a little, the
+ * layout never overflows.
+ */
+@Composable
+private fun AppearsInRow(
+    playlists: List<com.stash.core.model.Playlist>,
+    onPlaylistClick: (Long) -> Unit,
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Text(
+            text = "Appears in",
+            style = MaterialTheme.typography.labelSmall,
+            color = npInk().copy(alpha = 0.6f),
+            modifier = Modifier.padding(horizontal = 24.dp),
+        )
+        Spacer(modifier = Modifier.height(6.dp))
+        androidx.compose.foundation.lazy.LazyRow(
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 24.dp),
+            horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp),
+        ) {
+            items(playlists.size, key = { playlists[it].id }) { i ->
+                val playlist = playlists[i]
+                androidx.compose.material3.SuggestionChip(
+                    onClick = { onPlaylistClick(playlist.id) },
+                    label = {
+                        Text(
+                            text = playlist.name,
+                            style = MaterialTheme.typography.labelMedium,
+                            maxLines = 1,
+                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                        )
+                    },
+                    icon = {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.QueueMusic,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                        )
+                    },
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Displays a track's stored path for humans: SAF `content://` document URIs
+ * decode to the storage-relative path (`primary:Music/x.flac` → `Music/x.flac`);
+ * plain paths pass through untouched.
+ */
+private fun displayPath(rawPath: String): String {
+    if (!rawPath.startsWith("content://")) return rawPath
+    // The document id is the authoritative full path; fall back to the tree id.
+    val encoded = rawPath.substringAfterLast("/document/", "")
+        .ifEmpty { rawPath.substringAfterLast("/tree/", "") }
+        .ifEmpty { return rawPath }
+    val decoded = runCatching { java.net.URLDecoder.decode(encoded, "UTF-8") }
+        .getOrDefault(encoded)
+    // Drop the "primary:" / "<volume>:" storage prefix, keep the relative path.
+    return decoded.substringAfter(':', decoded)
+}
