@@ -14,6 +14,7 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch: {}  # manual run: builds from a branch, uploads the APK as an artifact, no Release
 
 permissions:
   contents: write  # required to create the GitHub Release and upload assets
@@ -51,6 +52,11 @@ jobs:
     name: Build and publish signed release
     needs: verify-tests  # no untested/uncompilable build ever ships
     runs-on: ubuntu-latest
+    # Fork: keys live in the 'release' GitHub Environment (Settings →
+    # Environments → release), not plain repo secrets, so every value the
+    # fork's build needs — signing keystore, Last.fm, QBDLX streaming — is
+    # reviewed and rotated in one place.
+    environment: release
 
     steps:
       - name: Check out repository
@@ -103,6 +109,13 @@ jobs:
           LASTFM_PROXY_URL: ${{ secrets.LASTFM_PROXY_URL }}
           # Optional comma-separated extra read-key pool (raises the ceiling).
           LASTFM_EXTRA_API_KEYS: ${{ secrets.LASTFM_EXTRA_API_KEYS }}
+          # Fork: QBDLX streaming/dedup credentials (data/download
+          # build.gradle.kts injects them as BuildConfig). Unset = the APK
+          # builds but its QBDLX catalog/streaming is dead.
+          QBDLX_APP_ID: ${{ secrets.QBDLX_APP_ID }}
+          QBDLX_APP_SECRET: ${{ secrets.QBDLX_APP_SECRET }}
+          QBDLX_TOKEN_POOL: ${{ secrets.QBDLX_TOKEN_POOL }}
+          QBDLX_APP_SECRETS: ${{ secrets.QBDLX_APP_SECRETS }}
           # Runtime lossless config (Plan A1). Both are optional: unset secrets
           # yield empty BuildConfig strings and LosslessConfigFetcher stays
           # disabled, so a build without them is valid — it just ships no relays.
@@ -142,6 +155,7 @@ jobs:
 
       - name: Extract tag annotation as release body
         id: tag_body
+        if: startsWith(github.ref, 'refs/tags/')
         run: |
           # Pull the tag's annotation (git tag -a -m "...") and emit it as a
           # GITHUB_OUTPUT heredoc so multi-line notes survive. Strip any PGP
@@ -155,6 +169,16 @@ jobs:
             echo 'STASH_EOF'
           } >> "$GITHUB_OUTPUT"
 
+      # Manual runs (workflow_dispatch from a branch) have no tag to release:
+      # the signed APK lands as a build artifact instead.
+      - name: Upload APK artifact (manual runs)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v6
+        with:
+          name: stash-release-apk
+          path: ${{ steps.rename_apk.outputs.release_apk }}
+          retention-days: 30
+
       - name: Clean up keystore from runner
         if: always()
         run: |
@@ -163,6 +187,7 @@ jobs:
           rm -f "$RUNNER_TEMP/stash-release.jks"
 
       - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           name: Stash ${{ github.ref_name }}
