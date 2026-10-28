@@ -113,3 +113,22 @@ Upstream built its own versions; upstream wins, the fork's variant is dropped:
 8. Tag `v<upstream versionName>+fork` if a release APK is wanted — the
    `release.yml` workflow builds and publishes it (keys live in the `release`
    GitHub Environment).
+
+## 16 KB page-size status (Android 15+)
+
+The APK's own native libs are 16 KB-clean (`libc++_shared.so` align 2^14,
+`libqjs.so` align 2^16). The ONLY unaligned binaries are the four PIE
+executables shipped by `io.github.junkfood02.youtubedl-android:0.17.2`
+(`libpython.so`, `libffmpeg.so`, `libffprobe.so`, `libaria2c.so`, LOAD align
+2^12, offsets shifted 0x1000 — the segment congruence mod 16384 fails, so
+they cannot be header-patched; they need a relink with
+`-Wl,-z,max-page-size=16384`). They are exec'd at runtime (yt-dlp python,
+ffmpeg/ffprobe, aria2c), not dlopen'd: the adb/Android Studio warning is
+cosmetic for installation, but on 16 KB-only devices those binaries will
+fail to exec, i.e. the yt-dlp download/streaming engine degrades there (the
+app falls back to its other engines). No 16 KB-aligned build of this
+toolchain exists (checked JunkFood02 upstream + Maven, 2026-10-29).
+
+ACTION: when youtubedl-android ships a release with 16 KB-aligned binaries,
+bump `youtubedlAndroid` in gradle/libs.versions.toml and verify with
+`llvm-objdump -p lib*.so | awk '/LOAD/{print $NF}'` → expect 0x4000/0x10000.
