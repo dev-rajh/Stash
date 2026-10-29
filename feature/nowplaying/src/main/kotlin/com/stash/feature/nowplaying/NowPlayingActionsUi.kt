@@ -37,8 +37,10 @@ import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Lyrics
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Bedtime
 import androidx.compose.material.icons.filled.OpenInFull
 import androidx.compose.material.icons.filled.PushPin
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Radio
 import androidx.compose.material.icons.filled.Share
@@ -141,12 +143,14 @@ internal fun actionVisual(action: NowPlayingAction, s: ActionVisualState, pinned
     NowPlayingAction.SHARE -> ActionVisual(Icons.Default.Share, "Share song")
     NowPlayingAction.POST_TO_COMMUNITY -> ActionVisual(Icons.Default.Public, "Post to Community")
     NowPlayingAction.VIEW_ALBUM -> ActionVisual(Icons.Default.Album, "View Album")
+    NowPlayingAction.MORE_ON_ARTIST -> ActionVisual(Icons.Default.Person, "More on Artist")
     // Shows the speed when it isn't 1x.
     NowPlayingAction.PLAYBACK_SPEED -> ActionVisual(
         Icons.Default.Speed,
         if (s.speed == 1f) "Playback speed" else "Playback speed · ${formatSpeed(s.speed)}",
         active = s.speed != 1f,
     )
+    NowPlayingAction.SLEEP_TIMER -> ActionVisual(Icons.Default.Bedtime, "Sleep timer")
     NowPlayingAction.DOWNLOAD -> ActionVisual(
         if (s.isDownloaded) Icons.Default.DownloadDone else Icons.Default.Download,
         when {
@@ -169,7 +173,9 @@ internal fun editorLabel(action: NowPlayingAction): String = when (action) {
     NowPlayingAction.SHARE -> "Share song"
     NowPlayingAction.POST_TO_COMMUNITY -> "Post to Community"
     NowPlayingAction.VIEW_ALBUM -> "View Album"
+    NowPlayingAction.MORE_ON_ARTIST -> "More on Artist"
     NowPlayingAction.PLAYBACK_SPEED -> "Playback speed"
+    NowPlayingAction.SLEEP_TIMER -> "Sleep timer"
     NowPlayingAction.DOWNLOAD -> "Download"
     NowPlayingAction.FLAG_WRONG_MATCH -> "Flag as Wrong Match"
 }
@@ -394,10 +400,14 @@ internal fun NowPlayingOptionsSheet(
                         .padding(bottom = 36.dp),
                 ) {
                     SheetHeader(title = "Track Options", action = "Edit", onAction = { editing = true })
-                    menu.forEachIndexed { i, action ->
-                        if (i > 0) Spacer(modifier = Modifier.height(8.dp))
+                    menu.forEach { action ->
                         val v = actionVisual(action, visualState)
-                        SheetOptionRow(icon = v.icon, label = v.label, onClick = { onAction(action) })
+                        SheetOptionRow(
+                            icon = v.icon,
+                            label = v.label,
+                            onClick = { onAction(action) },
+                            compact = true,
+                        )
                     }
                 }
             }

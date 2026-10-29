@@ -160,6 +160,8 @@ fun NowPlayingScreen(
     onDismiss: () -> Unit,
     onNavigateToArtist: (id: String, name: String, avatarUrl: String?, focusAlbum: String?) -> Unit,
     onNavigateToAlbum: (albumId: String, name: String, artUrl: String?, artistName: String) -> Unit,
+    /** Fork: artist-line tap — the offline songs-by-artist list; the player collapses behind it. */
+    onNavigateToOfflineArtist: (String) -> Unit = {},
     /** Opens a playlist from the "Appears in" row; the player collapses behind it. */
     onNavigateToPlaylist: (Long) -> Unit = {},
     viewModel: NowPlayingViewModel = hiltViewModel(),
@@ -360,6 +362,16 @@ fun NowPlayingScreen(
         viewModel.albumNavEvents.collect { a ->
             if (sheet == null || sheet.targetAnchor != PlayerSheetAnchor.MINI) {
                 onNavigateToAlbum(a.albumId, a.name, a.artUrl, a.artistName)
+            }
+        }
+    }
+
+    // Fork: artist-line tap → the offline songs-by-artist list. Same guard as
+    // the other collectors: nothing opens under a parked player.
+    LaunchedEffect(Unit) {
+        viewModel.offlineArtistNavEvents.collect { name ->
+            if (sheet == null || sheet.targetAnchor != PlayerSheetAnchor.MINI) {
+                onNavigateToOfflineArtist(name)
             }
         }
     }
@@ -609,6 +621,10 @@ fun NowPlayingScreen(
                 // Resolves and opens the actual remote album page.
                 NowPlayingAction.VIEW_ALBUM -> viewModel.onViewAlbumTapped()
                 NowPlayingAction.PLAYBACK_SPEED -> showSpeedSheet = true
+                NowPlayingAction.SLEEP_TIMER -> showSleepTimerSheet = true
+                // The fork's "More on Artist": the online artist resolve the
+                // title tap used to do before it became the offline album open.
+                NowPlayingAction.MORE_ON_ARTIST -> viewModel.onTrackInfoTapped()
                 // The ⋮ menu's labelled "Download" / "Remove download" row.
                 NowPlayingAction.DOWNLOAD -> viewModel.toggleDownloadForCurrentTrack()
                 NowPlayingAction.FLAG_WRONG_MATCH -> showWrongMatchDialog = true
@@ -1204,7 +1220,8 @@ fun NowPlayingScreen(
                                     TrackInfoBlock(
                                         track = track,
                                         resolvingArtist = resolvingArtist,
-                                        onTrackInfoTapped = viewModel::onTrackInfoTapped,
+                                        onTitleTapped = viewModel::onTrackTitleTapped,
+                                        onArtistTapped = viewModel::onTrackArtistTapped,
                                         isLiked = uiState.currentTrack?.stashLikedAt != null,
                                         onLikeTap = viewModel::onLikeTap,
                                         alignStart = titleAlign == com.stash.core.data.prefs.NpTitleAlign.START,
@@ -1588,15 +1605,25 @@ private fun riseIn(risePx: Int, delayMs: Int): EnterTransition =
 private fun TrackInfoBlock(
     track: com.stash.core.model.Track?,
     resolvingArtist: Boolean,
-    onTrackInfoTapped: () -> Unit,
+    /** Title tap: opens the album's offline (Stash) song list. */
+    onTitleTapped: () -> Unit,
+    /** Artist line tap: opens the offline songs-by-artist list. */
+    onArtistTapped: () -> Unit,
     isLiked: Boolean,
     onLikeTap: () -> Unit,
     alignStart: Boolean,
     sideButton: (@Composable (Modifier) -> Unit)?,
     sideCaption: Boolean = false,
 ) {
+    // Both opens are local (no resolve), so they never wait on [resolvingArtist] —
+    // that spinner now belongs to the ⋮ menu's "More on Artist" online resolve only.
+    val tapToAlbum = if (track != null) {
+        Modifier.clickable { onTitleTapped() }
+    } else {
+        Modifier
+    }
     val tapToArtist = if (track != null) {
-        Modifier.clickable(enabled = !resolvingArtist) { onTrackInfoTapped() }
+        Modifier.clickable { onArtistTapped() }
     } else {
         Modifier
     }
@@ -1619,7 +1646,7 @@ private fun TrackInfoBlock(
     Column(modifier = Modifier.fillMaxWidth()) {
         if (alignStart) {
             Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                TitleLine(track, resolvingArtist, alignStart = true, modifier = Modifier.weight(1f).then(tapToArtist))
+                TitleLine(track, resolvingArtist, alignStart = true, modifier = Modifier.weight(1f).then(tapToAlbum))
                 if (showsSide) sideButton?.invoke(Modifier.padding(start = 12.dp))
                 heart?.invoke(Modifier.padding(start = 12.dp))
             }
@@ -1629,7 +1656,7 @@ private fun TrackInfoBlock(
                     track,
                     resolvingArtist,
                     alignStart = false,
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 40.dp).then(tapToArtist),
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 40.dp).then(tapToAlbum),
                 )
                 // The side button at the leading edge, mirroring the heart at the trailing one
                 // (the sleep timer accented while armed, its time left under the moon).

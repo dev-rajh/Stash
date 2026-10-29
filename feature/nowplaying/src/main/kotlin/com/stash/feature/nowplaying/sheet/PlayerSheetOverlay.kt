@@ -82,6 +82,7 @@ fun PlayerSheetOverlay(
     onNavigateToArtist: (id: String, name: String, avatarUrl: String?, focusAlbum: String?) -> Unit,
     onNavigateToAlbum: (albumId: String, name: String, artUrl: String?, artistName: String) -> Unit,
     onNavigateToPlaylist: (Long) -> Unit = {},
+    onNavigateToOfflineArtist: (String) -> Unit = {},
     modifier: Modifier = Modifier,
     viewModel: NowPlayingViewModel = hiltViewModel(),
 ) {
@@ -128,6 +129,7 @@ fun PlayerSheetOverlay(
                     onNavigateToArtist = onNavigateToArtist,
                     onNavigateToAlbum = onNavigateToAlbum,
                     onNavigateToPlaylist = onNavigateToPlaylist,
+                    onNavigateToOfflineArtist = onNavigateToOfflineArtist,
                     viewModel = viewModel,
                     sheet = state,
                 )

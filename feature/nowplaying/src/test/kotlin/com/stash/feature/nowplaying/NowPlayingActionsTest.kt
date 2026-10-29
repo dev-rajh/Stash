@@ -3,6 +3,7 @@ package com.stash.feature.nowplaying
 import com.stash.core.data.prefs.NowPlayingAction
 import com.stash.core.data.prefs.NowPlayingAction.CAST
 import com.stash.core.data.prefs.NowPlayingAction.DOWNLOAD
+import com.stash.core.data.prefs.NowPlayingAction.MORE_ON_ARTIST
 import com.stash.core.data.prefs.NowPlayingAction.FLAG_WRONG_MATCH
 import com.stash.core.data.prefs.NowPlayingAction.LISTEN_TOGETHER
 import com.stash.core.data.prefs.NowPlayingAction.LYRICS
@@ -12,6 +13,7 @@ import com.stash.core.data.prefs.NowPlayingAction.QUEUE
 import com.stash.core.data.prefs.NowPlayingAction.RADIO
 import com.stash.core.data.prefs.NowPlayingAction.SAVE_TO_PLAYLIST
 import com.stash.core.data.prefs.NowPlayingAction.SHARE
+import com.stash.core.data.prefs.NowPlayingAction.SLEEP_TIMER
 import com.stash.core.data.prefs.NowPlayingAction.VIEW_ALBUM
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -35,8 +37,13 @@ class NowPlayingActionsTest {
     }
 
     @Test fun `default menu keeps the old items in their old order, with Lyrics first`() {
+        // Fork: MORE_ON_ARTIST slots in after View Album and SLEEP_TIMER after
+        // Playback speed, both ahead of Download (canonical enum order).
         assertEquals(
-            listOf(LYRICS, LISTEN_TOGETHER, SAVE_TO_PLAYLIST, SHARE, VIEW_ALBUM, PLAYBACK_SPEED, DOWNLOAD, FLAG_WRONG_MATCH),
+            listOf(
+                LYRICS, LISTEN_TOGETHER, SAVE_TO_PLAYLIST, SHARE, VIEW_ALBUM, MORE_ON_ARTIST,
+                PLAYBACK_SPEED, SLEEP_TIMER, DOWNLOAD, FLAG_WRONG_MATCH,
+            ),
             menuActions(NowPlayingAction.DefaultPins, solo),
         )
     }

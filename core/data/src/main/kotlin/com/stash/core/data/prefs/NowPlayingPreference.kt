@@ -36,8 +36,8 @@ enum class NpTitleAlign {
     ;
 
     companion object {
-        /** At the leading edge, as the owner set Now Playing up (2026-10-26). */
-        val DEFAULT = START
+        /** Centered (fork default — the owner wants the title under the art's middle). */
+        val DEFAULT = CENTER
     }
 }
 

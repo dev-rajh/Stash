@@ -24,7 +24,14 @@ enum class NowPlayingAction {
     SHARE,
     POST_TO_COMMUNITY,
     VIEW_ALBUM,
+    /**
+     * The fork's "More on Artist": resolves the playing artist and opens its
+     * real online profile page — what tapping the track block used to do
+     * before the title/artist taps became offline (library) opens.
+     */
+    MORE_ON_ARTIST,
     PLAYBACK_SPEED,
+    SLEEP_TIMER,
     DOWNLOAD,
     FLAG_WRONG_MATCH,
     ;

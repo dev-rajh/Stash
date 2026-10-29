@@ -324,6 +324,51 @@ class NowPlayingViewModel @Inject constructor(
     }
 
     // ------------------------------------------------------------------
+    // Offline taps — the fork's title/artist opens (library, no network)
+    // ------------------------------------------------------------------
+
+    /**
+     * One-shot offline-artist navigation events: the artist-line tap opens the
+     * local songs-by-artist list (same aggregated view as the Library's
+     * Artist tab), unlike [onTrackInfoTapped], which resolves the artist
+     * online for its real profile page (now the ⋮ menu's "More on Artist").
+     */
+    private val _offlineArtistNavEvents = MutableSharedFlow<String>(extraBufferCapacity = 1)
+    val offlineArtistNavEvents: SharedFlow<String> = _offlineArtistNavEvents.asSharedFlow()
+
+    /**
+     * Title tap. Opens the offline (on-device Stash) album for the playing
+     * track: an [AlbumNavTarget] with a blank albumId tells the host to open
+     * the library's [AlbumDetailRoute] instead of resolving the album online
+     * (that online open stays with the ⋮ menu's "View Album"). No network.
+     * No-op when nothing is playing or the track has no album tag.
+     */
+    fun onTrackTitleTapped() {
+        val track = _uiState.value.currentTrack ?: return
+        val albumName = track.album
+        if (albumName.isBlank()) return
+        _albumNavEvents.tryEmit(
+            AlbumNavTarget(
+                albumId = "",
+                name = albumName,
+                artUrl = track.albumArtUrl,
+                artistName = track.albumArtist.ifBlank { track.artist },
+            ),
+        )
+    }
+
+    /**
+     * Artist-line tap. Opens the offline songs-by-artist list for the playing
+     * track's artist. No-op when the track carries no artist name.
+     */
+    fun onTrackArtistTapped() {
+        val track = _uiState.value.currentTrack ?: return
+        val name = track.albumArtist.ifBlank { track.artist }
+        if (name.isBlank()) return
+        _offlineArtistNavEvents.tryEmit(name)
+    }
+
+    // ------------------------------------------------------------------
     // Tap-to-artist — resolve the playing artist and navigate to profile
     // ------------------------------------------------------------------
 

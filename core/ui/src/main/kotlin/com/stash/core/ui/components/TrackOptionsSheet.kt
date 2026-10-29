@@ -271,12 +271,14 @@ fun SheetOptionRow(
     label: String,
     onClick: () -> Unit,
     tint: Color = MaterialTheme.colorScheme.onSurface,
+    /** Tighter vertical padding for long menus (the ⋮ Track Options sheet). */
+    compact: Boolean = false,
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick)
-            .padding(horizontal = 20.dp, vertical = 14.dp),
+            .padding(horizontal = 20.dp, vertical = if (compact) 9.dp else 14.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(

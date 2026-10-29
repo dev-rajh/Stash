@@ -451,16 +451,26 @@ fun StashScaffold(
         },
         onNavigateToAlbum = { albumId, name, artUrl, artistName ->
             playerSheet.collapse()
-            navController.navigate(
-                SearchAlbumRoute(
-                    browseId = albumId,
-                    title = name,
-                    artist = artistName,
-                    thumbnailUrl = artUrl,
-                    year = null,
-                    source = AlbumSource.YOUTUBE,
-                ),
-            )
+            if (albumId.isBlank()) {
+                // Fork: a blank albumId is the offline open (title tap) — the
+                // library's album page listing the Stash songs on this device.
+                navController.navigate(AlbumDetailRoute(albumName = name, artistName = artistName))
+            } else {
+                navController.navigate(
+                    SearchAlbumRoute(
+                        browseId = albumId,
+                        title = name,
+                        artist = artistName,
+                        thumbnailUrl = artUrl,
+                        year = null,
+                        source = AlbumSource.YOUTUBE,
+                    ),
+                )
+            }
+        },
+        onNavigateToOfflineArtist = { artistName ->
+            playerSheet.collapse()
+            navController.navigate(ArtistDetailRoute(artistName))
         },
         onNavigateToPlaylist = { playlistId ->
             playerSheet.collapse()
