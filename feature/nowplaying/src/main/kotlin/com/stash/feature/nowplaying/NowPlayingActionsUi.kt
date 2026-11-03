@@ -231,6 +231,8 @@ internal fun NowPlayingTopBar(
     dismissModifier: Modifier = Modifier,
     fullArt: Boolean? = null,
     onToggleFullArt: () -> Unit = {},
+    /** Fork: the playing album's name, centred in the bar's free middle. Null hides it. */
+    headerTitle: String? = null,
 ) {
     val slot = fit.slotDp.dp
     val row = fit.row
@@ -240,7 +242,23 @@ internal fun NowPlayingTopBar(
     ) {
         TopBarIcon(Icons.Default.KeyboardArrowDown, dismissDescription, ink, slot, iconSize = 28.dp, onClick = onDismiss, modifier = dismissModifier)
 
-        Spacer(modifier = Modifier.weight(1f))
+        // The album's name rides the bar's free middle (the pins and ⋮ keep their
+        // slots); it shrinks with the row and scrolls when a long name can't fit.
+        if (headerTitle != null) {
+            Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                Text(
+                    text = headerTitle,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = ink.copy(alpha = 0.7f),
+                    maxLines = 1,
+                    modifier = Modifier
+                        .padding(horizontal = 4.dp)
+                        .marqueeWhileShown(),
+                )
+            }
+        } else {
+            Spacer(modifier = Modifier.weight(1f))
+        }
 
         if (!hasTrack) return@Row
 

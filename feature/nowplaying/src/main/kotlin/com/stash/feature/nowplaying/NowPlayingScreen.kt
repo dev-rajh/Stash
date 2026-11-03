@@ -1134,6 +1134,7 @@ fun NowPlayingScreen(
                             },
                             fullArt = if (hasArt) fullArtOn else null,
                             onToggleFullArt = viewModel::onToggleFullArt,
+                            headerTitle = track?.album?.takeIf { it.isNotBlank() },
                         )
                     }
                     if (room != null) {
@@ -1840,29 +1841,21 @@ private fun ArtistLine(
     alignStart: Boolean,
     modifier: Modifier = Modifier,
 ) {
-    // Collapse collaboration credits to the lead act
-    // ("Metro Boomin, Travis Scott" → "Metro Boomin"), and
-    // remember the split — this Text recomposes with every
-    // player-state change.
-    val displayArtist = remember(track) { track?.artist?.primaryArtist() }
+    // The full credit — every artist on the track (the fork's artist tap opens
+    // the offline list for the whole line, so collapsing to the lead act hid
+    // half of what the tap opens). The album moved to the header's centre.
     val spacing = com.stash.feature.nowplaying.ui.LocalNpSpacing.current
     Text(
-        text = buildString {
-            if (track != null && displayArtist != null) {
-                append(displayArtist)
-                if (track.album.isNotBlank()) {
-                    append(" • ")
-                    append(track.album)
-                }
-            }
-        },
+        text = track?.artist.orEmpty(),
         // Its own size, line height (applied to this one line) and tracking (NpSpacingDefaults).
         style = androidx.compose.material3.LocalTextStyle.current.merge(spacing.artistStyle()),
         color = npInk().copy(alpha = 0.7f),
         maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
+        // Long multi-artist credits scroll instead of clipping (the title's
+        // marquee). Keep the default Clip overflow — Ellipsis would end the
+        // line with "…" and leave the marquee nothing to scroll.
         textAlign = if (alignStart) TextAlign.Start else TextAlign.Center,
-        modifier = modifier,
+        modifier = modifier.marqueeWhileShown(),
     )
 }
 
@@ -2552,7 +2545,7 @@ private fun SheetAmbient(sheet: PlayerSheetState?, content: @Composable (Modifie
  * (Remove animations, or Battery Saver): the title then ends in "…" instead (see [TitleLine]).
  */
 @Composable
-private fun Modifier.marqueeWhileShown(): Modifier =
+internal fun Modifier.marqueeWhileShown(): Modifier =
     if (com.stash.feature.nowplaying.ui.LocalNowPlayingShown.current &&
         !com.stash.feature.nowplaying.ui.rememberNpLoopsStill()
     ) basicMarquee(
