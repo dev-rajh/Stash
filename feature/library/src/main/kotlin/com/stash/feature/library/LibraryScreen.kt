@@ -132,6 +132,7 @@ import com.stash.core.ui.ambient.LocalAlbumChrome
 import com.stash.core.ui.components.GlassCard
 import com.stash.core.ui.components.NowPlayingJumpChip
 import com.stash.core.ui.components.SourceIndicator
+import com.stash.core.ui.components.playlistSourceMark
 import com.stash.core.ui.components.TrackListItem
 import com.stash.core.ui.components.VerticalScrollbar
 import com.stash.core.ui.selection.RemoveDownloadsConfirmDialog
@@ -1561,10 +1562,8 @@ private fun PlaylistsGrid(
                                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
-                                // Imported playlists are locally owned; BOTH is not their songs' source.
-                                if (!playlist.sourceId.startsWith("custom_link_")) {
-                                    SourceIndicator(source = playlist.source)
-                                }
+                                // A list Stash makes (or a link import) names no service here.
+                                playlistSourceMark(playlist.source, playlist.sourceId)?.let { SourceIndicator(source = it) }
                                 Text(
                                     text = pluralize(playlist.trackCount, "track"),
                                     style = MaterialTheme.typography.bodySmall,
@@ -1623,10 +1622,8 @@ private fun PlaylistsGrid(
                                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
-                                // Imported playlists are locally owned; BOTH is not their songs' source.
-                                if (!playlist.sourceId.startsWith("custom_link_")) {
-                                    SourceIndicator(source = playlist.source)
-                                }
+                                // A list Stash makes (or a link import) names no service here.
+                                playlistSourceMark(playlist.source, playlist.sourceId)?.let { SourceIndicator(source = it) }
                                 Text(
                                     text = pluralize(playlist.trackCount, "track"),
                                     style = MaterialTheme.typography.bodySmall,

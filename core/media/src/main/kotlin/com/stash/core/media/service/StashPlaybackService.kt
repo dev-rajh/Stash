@@ -211,6 +211,16 @@ class StashPlaybackService : MediaLibraryService() {
         const val EXTRA_SHUFFLE_ORDER = "com.stash.extra.SHUFFLE_ORDER"
 
         /**
+         * A big queue (the repository's QueueWindow): its timeline is already in play order, shuffle
+         * or not, so while [EXTRA_KEEP_TIMELINE_ORDER] is true the master player's shuffle order is put
+         * back to the identity after every change ([keepTimelineOrder]). Done here because a shuffle
+         * order sent by a controller can arrive before the items it is for: setMediaItems and
+         * addMediaItems wait for this service's async onSetMediaItems/onAddMediaItems, custom commands don't.
+         */
+        const val COMMAND_KEEP_TIMELINE_ORDER = "com.stash.KEEP_TIMELINE_ORDER"
+        const val EXTRA_KEEP_TIMELINE_ORDER = "com.stash.extra.KEEP_TIMELINE_ORDER"
+
+        /**
          * "Play next" under shuffle: inserts the MediaItem in [EXTRA_PLAY_NEXT_ITEM] after the current
          * song and the Play next songs already behind it, in the timeline AND in the master's real
          * shuffle order, in one step ([com.stash.core.media.PlayNext.insert]); a controller only sees a
@@ -293,6 +303,8 @@ class StashPlaybackService : MediaLibraryService() {
 
         private const val ROOT_ID = "ROOT"
         private const val PLAYLISTS_ID = "PLAYLISTS"
+        /** Saved albums (item 5, 2026-11-02): listed apart from the playlists, as Library lists them. */
+        private const val ALBUMS_ID = "ALBUMS"
         private const val RECENTLY_ADDED_ID = "RECENTLY_ADDED"
         private const val PLAYLIST_PREFIX = "PLAYLIST_"
         private const val SHUFFLE_PLAY_PREFIX = "SHUFFLE_PLAY_"
@@ -553,6 +565,7 @@ class StashPlaybackService : MediaLibraryService() {
         }
 
         override fun onTimelineChanged(timeline: Timeline, reason: Int) {
+            keepTimelineOrder()
             // While casting, "play" means the speaker: never start the stopped master.
             val master = activePlayer ?: return
             when (resumePlayGate.onTimelineChanged(
@@ -566,7 +579,49 @@ class StashPlaybackService : MediaLibraryService() {
         }
 
         override fun onRepeatModeChanged(repeatMode: Int) = updateCustomLayout()
-        override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) = updateCustomLayout()
+        override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) {
+            keepTimelineOrder()
+            updateCustomLayout()
+        }
+    }
+
+    /** See [COMMAND_KEEP_TIMELINE_ORDER]. Main thread; internal for tests. */
+    internal var keepTimelineOrderOn = false
+        private set
+
+    /** The controller that asked for [keepTimelineOrderOn]: the app's, which looks after the order. */
+    private var keepTimelineOrderOwner: MediaSession.ControllerInfo? = null
+
+    /** [COMMAND_KEEP_TIMELINE_ORDER] from [controller]. Main thread; internal for tests. */
+    internal fun onKeepTimelineOrder(controller: MediaSession.ControllerInfo, on: Boolean) {
+        keepTimelineOrderOn = on
+        keepTimelineOrderOwner = controller.takeIf { on }
+        keepTimelineOrder()
+    }
+
+    /**
+     * A controller left. When it is the one that asked to keep the timeline order (the app's: it
+     * releases its controller when this service idle-stops, and its next connection asks again
+     * if the player still holds its big queue), nobody looks after the order any more: Media3's
+     * shuffle is its own again. Exactly then, rather than at the idle stop: a play that lands
+     * mid-stop keeps this instance and the app's controller, and then nothing would ask again.
+     * Main thread; internal for tests.
+     */
+    internal fun onControllerDisconnected(controller: MediaSession.ControllerInfo) {
+        if (controller != keepTimelineOrderOwner) return
+        keepTimelineOrderOn = false
+        keepTimelineOrderOwner = null
+    }
+
+    /**
+     * While [keepTimelineOrderOn] and shuffle is on: the master player's shuffle walk back to the
+     * timeline's own order whenever it isn't (an insert under shuffle lands at a random place in
+     * it). Setting it fires another timeline change, which finds the identity and stops.
+     */
+    @OptIn(UnstableApi::class)
+    private fun keepTimelineOrder() {
+        if (!keepTimelineOrderOn) return
+        crossfadeEngine?.masterPlayer?.let(::keepShuffleWalkInTimelineOrder)
     }
 
     @OptIn(UnstableApi::class)
@@ -1469,6 +1524,9 @@ class StashPlaybackService : MediaLibraryService() {
             "StashPlayback",
             "idle-stop: no playback for ${IDLE_STOP_TIMEOUT_MS}ms — stopping service",
         )
+        // keepTimelineOrderOn is not cleared here: a play queued on the main looper can undo this
+        // stop before the app's controller hears of it, and the app then never asks again. It goes
+        // when the app's controller disconnects ([onControllerDisconnected]).
         playbackSessionBus.onServiceStopping()
         // The widget keeps the song, paused; its buttons now start the service again.
         widgetFeed?.stopped()
@@ -2090,11 +2148,18 @@ class StashPlaybackService : MediaLibraryService() {
         ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
             crossfadeEngine?.cancelTransition()
             crossfadePreparedId = null
+            // A queue set by another controller (the car, a media button) is not the app's big queue:
+            // its shuffle is Media3's own again. The app asks for it again with each big queue it sets.
+            if (controller.packageName != packageName) {
+                keepTimelineOrderOn = false
+                keepTimelineOrderOwner = null
+            }
             return serviceScope.future {
                 if (mediaItems.size == 1 && mediaItems[0].mediaId.startsWith(SHUFFLE_PLAY_PREFIX)) {
                     val tracks = shuffleSourceTracks(mediaItems[0].mediaId)
                     if (tracks != null) {
-                        val items = tracks.map { it.toAutoMediaItem() }.shuffled()
+                        // A window of the shuffle, as the app holds a big queue (QUEUE_WINDOW_SIZE).
+                        val items = tracks.shuffled().take(com.stash.core.media.QUEUE_WINDOW_SIZE).map { it.toAutoMediaItem() }
 
                         kotlinx.coroutines.withContext(Dispatchers.Main) {
                             mediaSession.player.shuffleModeEnabled = true
@@ -2146,7 +2211,7 @@ class StashPlaybackService : MediaLibraryService() {
             when {
                 parentId.startsWith(PLAYLIST_PREFIX) ->
                     parentId.removePrefix(PLAYLIST_PREFIX).toLongOrNull()
-                        ?.let { playlistDao.getTracksForPlaylist(it) }
+                        ?.let { autoTracksOf(it) }
                         // Same predicate as onGetChildren so the queue built
                         // from a tap matches the rows the car listed.
                         ?.filter { it.isPlayableInAuto() }
@@ -2176,8 +2241,30 @@ class StashPlaybackService : MediaLibraryService() {
             val playlistId = key.toLongOrNull() ?: return null
             // isPlayableInAuto, NOT the bare is_streamable flag:
             // never-checked synced rows must play (see AutoBrowse.kt).
-            return playlistDao.getTracksForPlaylist(playlistId).filter { it.isPlayableInAuto() }
+            return autoTracksOf(playlistId).filter { it.isPlayableInAuto() }
         }
+
+        /**
+         * A playlist's rows for the car, in order; a saved album's one per song
+         * ([oneRowPerSongForAuto]), as its page lists them. Every surface that lists or
+         * queues a playlist reads this, so a tap queues exactly the rows the car showed.
+         */
+        private suspend fun autoTracksOf(playlistId: Long): List<TrackEntity> =
+            oneRowPerSongForAuto(
+                playlistDao.getTracksForPlaylist(playlistId),
+                playlistDao.observeSavedAlbumSlots(playlistId).first(),
+            )
+
+        private fun albumsRootItem(): MediaItem = MediaItem.Builder()
+            .setMediaId(ALBUMS_ID)
+            .setMediaMetadata(
+                MediaMetadata.Builder()
+                    .setTitle("Albums")
+                    .setIsBrowsable(true)
+                    .setIsPlayable(false)
+                    .build(),
+            )
+            .build()
 
         private fun shuffleItem(mediaId: String): MediaItem = MediaItem.Builder()
             .setMediaId(mediaId)
@@ -2200,7 +2287,7 @@ class StashPlaybackService : MediaLibraryService() {
             return serviceScope.future {
                 if (mediaItems.size == 1 && mediaItems[0].mediaId.startsWith(SHUFFLE_PLAY_PREFIX)) {
                     shuffleSourceTracks(mediaItems[0].mediaId)?.let { tracks ->
-                        return@future tracks.map { it.toAutoMediaItem() }.shuffled()
+                        return@future tracks.shuffled().take(com.stash.core.media.QUEUE_WINDOW_SIZE).map { it.toAutoMediaItem() }
                     }
                 }
                 mediaItems.map { item ->
@@ -2253,6 +2340,7 @@ class StashPlaybackService : MediaLibraryService() {
                         .build()
                     Futures.immediateFuture(LibraryResult.ofItem(playlistsItem, null))
                 }
+                ALBUMS_ID -> Futures.immediateFuture(LibraryResult.ofItem(albumsRootItem(), null))
                 else -> {
                     // Try to resolve track or playlist
                     serviceScope.future {
@@ -2366,6 +2454,7 @@ class StashPlaybackService : MediaLibraryService() {
                                         .build(),
                                 )
                                 .build(),
+                            albumsRootItem(),
                             MediaItem.Builder()
                                 .setMediaId(RECENTLY_ADDED_ID)
                                 .setMediaMetadata(
@@ -2385,6 +2474,8 @@ class StashPlaybackService : MediaLibraryService() {
                         // when streaming-aware Auto support lands.
                         val all = playlistDao.getAllVisible(includeStreamable = false).first()
                         val visible = all
+                            // A saved album is listed under Albums, never among the playlists.
+                            .filterNot { it.isSavedAlbumForAuto() }
                             // getAllVisible always shows the user's own playlists (Library); here one
                             // with downloads off still needs a downloaded track, as before. An
                             // EXISTS per playlist, not its whole track list (N+1 on every open).
@@ -2426,6 +2517,27 @@ class StashPlaybackService : MediaLibraryService() {
                                 .build()
                         }
                     }
+                    ALBUMS_ID -> {
+                        // Library > Albums in Download mode: one entry per album, once every song
+                        // is on the phone (the car plays what's downloaded, as its Playlists do).
+                        // Merging copies over a big library is real work: off the main thread,
+                        // as Library does it.
+                        val rows = playlistDao.observeSavedAlbums().first()
+                        kotlinx.coroutines.withContext(Dispatchers.Default) { albumsForAuto(rows) }.map { album ->
+                            MediaItem.Builder()
+                                .setMediaId("$PLAYLIST_PREFIX${album.playlistId}")
+                                .setMediaMetadata(
+                                    MediaMetadata.Builder()
+                                        .setTitle(album.title)
+                                        .setSubtitle(album.artist.ifBlank { pluralize(album.trackCount, "track") })
+                                        .setArtworkUri(autoTileArtUri(album.artUrl))
+                                        .setIsBrowsable(true)
+                                        .setIsPlayable(false)
+                                        .build(),
+                                )
+                                .build()
+                        }
+                    }
                     LIKED_ID -> {
                         listOf(shuffleItem(SHUFFLE_PLAY_PREFIX + LIKED_ID)) + likedTracksForAuto().map { track ->
                             track.toAutoMediaItem(
@@ -2454,7 +2566,7 @@ class StashPlaybackService : MediaLibraryService() {
                                 // them: the "playlist opens empty in the car" bug.
                                 // mediaId carries the parent playlist (AUTOQ_…) so a tap
                                 // can queue the WHOLE playlist, not a single item — #154/#173.
-                                val tracks = playlistDao.getTracksForPlaylist(playlistId)
+                                val tracks = autoTracksOf(playlistId)
                                     .filter { it.isPlayableInAuto() }
                                     .map { track ->
                                         track.toAutoMediaItem(
@@ -2514,6 +2626,10 @@ class StashPlaybackService : MediaLibraryService() {
             playerCommands: Player.Commands,
         ) {
             if (playerCommands.contains(Player.COMMAND_PLAY_PAUSE)) crossfadeEngine?.onPlayPauseRequested()
+        }
+
+        override fun onDisconnected(session: MediaSession, controller: MediaSession.ControllerInfo) {
+            onControllerDisconnected(controller)
         }
 
         @OptIn(UnstableApi::class)
@@ -2632,6 +2748,7 @@ class StashPlaybackService : MediaLibraryService() {
                     }
                 }
                 COMMAND_PLAY_NEXT_SHUFFLED -> return Futures.immediateFuture(playNextShuffled(session, controller, args))
+                COMMAND_KEEP_TIMELINE_ORDER -> onKeepTimelineOrder(controller, args.getBoolean(EXTRA_KEEP_TIMELINE_ORDER, false))
                 COMMAND_TOGGLE_SHUFFLE -> {
                     val player = session.player
                     player.shuffleModeEnabled = !player.shuffleModeEnabled
@@ -2803,6 +2920,28 @@ class StashPlaybackService : MediaLibraryService() {
 private val LOCAL_URI_SCHEMES = setOf("file", "content", "android.resource")
 
 /**
+ * Under shuffle, sets [player]'s shuffle order back to the identity when its walk isn't the
+ * timeline's own order (0, 1, 2, ...), as a big queue's window needs
+ * ([StashPlaybackService.COMMAND_KEEP_TIMELINE_ORDER]). True when it set one. Main thread.
+ */
+@androidx.annotation.OptIn(UnstableApi::class)
+internal fun keepShuffleWalkInTimelineOrder(player: androidx.media3.exoplayer.ExoPlayer): Boolean {
+    val n = player.mediaItemCount
+    if (!player.shuffleModeEnabled || n == 0) return false
+    val timeline = player.currentTimeline
+    if (timeline.windowCount != n || com.stash.core.media.isTimelineOrder(n, timeline.getFirstWindowIndex(true)) {
+            timeline.getNextWindowIndex(it, Player.REPEAT_MODE_OFF, true)
+        }
+    ) {
+        return false
+    }
+    player.setShuffleOrder(
+        androidx.media3.exoplayer.source.ShuffleOrder.DefaultShuffleOrder(IntArray(n) { it }, android.os.SystemClock.elapsedRealtime()),
+    )
+    return true
+}
+
+/**
  * The custom session commands a connecting controller gets. Shuffle, repeat
  * and stopping the sleep timer are transport, like the player commands every
  * controller has. A like (a Room write that can mirror to the user's Spotify
@@ -2821,6 +2960,9 @@ internal fun grantedCustomActions(privileged: Boolean, ownApp: Boolean = false):
         add(StashPlaybackService.COMMAND_SET_SHUFFLE_ORDER)
     }
     if (ownApp) add(StashPlaybackService.COMMAND_PLAY_NEXT_SHUFFLED)
+    // Only the app's own big queue asks for it; another controller turning it on would quietly
+    // unshuffle the user's queue.
+    if (ownApp) add(StashPlaybackService.COMMAND_KEEP_TIMELINE_ORDER)
 }
 
 /**

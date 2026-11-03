@@ -185,8 +185,6 @@ fun HomeScreen(
     yourRecordSection: @Composable () -> Unit = {},
     /** "From your record", from feature/record: mixes only the record's years make, under its card; nothing without an import. */
     recordMixesSection: @Composable () -> Unit = {},
-    /** A tile of "Moods & moments": the app opens its page of playlists. */
-    onOpenMood: (com.stash.data.ytmusic.model.MoodTile) -> Unit = {},
     viewModel: HomeViewModel = hiltViewModel(),
     shelvesViewModel: HomeShelvesViewModel = hiltViewModel(),
 ) {
@@ -204,7 +202,7 @@ fun HomeScreen(
     }
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val heroMinimized by viewModel.heroMinimized.collectAsStateWithLifecycle()
-    // Home's own streaming shelves (New from your artists, Moods & moments): built once a day, empty in Offline mode.
+    // Home's own streaming shelves (New from your artists, Because you like): built once a day, empty in Offline mode.
     val shelves by shelvesViewModel.state.collectAsStateWithLifecycle()
     LifecycleResumeEffect(shelvesViewModel) {
         shelvesViewModel.onResume()
@@ -631,7 +629,7 @@ fun HomeScreen(
                                 }
                                 items(uiState.yourPlaylists.railCut(HOME_RAIL_LIMIT), key = { it.id }) { p ->
                                     MixRailCard(
-                                        title = p.title, artUrl = p.artUrl, source = p.source,
+                                        title = p.title, artUrl = p.artUrl, source = p.source, sourceId = p.sourceId,
                                         onClick = { onNavigateToPlaylist(p.id) },
                                         onLongPress = { pinnedSheetPlaylistId = p.id },
                                     )
@@ -681,7 +679,7 @@ fun HomeScreen(
                         ) {
                             items(uiState.madeForYou.railCut(HOME_RAIL_LIMIT), key = { it.id }) { m ->
                                 MixRailCard(
-                                    title = m.title, artUrl = m.artUrl, source = m.source,
+                                    title = m.title, artUrl = m.artUrl, source = m.source, sourceId = m.sourceId,
                                     buildState = m.buildState, onClick = { openMix(m.id) },
                                     onLongPress = { actionSheetMixId = m.id },
                                     favorite = m.pinnedToHomeAt != null,
@@ -699,7 +697,7 @@ fun HomeScreen(
                         ) {
                             items(uiState.radios.railCut(HOME_RAIL_LIMIT), key = { it.id }) { m ->
                                 MixRailCard(
-                                    title = m.title, artUrl = m.artUrl, source = m.source,
+                                    title = m.title, artUrl = m.artUrl, source = m.source, sourceId = m.sourceId,
                                     buildState = m.buildState, onClick = { openMix(m.id) },
                                     onLongPress = { actionSheetMixId = m.id },
                                     favorite = m.pinnedToHomeAt != null,
@@ -717,7 +715,7 @@ fun HomeScreen(
                         ) {
                             items(uiState.moodDecades.railCut(HOME_RAIL_LIMIT), key = { it.id }) { m ->
                                 MixRailCard(
-                                    title = m.title, artUrl = m.artUrl, source = m.source,
+                                    title = m.title, artUrl = m.artUrl, source = m.source, sourceId = m.sourceId,
                                     buildState = m.buildState, onClick = { openMix(m.id) },
                                     onLongPress = { actionSheetMixId = m.id },
                                     favorite = m.pinnedToHomeAt != null,
@@ -738,15 +736,6 @@ fun HomeScreen(
                             albums = shelves.newFromArtists,
                             onOpen = onNavigateToAlbum,
                             lossless = false,
-                        )
-                    }
-                }
-                HomeSection.MOODS -> if (shelves.moods.isNotEmpty()) {
-                    item(key = "section_moods") {
-                        com.stash.feature.home.shelves.MoodTilesShelf(
-                            title = stringResource(R.string.home_moods),
-                            tiles = shelves.moods,
-                            onOpen = onOpenMood,
                         )
                     }
                 }

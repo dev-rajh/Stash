@@ -205,7 +205,8 @@ fun NowPlayingScreen(
     val titleAlign by viewModel.titleAlign.collectAsStateWithLifecycle()
     val titleButton by viewModel.titleButton.collectAsStateWithLifecycle()
     // The text block's numbers (production values; a debug build's tuner overrides them live) and
-    // its one alignment: title, artist, quality and Up next lines all follow it.
+    // its one alignment: title, artist and quality lines all follow it. Up next stays centred, as
+    // View lyrics does.
     val spacing = com.stash.feature.nowplaying.ui.LocalNpSpacing.current
     val alignStart = spacing.align.alignStart(settingStart = titleAlign == com.stash.core.data.prefs.NpTitleAlign.START)
     val fullArt = com.stash.feature.nowplaying.ui.rememberFullArtState()
@@ -329,8 +330,8 @@ fun NowPlayingScreen(
     // wrapped by repeat-all. In a room the host's skips go to the room, which decides (its Up next,
     // its radio, a restart), so both stay on there; a listener has no art gestures at all.
     val repeatAll = uiState.repeatMode == RepeatMode.ALL
-    val canSwipeNext = room != null || hasNextInQueue(uiState.queue.size, uiState.currentIndex, repeatAll)
-    val canSwipePrevious = room != null || hasPreviousInQueue(uiState.queue.size, uiState.currentIndex, repeatAll)
+    val canSwipeNext = room != null || hasNextInQueue(uiState.queueSongsBefore + uiState.queue.size + uiState.queueSongsAfter, uiState.queueSongsBefore + uiState.currentIndex, repeatAll)
+    val canSwipePrevious = room != null || hasPreviousInQueue(uiState.queueSongsBefore + uiState.queue.size + uiState.queueSongsAfter, uiState.queueSongsBefore + uiState.currentIndex, repeatAll)
     // The Session sheet: people, Up next, suggestions, invite, leave (design 2026-09-25).
     var showSession by remember { mutableStateOf(false) }
     var confirmEndTogether by remember { mutableStateOf(false) }
@@ -447,6 +448,9 @@ fun NowPlayingScreen(
         QueueBottomSheet(
             queue = uiState.queue,
             currentIndex = uiState.currentIndex,
+            songsBefore = uiState.queueSongsBefore,
+            songsAfter = uiState.queueSongsAfter,
+            orderPosition = uiState.queuePosition,
             accentColor = chrome.ink,
             source = uiState.source,
             isShuffleEnabled = uiState.shuffleEnabled,
@@ -1372,7 +1376,6 @@ fun NowPlayingScreen(
                                         },
                                         inRoom = room != null,
                                         onOpen = { if (room != null) showSession = true else showQueue = true },
-                                        alignStart = alignStart,
                                     )
 
                                     // Fork: the reference info — where the file lives and the playlists
