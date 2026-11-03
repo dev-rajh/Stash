@@ -1,5 +1,7 @@
 package com.stash.feature.community
 
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.res.pluralStringResource
 import android.util.Log
 import android.widget.Toast
 import androidx.compose.foundation.layout.Arrangement
@@ -31,6 +33,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import com.stash.core.ui.components.LocalAppSnackbar
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
@@ -46,6 +49,7 @@ import com.stash.core.data.community.Draft
 import com.stash.core.data.community.communityMessage
 import com.stash.core.model.community.CommunityMe
 import com.stash.core.model.community.PostTarget
+import com.stash.core.ui.components.sheetBarsFollow
 import com.stash.core.ui.theme.StashTheme
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
@@ -167,11 +171,17 @@ internal fun PostConfirmSheet(
     DisposableEffect(viewModel) { onDispose(viewModel::reset) }
     val state by viewModel.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
-    // A post in flight holds the sheet open: its result (the toast or the reason) lands here, and Post can't go twice.
+    val snackbar = LocalAppSnackbar.current
+    // A post in flight holds the sheet open: its result (the snackbar or the reason) lands here, and Post can't go twice.
     val sending by rememberUpdatedState((state as? PostComposerViewModel.UiState.Ready)?.posting == true)
     val sheetState = rememberModalBottomSheetState(confirmValueChange = { it != SheetValue.Hidden || !sending })
     // M3 1.4.0: back calls onDismissRequest even after confirmValueChange vetoed the hide.
-    ModalBottomSheet(onDismissRequest = { if (!sending) onDismiss() }, sheetState = sheetState, containerColor = StashTheme.extendedColors.elevatedSurface) {
+    ModalBottomSheet(
+        onDismissRequest = { if (!sending) onDismiss() },
+        sheetState = sheetState,
+        containerColor = StashTheme.extendedColors.elevatedSurface,
+        properties = sheetBarsFollow(StashTheme.extendedColors.elevatedSurface),
+    ) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 32.dp)) {
             Text("Post to Community", style = MaterialTheme.typography.titleLarge)
             Spacer(Modifier.height(16.dp))
@@ -186,7 +196,9 @@ internal fun PostConfirmSheet(
                     s,
                     onPost = { name ->
                         viewModel.post(name) {
-                            Toast.makeText(context, "Posted to Community", Toast.LENGTH_SHORT).show()
+                            // The app's snackbar, above the bottom chrome; a toast only outside the scaffold.
+                            val posted = context.getString(R.string.community_posted)
+                            snackbar?.show(posted) ?: Toast.makeText(context, posted, Toast.LENGTH_SHORT).show()
                             onDismiss()
                         }
                     },
@@ -212,9 +224,10 @@ private fun ReadyContent(
         CoverArt(draft.covers, Modifier.size(48.dp))
         Column(Modifier.weight(1f)) {
             Text(draft.title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            val what = if (draft.kind == "song") draft.tracks.single().artist else songs(draft.tracks.size)
+            val what = if (draft.kind == "song") draft.tracks.single().artist
+            else pluralStringResource(R.plurals.community_songs, draft.tracks.size, draft.tracks.size)
             Text(
-                listOfNotNull(kindLabel(draft.kind), what, s.name.takeUnless { askName }?.let { "posting as $it" })
+                listOfNotNull(stringResource(kindLabel(draft.kind)), what, s.name.takeUnless { askName }?.let { "posting as $it" })
                     .filter { it.isNotBlank() }
                     .joinToString(" · "),
                 style = MaterialTheme.typography.bodySmall,

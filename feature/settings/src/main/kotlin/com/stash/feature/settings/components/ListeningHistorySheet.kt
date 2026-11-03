@@ -41,7 +41,9 @@ import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.stash.core.ui.components.sheetBarsFollow
 import com.stash.core.ui.theme.StashTheme
+import com.stash.feature.settings.ClearHistoryResult
 import com.stash.feature.settings.ListeningHistoryCounts
 import com.stash.feature.settings.ListeningHistorySettingsViewModel
 import com.stash.feature.settings.R
@@ -72,13 +74,27 @@ fun ListeningHistorySheet(
     var pickingRange by rememberSaveable { mutableStateOf(false) }
     var confirm by remember { mutableStateOf<ClearRequest?>(null) }
     LaunchedEffect(viewModel) {
-        viewModel.messages.collect { Toast.makeText(context, it, Toast.LENGTH_SHORT).show() }
+        viewModel.clearResult.collect { result ->
+            val message = when (result) {
+                is ClearHistoryResult.Success -> when (result.removed) {
+                    0 -> context.getString(R.string.settings_listening_history_nothing_to_clear)
+                    else -> context.resources.getQuantityString(
+                        R.plurals.settings_listening_history_cleared_plays,
+                        result.removed,
+                        result.removed,
+                    )
+                }
+                ClearHistoryResult.Failure -> context.getString(R.string.settings_listening_history_clear_failed)
+            }
+            Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+        }
     }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         containerColor = StashTheme.extendedColors.elevatedSurface,
+        properties = sheetBarsFollow(StashTheme.extendedColors.elevatedSurface),
     ) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 28.dp)) {
             Text(stringResource(R.string.settings_listening_history_title), style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.onSurface)

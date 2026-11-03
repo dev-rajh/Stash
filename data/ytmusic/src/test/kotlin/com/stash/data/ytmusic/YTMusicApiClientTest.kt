@@ -169,6 +169,19 @@ class YTMusicApiClientTest {
     }
 
     @Test
+    fun `top-card track carries its video type, so a music video's length reads as a hint`() = runTest {
+        // A search tap plays the card with the card's length. Shook Ones' card is the 4:25 music
+        // video; read as a song's length, it picked a 4:49 compilation edit over the 5:26 album cut.
+        suspend fun topTrack(json: String) = ((fakeClient(json).searchAll("never gonna give").sections.first()
+            as SearchResultSection.Top).item as TopResultItem.TrackTop).track
+
+        val fixture = loadFixture("search_track.json")
+        assertEquals("ATV", topTrack(fixture).musicVideoType)
+        assertEquals("OMV", topTrack(fixture.replace("MUSIC_VIDEO_TYPE_ATV", "MUSIC_VIDEO_TYPE_OMV")).musicVideoType)
+        assertEquals(null, topTrack(fixture.replace("MUSIC_VIDEO_TYPE_ATV", "MUSIC_VIDEO_TYPE_NEW")).musicVideoType)
+    }
+
+    @Test
     fun `getArtist returns full profile for rich artist`() = runTest {
         val client = fakeBrowseClient(loadFixture("artist_rich.json"))
 
@@ -204,10 +217,29 @@ class YTMusicApiClientTest {
         assertTrue("albums should not be empty", profile.albums.isNotEmpty())
         assertTrue("singles should not be empty", profile.singles.isNotEmpty())
         assertTrue("related should not be empty", profile.related.isNotEmpty())
-        assertTrue(
-            "subscribersText should contain 'subscriber', was '${profile.subscribersText}'",
-            profile.subscribersText?.contains("subscriber", ignoreCase = true) == true,
-        )
+        // The header's two counts, as YouTube really sends them: the page's number is the
+        // monthly audience ("574K monthly audience"), never the bare subscriber count ("290K").
+        assertEquals(574_000L, profile.monthlyAudience)
+        assertEquals("290K", profile.subscribersText)
+    }
+
+    @Test
+    fun `getArtist keeps each release card's year and YouTube's type label`() = runTest {
+        val client = fakeBrowseClient(loadFixture("artist_rich.json"))
+
+        val profile = client.getArtist("UCLOOTPACKID1")
+
+        // Cards read "Album • 1999" / "Single • 2001": the label is the release type,
+        // never the artist, and the year stays the year.
+        val album = profile.albums.first()
+        assertEquals("Soundpieces: Da Antidote", album.title)
+        assertEquals("Album", album.releaseType)
+        assertEquals("1999", album.year)
+        assertEquals("", album.artist)
+        val single = profile.singles.first()
+        assertEquals("The Anthem", single.title)
+        assertEquals("Single", single.releaseType)
+        assertEquals("2001", single.year)
     }
 
     @Test
@@ -219,10 +251,9 @@ class YTMusicApiClientTest {
         // Lock in sparse-header behaviour: even when the rest of the page is
         // empty we still extract name and subscriber text from the header.
         assertEquals("Obscure Artist", profile.name)
-        assertTrue(
-            "subscribersText should contain 'subscriber', was '${profile.subscribersText}'",
-            profile.subscribersText?.contains("subscriber", ignoreCase = true) == true,
-        )
+        assertEquals("42", profile.subscribersText)
+        // No monthly audience in the header: no number, and never the subscribers in its place.
+        assertNull(profile.monthlyAudience)
         assertTrue("popular should not be empty", profile.popular.isNotEmpty())
         assertTrue("albums should be empty", profile.albums.isEmpty())
         assertTrue("singles should be empty", profile.singles.isEmpty())

@@ -11,6 +11,7 @@ import com.stash.core.common.TrackCanonical
 import com.stash.core.data.db.SQLITE_BIND_LIMIT
 import com.stash.core.data.db.chunkedForBind
 import com.stash.core.data.db.chunkedForBindWrite
+import com.stash.core.data.db.entity.TrackAliasEntity
 import com.stash.core.data.db.entity.TrackEntity
 import kotlinx.coroutines.flow.Flow
 
@@ -96,6 +97,9 @@ data class LibraryTrackRow(
     val source: com.stash.core.model.MusicSource,
     @androidx.room.ColumnInfo(name = "spotify_uri") val spotifyUri: String?,
     @androidx.room.ColumnInfo(name = "youtube_id") val youtubeId: String?,
+    @androidx.room.ColumnInfo(name = "soundcloud_id") val soundCloudId: String? = null,
+    @androidx.room.ColumnInfo(name = "soundcloud_permalink") val soundCloudPermalink: String? = null,
+    @androidx.room.ColumnInfo(name = "soundcloud_preview") val soundCloudPreview: Boolean = false,
     @androidx.room.ColumnInfo(name = "album_art_url") val albumArtUrl: String?,
     @androidx.room.ColumnInfo(name = "album_art_path") val albumArtPath: String?,
     @androidx.room.ColumnInfo(name = "date_added") val dateAdded: java.time.Instant,
@@ -296,7 +300,7 @@ private const val RESTORABLE_DOWNLOAD = """
 private const val LIBRARY_ROW_COLUMNS = """
     t.id, t.title, t.artist, t.album, t.album_artist, t.duration_ms,
     t.file_path, t.file_format, t.quality_kbps, t.file_size_bytes,
-    t.source, t.spotify_uri, t.youtube_id, t.album_art_url,
+    t.source, t.spotify_uri, t.youtube_id, t.soundcloud_id, t.soundcloud_permalink, t.soundcloud_preview, t.album_art_url,
     t.album_art_path, t.date_added, t.last_played, t.play_count,
     (t.is_downloaded = 1 OR t.file_path IS NOT NULL) AS is_downloaded,
     t.match_confidence, t.match_dismissed, t.isrc,
@@ -309,9 +313,13 @@ private const val LIBRARY_ROW_COLUMNS = """
 /**
  * "In your library", over a `tracks` row aliased `t`: exactly the songs Library's Songs tab lists
  * in Stream only ([TrackDao.getLibraryWithOnlineByDateAdded]). Every downloaded song, plus a song
- * that isn't downloaded when its match wasn't dismissed and it sits in an active playlist you
- * keep (synced or kept offline) that is not a Stash or Daily mix and not a share link. Never a
- * blocked song.
+ * that isn't downloaded when its match wasn't dismissed and it sits in an active playlist that
+ * is not a Stash or Daily mix and not a share link. Never a blocked song.
+ *
+ * Any active playlist, switched on or not (2026-10-29): a new install's playlists are all
+ * switched off, so requiring the switch left Songs empty after a full sync while Playlists
+ * listed everything. A playlist the user takes out of the library is inactive
+ * ([com.stash.core.data.db.entity.PlaylistEntity.userHidden]), which is how one leaves.
  *
  * The Artists and Albums tabs' "In your library" filter, their artist and album pages and the
  * artist-photo backfill read this same text ([IN_LIBRARY_IDS] where `t` is taken), so they can't
@@ -336,7 +344,6 @@ internal const val IN_LIBRARY = """
                   AND p.is_active = 1
                   AND p.type NOT IN ('STASH_MIX', 'DAILY_MIX')
                   AND (p.source_id IS NULL OR p.source_id NOT LIKE 'share:%')
-                  AND (p.sync_enabled = 1 OR p.keep_offline = 1)
             )
         )
     )
@@ -447,7 +454,8 @@ interface TrackDao {
         AND LOWER(t.file_format) != 'flac'
         AND t.match_picked_at IS NULL
         -- A cloud song's audio is the user's own file: never looked up or replaced online.
-        AND t.source != 'CLOUD'
+        AND t.source NOT IN ('CLOUD', 'SOUNDCLOUD')
+        AND t.soundcloud_id IS NULL
         AND bl.canonical_key IS NULL
         AND (t.flac_no_match_at IS NULL OR t.flac_no_match_at < :retryBefore)
         ORDER BY t.flac_no_match_at IS NOT NULL, t.flac_no_match_at ASC, t.id ASC
@@ -576,6 +584,15 @@ interface TrackDao {
     suspend fun clearMatchPick(trackId: Long)
 
     /**
+     * Records that the user picked this track's video themselves in Failed
+     * Matches ("find it yourself", #19), as [completeSwap] does for a swap:
+     * the FLAC sweep then leaves it out and a re-download gets exactly that
+     * video (#531).
+     */
+    @Query("UPDATE tracks SET match_picked_at = :pickedAt WHERE id = :trackId")
+    suspend fun markMatchPicked(trackId: Long, pickedAt: Long)
+
+    /**
      * How many tracks the library had downloaded and no longer has on disk.
      * On a restored backup this is the whole download collection: the rows
      * survive in the database, the audio does not.
@@ -669,7 +686,7 @@ interface TrackDao {
         """
         SELECT t.id, t.title, t.artist, t.album, t.album_artist, t.duration_ms,
                t.file_path, t.file_format, t.quality_kbps, t.file_size_bytes,
-               t.source, t.spotify_uri, t.youtube_id, t.album_art_url,
+               t.source, t.spotify_uri, t.youtube_id, t.soundcloud_id, t.soundcloud_permalink, t.soundcloud_preview, t.album_art_url,
                t.album_art_path, t.date_added, t.last_played, t.play_count,
                t.is_downloaded, t.match_confidence, t.match_dismissed, t.isrc,
                t.explicit, t.bits_per_sample, t.sample_rate_hz,
@@ -794,6 +811,11 @@ interface TrackDao {
      * the sync renumbers its own rows from 0 — and tied rows otherwise came
      * back in whatever order SQLite chose, so they could swap between
      * emissions.
+     *
+     * A playlist the listener put into their own order (Edit order, [PlaylistOrderDao]) follows its ranks first;
+     * a song with no rank yet (arrived after the last move) comes after them, in the service's order. A saved album
+     * ([SAVED_ALBUM]) always plays in album order, even one reordered before albums lost Edit order (2026-11-02).
+     * Keep this ORDER BY in step with [PlaylistOrderDao.memberIdsInOrder].
      */
     @Transaction
     @Query(
@@ -801,6 +823,8 @@ interface TrackDao {
         SELECT t.* FROM tracks t
         INNER JOIN playlist_tracks pt ON t.id = pt.track_id
         INNER JOIN playlists p ON pt.playlist_id = p.id
+        LEFT JOIN playlist_order o ON o.playlist_id = pt.playlist_id AND NOT """ + SAVED_ALBUM + """
+        LEFT JOIN playlist_order_entries e ON e.playlist_id = pt.playlist_id AND e.track_id = pt.track_id
         LEFT JOIN track_blocklist bl
             ON bl.canonical_key = (t.canonical_artist || '|' || t.canonical_title)
             OR (bl.spotify_uri IS NOT NULL AND bl.spotify_uri = t.spotify_uri)
@@ -815,7 +839,9 @@ interface TrackDao {
               OR (p.type = 'STASH_MIX' AND t.is_streamable = 1)
           )
         ORDER BY
-            CASE WHEN p.type = 'DAILY_MIX' THEN pt.added_at END DESC,
+            CASE WHEN o.playlist_id IS NOT NULL THEN e.rank IS NULL END ASC,
+            CASE WHEN o.playlist_id IS NOT NULL THEN e.rank END ASC,
+            CASE WHEN p.type = 'DAILY_MIX' AND o.playlist_id IS NULL THEN pt.added_at END DESC,
             pt.position ASC,
             pt.added_at ASC,
             t.id ASC
@@ -887,6 +913,49 @@ interface TrackDao {
     @Query("SELECT * FROM tracks WHERE youtube_id = :youtubeId LIMIT 1")
     suspend fun findByYoutubeId(youtubeId: String): TrackEntity?
 
+    /**
+     * The row a merge pointed the merged-away id [value] of [kind] at (`track_aliases`, schema 76),
+     * or null. Look the id up in its own column first: an alias only stands in for an id no row
+     * holds any more. See [findByYoutubeIdOrAlias] and its siblings.
+     */
+    @Query(
+        """
+        SELECT t.* FROM tracks t INNER JOIN track_aliases a ON a.track_id = t.id
+        WHERE a.kind = :kind AND a.value = :value
+        LIMIT 1
+        """,
+    )
+    suspend fun findByAlias(kind: String, value: String): TrackEntity?
+
+    @Query("SELECT * FROM track_aliases WHERE kind = :kind AND value IN (:values)")
+    suspend fun aliasRowsRaw(kind: String, values: List<String>): List<TrackAliasEntity>
+
+    /**
+     * For each of [trackIds] that a duplicate merge took away, the row it went into (schema 76,
+     * `track_aliases` kind `track_id`): two batched reads, chunked for the bind cap. Ids that were
+     * never merged away are absent from the map. What a saved queue's ids go through on a cold start.
+     */
+    suspend fun mergedIntoAll(trackIds: Collection<Long>): Map<Long, TrackEntity> {
+        if (trackIds.isEmpty()) return emptyMap()
+        val aliases = trackIds.map(Long::toString).distinct()
+            .chunkedForBind { aliasRowsRaw(TrackAliasEntity.KIND_TRACK_ID, it) }
+        if (aliases.isEmpty()) return emptyMap()
+        val rows = getByIds(aliases.map { it.trackId }.distinct()).associateBy { it.id }
+        return aliases.mapNotNull { alias -> rows[alias.trackId]?.let { alias.value.toLong() to it } }.toMap()
+    }
+
+    @Query("SELECT * FROM tracks WHERE soundcloud_id = :soundCloudId LIMIT 1")
+    suspend fun findBySoundCloudId(soundCloudId: String): TrackEntity?
+
+    @Query("SELECT * FROM tracks WHERE soundcloud_id IN (:ids)")
+    suspend fun findBySoundCloudIds(ids: List<String>): List<TrackEntity>
+
+    @Query("UPDATE tracks SET soundcloud_preview = :preview WHERE id = :id")
+    suspend fun updateSoundCloudPreview(id: Long, preview: Boolean)
+
+    @Query("SELECT * FROM tracks WHERE isrc IN (:ids) ORDER BY is_downloaded DESC, id ASC")
+    suspend fun findByIsrcs(ids: List<String>): List<TrackEntity>
+
     /** Find a track by exact ISRC, preferring a downloaded row (Listen Together's exact match, spec 2026-09-24 §4). */
     @Query("SELECT * FROM tracks WHERE isrc = :isrc ORDER BY is_downloaded DESC, id ASC LIMIT 1")
     suspend fun findByIsrc(isrc: String): TrackEntity?
@@ -907,6 +976,13 @@ interface TrackDao {
     /** Every row with these canonical words, oldest first (the mirror skips one that already stands for another song). */
     @Query("SELECT * FROM tracks WHERE canonical_title = :title AND canonical_artist = :artist ORDER BY id ASC")
     suspend fun findAllByCanonicalIdentity(title: String, artist: String): List<TrackEntity>
+
+    /**
+     * Every row with exactly these words as written, oldest first: how a song whose canonical words are blank (a title that is
+     * only brackets, "(Intro)") is found again, since every lookup by canonical words skips a blank pair. Rare, so no index.
+     */
+    @Query("SELECT * FROM tracks WHERE title = :title AND artist = :artist ORDER BY id ASC")
+    suspend fun findAllByExactWords(title: String, artist: String): List<TrackEntity>
 
     /**
      * The next [limit] rows after [afterId], in id order, with just the columns the canonical
@@ -1073,6 +1149,22 @@ interface TrackDao {
     /** Find a track by primary key. */
     @Query("SELECT * FROM tracks WHERE id = :trackId LIMIT 1")
     suspend fun getById(trackId: Long): TrackEntity?
+
+    /**
+     * The [limit] songs liked most recently, newest first: liked in Stash, or saved on Spotify, YouTube Music or
+     * Last.fm (each like's own time). Home's "Because you like" seeds from them.
+     */
+    @Query(
+        """
+        SELECT id FROM tracks
+        WHERE stash_liked_at IS NOT NULL OR spotify_saved_at IS NOT NULL
+           OR ytmusic_saved_at IS NOT NULL OR lastfm_loved_at IS NOT NULL
+        ORDER BY MAX(COALESCE(stash_liked_at, 0), COALESCE(spotify_saved_at, 0),
+                     COALESCE(ytmusic_saved_at, 0), COALESCE(lastfm_loved_at, 0)) DESC, id DESC
+        LIMIT :limit
+        """
+    )
+    suspend fun recentlyLikedIds(limit: Int): List<Long>
 
     @Query("SELECT * FROM tracks WHERE id IN (:trackIds)")
     suspend fun getByIdsRaw(trackIds: List<Long>): List<TrackEntity>
@@ -1962,6 +2054,15 @@ interface TrackDao {
      * that gap the track looks orphaned. Folding it into this query keeps the
      * whole orphan check + delete atomic (see [deleteOrphanedDownloadedTracks]).
      *
+     * A song the user asked to download (a download_queue row with user_requested: Now
+     * Playing, library, album, artist, multi-select and radio downloads, Library & Storage's
+     * Re-download) is never swept either. Those downloads join no playlist (only Search's join
+     * Your Downloads), so to this query they look exactly like a song a mix rotated out, and
+     * Refresh deleted them (#273 made that reach every one-account library). Erring on the
+     * kept side: a Re-download of a mix song that later rotates out is kept too. The marker
+     * goes with Downloads › "Clear history"; linking these downloads to Your Downloads, as
+     * Search does, is the durable fix (#761).
+     *
      * Not public API on its own — call [deleteOrphanedDownloadedTracks], which
      * evaluates this predicate and deletes inside one transaction so a
      * concurrent re-link can't be raced.
@@ -1970,7 +2071,8 @@ interface TrackDao {
         """
         SELECT t.* FROM tracks t
         WHERE t.is_downloaded = 1
-          AND t.source NOT IN ('BOTH', 'LOCAL', 'CLOUD')
+          AND t.source NOT IN ('BOTH', 'LOCAL', 'CLOUD', 'SOUNDCLOUD')
+          AND t.soundcloud_id IS NULL
           AND t.id NOT IN (
               SELECT pt.track_id FROM playlist_tracks pt
               WHERE pt.removed_at IS NULL
@@ -1979,9 +2081,35 @@ interface TrackDao {
               SELECT dq.track_id FROM discovery_queue dq
               WHERE dq.track_id IS NOT NULL AND dq.status IN ('PENDING', 'DONE')
           )
+          AND t.id NOT IN (
+              SELECT q.track_id FROM download_queue q
+              WHERE q.track_id IS NOT NULL AND q.user_requested = 1
+          )
         """
     )
     suspend fun selectDeletableOrphans(): List<TrackEntity>
+
+    /**
+     * The downloaded songs [playlistId] is the last active playlist for, among those the
+     * orphan sweep could take ([selectDeletableOrphans]'s sources). Removing the playlist
+     * would leave them in none, and the sweep would delete them; see
+     * [com.stash.core.data.repository.MusicRepositoryImpl.removePlaylist].
+     */
+    @Query(
+        """
+        SELECT t.id FROM tracks t
+        JOIN playlist_tracks pt ON pt.track_id = t.id
+        WHERE pt.playlist_id = :playlistId AND pt.removed_at IS NULL
+          AND t.is_downloaded = 1
+          AND t.source NOT IN ('BOTH', 'LOCAL', 'CLOUD', 'SOUNDCLOUD')
+          AND t.soundcloud_id IS NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM playlist_tracks o
+              WHERE o.track_id = t.id AND o.playlist_id != :playlistId AND o.removed_at IS NULL
+          )
+        """
+    )
+    suspend fun downloadedSongsOnlyIn(playlistId: Long): List<Long>
 
     /**
      * Atomically re-evaluates the orphan predicate and deletes the matching
@@ -2595,47 +2723,9 @@ interface TrackDao {
     )
     suspend fun findStreamableMetadataBackfillCandidates(limit: Int): List<StreamableBackfillRow>
 
-    /**
-     * Rows with no album that the user has played or kept, newest first: a Last.fm playlist's or a
-     * mix's songs arrive with only a title and an artist. `ArtBackfillWorker` fills them from
-     * Last.fm ([fillMissingAlbum]). Only songs played, downloaded, liked, or saved / loved on a
-     * service: a mix's songs never played wait until they are (playing one fills its album then,
-     * through Now Playing), so the pass doesn't send every mix's songs through the Last.fm proxy
-     * (2026-10-26: one 0.9.120 phone swept its library at a lookup a second).
-     */
-    @Query(
-        """
-        SELECT id, artist, title
-        FROM tracks
-        WHERE (album IS NULL OR album = '')
-          AND artist != ''
-          AND title != ''
-          AND (
-            play_count > 0 OR last_played IS NOT NULL
-            OR is_downloaded = 1 OR file_path IS NOT NULL
-            OR stash_liked_at IS NOT NULL OR spotify_saved_at IS NOT NULL
-            OR ytmusic_saved_at IS NOT NULL OR lastfm_loved_at IS NOT NULL
-          )
-        ORDER BY id DESC
-        LIMIT :limit
-        """
-    )
-    suspend fun findAlbumBackfillCandidates(limit: Int): List<StreamableBackfillRow>
-
-    /**
-     * A row's album (and album artist, if it has none) where it has no album: never over one a
-     * source or a file's tags gave.
-     */
-    @Query(
-        """
-        UPDATE tracks
-        SET album = :album,
-            album_artist = CASE WHEN album_artist IS NULL OR album_artist = '' THEN :albumArtist ELSE album_artist END
-        WHERE id = :trackId
-          AND (album IS NULL OR album = '')
-        """
-    )
-    suspend fun fillMissingAlbum(trackId: Long, album: String, albumArtist: String)
+    /** The track's parental advisory, as its source's sync reports it ([DiffWorker]). */
+    @Query("UPDATE tracks SET explicit = :explicit WHERE id = :trackId")
+    suspend fun updateExplicit(trackId: Long, explicit: Boolean)
 
     /**
      * Atomically reverts a track to an undownloaded state so the download
@@ -2913,6 +3003,58 @@ interface TrackDao {
         val wanted = canonicalIdentities.filterNot { (t, a) -> TrackCanonical.isBlankKey(t, a) }.toHashSet()
         return wanted.map { it.first }.distinct()
             .chunkedForBind { findDownloadedByCanonicalTitlesRaw(it) }
+            .filter { (it.canonicalTitle to it.canonicalArtist) in wanted }
+    }
+
+    /**
+     * Data fix for the green-dot lie ([com.stash.core.data.library.TrackSourceRule]): rows saved
+     * from a YouTube stream as Spotify songs become YouTube songs. Only a row that says SPOTIFY, has
+     * **no** Spotify id and **has** a YouTube video id; a row with a Spotify id is never touched.
+     *
+     * A row in a Spotify playlist is left alone too, even one with no Spotify id: the Spotify sync's
+     * download step picks its playlists' rows by source, so relabelling one would stop its download
+     * for someone with only Spotify connected. A row in Stash's own Liked Songs (or any switched-on
+     * Stash playlist, source BOTH) is relabelled: the download step takes a YouTube song there with
+     * any service connected ([DownloadQueueDao]'s connected-source rule), so it still downloads.
+     * Idempotent and cheap, so it runs at every launch: a backup from before the fix, restored later,
+     * is fixed too.
+     *
+     * @return the number of rows relabelled.
+     */
+    @Query("""
+        UPDATE tracks SET source = 'YOUTUBE'
+        WHERE source = 'SPOTIFY'
+          AND (spotify_uri IS NULL OR TRIM(spotify_uri) = '')
+          AND youtube_id IS NOT NULL AND TRIM(youtube_id) != ''
+          AND soundcloud_id IS NULL
+          AND id NOT IN (
+              SELECT pt.track_id FROM playlist_tracks pt
+              INNER JOIN playlists p ON p.id = pt.playlist_id
+              WHERE p.source = 'SPOTIFY'
+          )
+    """)
+    suspend fun relabelYouTubeRowsClaimingSpotify(): Int
+
+    /** Every row with one of [canonicalTitles] that records a file: raw half of [findHoldingFileByCanonicalIdentities]. */
+    @Query("""
+        SELECT * FROM tracks
+        WHERE canonical_title IN (:canonicalTitles)
+          AND (is_downloaded = 1 OR file_path IS NOT NULL)
+    """)
+    suspend fun findHoldingFileByCanonicalTitlesRaw(canonicalTitles: List<String>): List<TrackEntity>
+
+    /**
+     * Every row that records a file (downloaded, or a kept file being replaced) whose
+     * (canonical_title, canonical_artist) is one of [canonicalIdentities]: the candidates
+     * [com.stash.core.data.library.SameSongRule.isLibraryCopy] picks a sync's new songs' copies on
+     * the phone from, looked up once per playlist (the [findDownloadedByCanonicalIdentities]
+     * pattern: index-backed, chunked for the bind cap, blank identities skipped, none for an empty
+     * input).
+     */
+    suspend fun findHoldingFileByCanonicalIdentities(canonicalIdentities: List<Pair<String, String>>): List<TrackEntity> {
+        val wanted = canonicalIdentities.filterNot { (t, a) -> TrackCanonical.isBlankKey(t, a) }.toHashSet()
+        return wanted.map { it.first }.distinct()
+            .chunkedForBind { findHoldingFileByCanonicalTitlesRaw(it) }
             .filter { (it.canonicalTitle to it.canonicalArtist) in wanted }
     }
 

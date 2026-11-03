@@ -4,6 +4,7 @@ import androidx.lifecycle.SavedStateHandle
 import com.stash.core.data.db.dao.DiscoveryQueueDao
 import com.stash.core.data.db.dao.StashMixRecipeDao
 import com.stash.core.data.prefs.StreamingPreference
+import com.stash.core.data.repository.DownloadRequestResult
 import com.stash.core.data.repository.MusicRepository
 import com.stash.core.media.PlayerRepository
 import com.stash.core.media.streaming.ConnectivityMonitor
@@ -186,7 +187,8 @@ class PlaylistDetailViewModelTest {
         // Each used to subscribe on its own: three Room observers and three full conversions of
         // the playlist per tracks write.
         val music = musicRepoMock().stub {
-            on { getTracksByPlaylist(any()) } doReturn flowOf(listOf(track(1L, downloaded = true), track(2L)))
+            on { getSongsByPlaylist(any()) } doReturn flowOf(listOf(track(1L, downloaded = true), track(2L)))
+            on { getShownTracksByPlaylist(any()) } doReturn flowOf(listOf(track(1L, downloaded = true), track(2L)))
             onBlocking { getPlaylistWithTracks(1L) } doReturn playlist(keepOffline = true)
         }
         val vm = buildVm(musicRepository = music)
@@ -196,14 +198,17 @@ class PlaylistDetailViewModelTest {
         advanceTimeBy(1_000)
         runCurrent()
 
-        verify(music, org.mockito.kotlin.times(1)).getTracksByPlaylist(1L)
+        verify(music, org.mockito.kotlin.times(1)).getSongsByPlaylist(1L)
+        // The list is that query too, not a second build of it (review on #815).
+        verify(music, org.mockito.kotlin.never()).getShownTracksByPlaylist(any())
         assertEquals(listOf(1L, 2L), vm.uiState.value.tracks.map { it.id })
         assertEquals(DownloadButtonState(on = true, downloaded = 1, total = 2), vm.downloadButton.value)
     }
 
     @Test fun `the counts cover the whole playlist while a search filter is active`() = runTest {
         val music = musicRepoMock().stub {
-            on { getTracksByPlaylist(any()) } doReturn flowOf(listOf(track(1L, downloaded = true), track(2L), track(3L)))
+            on { getSongsByPlaylist(any()) } doReturn flowOf(listOf(track(1L, downloaded = true), track(2L), track(3L)))
+            on { getShownTracksByPlaylist(any()) } doReturn flowOf(listOf(track(1L, downloaded = true), track(2L), track(3L)))
             onBlocking { getPlaylistWithTracks(1L) } doReturn playlist(keepOffline = true)
         }
         val vm = buildVm(musicRepository = music)
@@ -293,7 +298,8 @@ class PlaylistDetailViewModelTest {
     ): DownloadButtonState? {
         val music = musicRepoMock().stub {
             onBlocking { getPlaylistWithTracks(1L) } doReturn playlist
-            on { getTracksByPlaylist(any()) } doReturn flowOf(tracks)
+            on { getSongsByPlaylist(any()) } doReturn flowOf(tracks)
+            on { getShownTracksByPlaylist(any()) } doReturn flowOf(tracks)
         }
         val vm = buildVm(
             musicRepository = music,
@@ -316,7 +322,8 @@ class PlaylistDetailViewModelTest {
     ): Pair<Boolean, String> {
         val music = musicRepoMock().stub {
             onBlocking { getPlaylistWithTracks(1L) } doReturn playlist
-            on { getTracksByPlaylist(any()) } doReturn flowOf(tracks)
+            on { getSongsByPlaylist(any()) } doReturn flowOf(tracks)
+            on { getShownTracksByPlaylist(any()) } doReturn flowOf(tracks)
         }
         val vm = buildVm(musicRepository = music)
         backgroundScope.launch { vm.downloadButton.collect {} }
@@ -515,7 +522,7 @@ class PlaylistDetailViewModelTest {
     @Test
     fun queueDownload_reports_when_single_item_was_not_queued() = runTest {
         val musicRepo = musicRepoMock()
-        whenever(musicRepo.queueDownload(eq(1L))).thenReturn(false)
+        whenever(musicRepo.requestDownload(eq(1L))).thenReturn(DownloadRequestResult.NOT_QUEUED)
         val vm = buildVm(musicRepository = musicRepo)
 
         val messages = collectMessages(vm)
@@ -523,6 +530,20 @@ class PlaylistDetailViewModelTest {
         runCurrent()
 
         assertEquals(listOf("Couldn't queue download."), messages)
+    }
+
+    /** A song already on the phone as another row is not downloaded twice, and the tap says so. */
+    @Test
+    fun queueDownload_says_when_the_song_is_already_on_the_phone() = runTest {
+        val musicRepo = musicRepoMock()
+        whenever(musicRepo.requestDownload(eq(1L))).thenReturn(DownloadRequestResult.ALREADY_ON_PHONE)
+        val vm = buildVm(musicRepository = musicRepo)
+
+        val messages = collectMessages(vm)
+        vm.queueDownload(1L)
+        runCurrent()
+
+        assertEquals(listOf("Already on your phone."), messages)
     }
 
     @Test
@@ -577,10 +598,12 @@ class PlaylistDetailViewModelTest {
     }
 
     private fun musicRepoMock(): MusicRepository = mock {
-        on { getTracksByPlaylist(any()) } doReturn flowOf(emptyList())
+        on { getSongsByPlaylist(any()) } doReturn flowOf(emptyList())
+        on { getShownTracksByPlaylist(any()) } doReturn flowOf(emptyList())
         on { observePlaylist(any()) } doReturn flowOf(null)
         on { getUserCreatedPlaylists() } doReturn flowOf(emptyList())
         onBlocking { queueDownload(any()) } doReturn true
+        onBlocking { requestDownload(any()) } doReturn DownloadRequestResult.QUEUED
         onBlocking {
             removeTrackFromPlaylistAndMaybeDelete(any(), any(), any())
         } doReturn MusicRepository.CascadeRemovalSummary(
@@ -628,5 +651,6 @@ class PlaylistDetailViewModelTest {
         discoveryQueueDao = discoveryQueueDao,
         sharedMixRepository = sharedMixRepository,
         downloadQueueDao = downloadQueueDao,
+        orderDao = mock { on { observeIsCustom(any()) } doReturn flowOf(false) },
     )
 }

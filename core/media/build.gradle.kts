@@ -34,6 +34,7 @@ dependencies {
     // TrackActionsDelegate dependencies — shared preview+download surface.
     implementation(project(":core:data"))
     implementation(project(":core:auth"))
+    implementation(project(":data:soundcloud"))
     implementation(project(":data:download"))
     // Cloud storage (Dropbox / OneDrive): stash-cloud:// items resolve through data:cloud.
     implementation(project(":data:cloud"))
@@ -44,6 +45,7 @@ dependencies {
     // Media3
     implementation(libs.media3.exoplayer)
     implementation(libs.media3.exoplayer.dash)
+    implementation(libs.media3.exoplayer.hls)
     implementation(libs.media3.session)
     implementation(libs.media3.datasource)
     implementation(libs.media3.datasource.okhttp)
@@ -84,4 +86,7 @@ dependencies {
     testImplementation(libs.androidx.test.core)
     // MockK — pure JVM mocking for EqMigrationTest.
     testImplementation(libs.mockk)
+    // Media3's own fakes (a real ExoPlayer on a fake clock): ResolveFirstMediaSourcePlayerTest.
+    testImplementation("androidx.media3:media3-test-utils:${libs.versions.media3.get()}")
+    testImplementation("androidx.media3:media3-test-utils-robolectric:${libs.versions.media3.get()}")
 }

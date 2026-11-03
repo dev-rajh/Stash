@@ -32,6 +32,13 @@ interface MusicRepository {
      */
     val trackDeletions: SharedFlow<Long>
 
+    /**
+     * Emits [trackId] on [trackDeletions] for a row removed outside this repository's own delete
+     * paths, together with its file: the extra copy of a merged duplicate (Library Health →
+     * Possible duplicates). The player then drops it from the queue like any deleted song.
+     */
+    suspend fun announceTrackGone(trackId: Long) {}
+
     // ── Track queries ───────────────────────────────────────────────────
 
     /** All tracks ordered by most-recently-added first. */
@@ -56,11 +63,48 @@ interface MusicRepository {
     /** Tracks belonging to a playlist. */
     fun getTracksByPlaylist(playlistId: Long): Flow<List<Track>>
 
+    /**
+     * A playlist's songs, each once: [getTracksByPlaylist], except that a saved album lists a song
+     * once even when a copy already on the phone was linked beside the song's own row (the row on
+     * the phone wins; [com.stash.core.data.album.SavedAlbums.oneRowPerSong]). What its page lists
+     * and counts; saves, syncs and download removal keep [getTracksByPlaylist]'s every row.
+     */
+    fun getSongsByPlaylist(playlistId: Long): Flow<List<Track>> = getTracksByPlaylist(playlistId)
+
+    /**
+     * Takes a synced playlist (a saved album synced from YouTube Music) out of the library for good:
+     * hidden, so the next sync leaves it out instead of bringing it back. Its songs and downloads stay.
+     */
+    suspend fun hidePlaylist(playlistId: Long) {}
+
+    /**
+     * The songs a playlist screen shows: all of [getSongsByPlaylist] in Stream only, only
+     * the downloaded ones in Download mode, which plays nothing else (owner, 2026-10-29).
+     * For lists people see and play; counts, saves and syncs keep [getTracksByPlaylist].
+     */
+    fun getShownTracksByPlaylist(playlistId: Long): Flow<List<Track>> = getSongsByPlaylist(playlistId)
+
     /** Distinct artists with track counts and durations. */
     fun getAllArtists(): Flow<List<ArtistSummary>>
 
-    /** Distinct albums with metadata. */
+    /**
+     * Songs grouped by their album text. No longer what Library › Albums lists (that is
+     * [getLibraryAlbums], saved albums only, since 2026-11-02).
+     */
     fun getAllAlbums(): Flow<List<AlbumSummary>>
+
+    /**
+     * Every saved album in the library, one entry per saved copy (an album saved on two services
+     * is two entries), with its songs counted. What an album page asks "is this album saved?".
+     */
+    fun observeSavedAlbums(): Flow<List<com.stash.core.data.album.SavedAlbum>>
+
+    /**
+     * Library › Albums: saved albums only, one card per album, by
+     * [com.stash.core.data.album.SavedAlbums.forLibrary]. Follows the Download switch: Stream only
+     * lists every saved album, Download mode only one whose songs are all on the phone (owner, 2026-11-02).
+     */
+    fun getLibraryAlbums(): Flow<List<com.stash.core.data.album.SavedAlbum>>
 
     /** Most-recently-added tracks. */
     fun getRecentlyAdded(limit: Int = 20): Flow<List<Track>>
@@ -243,6 +287,15 @@ interface MusicRepository {
      */
     suspend fun queueDownload(trackId: Long): Boolean
 
+    /**
+     * [queueDownload] that says what happened, for a tap that tells the user:
+     * [DownloadRequestResult.ALREADY_ON_PHONE] when another row of the song
+     * already holds its audio ([com.stash.core.data.library.findLibraryCopy]),
+     * so nothing is downloaded a second time. [queueDownload] is
+     * `requestDownload(trackId) == QUEUED`.
+     */
+    suspend fun requestDownload(trackId: Long): DownloadRequestResult
+
     /** Why [trackId]'s download waits in the queue (its row keeps it), or null when it doesn't. */
     suspend fun downloadWaitReason(trackId: Long): com.stash.core.model.DownloadWaitReason?
 
@@ -337,6 +390,12 @@ interface MusicRepository {
 
     /** Pin/unpin a playlist on Home's "Your playlists" rail. Null clears the pin. */
     suspend fun setPlaylistPinnedToHome(playlistId: Long, pinnedAt: Long?)
+
+    /**
+     * A mix's Favorite (its Home pin), as Home's long-press sets it: on stamps the pin now,
+     * off clears it, and either way the mix shows on Home again if it was hidden.
+     */
+    suspend fun setMixFavorite(playlistId: Long, favorite: Boolean)
 
     // ── Cleanup ──────────────────────────────────────────────────────────
 
@@ -537,4 +596,16 @@ interface MusicRepository {
      * "mix streamable rows into Library" model that was reverted.
      */
     suspend fun applyStreamingMode(enabled: Boolean)
+}
+
+/** What [MusicRepository.requestDownload] did with a tap on Download. */
+enum class DownloadRequestResult {
+    /** A download was queued (or one already running was left to finish). */
+    QUEUED,
+
+    /** The song is already on the phone as another row: nothing was downloaded. */
+    ALREADY_ON_PHONE,
+
+    /** Nothing queued: the row is missing, already downloaded, or a SoundCloud preview. */
+    NOT_QUEUED,
 }

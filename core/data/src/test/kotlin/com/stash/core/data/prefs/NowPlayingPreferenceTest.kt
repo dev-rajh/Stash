@@ -41,10 +41,10 @@ class NowPlayingPreferenceTest {
     }
 
     @Test fun `a fresh install opens Now Playing as the owner set it up`() = runTest {
-        // Full art on, close to the whole cover, a slow pan over a solid blend, and the title
+        // Full art on, the whole cover, a slow pan over a solid blend, and the title
         // centered — the fork's default (upstream's was the leading edge).
         assertTrue(preference.fullArt.first())
-        org.junit.Assert.assertEquals(1.1f, preference.fullArtZoom.first(), 0.0001f)
+        org.junit.Assert.assertEquals(1f, preference.fullArtZoom.first(), 0.0001f)
         org.junit.Assert.assertEquals(FullArtPan.SLOW, preference.fullArtPan.first())
         org.junit.Assert.assertEquals(FullArtBlend.SOLID, preference.fullArtBlend.first())
         org.junit.Assert.assertEquals(NpTitleAlign.CENTER, preference.titleAlign.first())

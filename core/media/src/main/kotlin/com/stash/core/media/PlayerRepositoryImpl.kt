@@ -17,6 +17,7 @@ import androidx.media3.session.SessionToken
 import com.stash.core.common.constants.StashConstants
 import com.stash.core.data.db.dao.TrackDao
 import com.stash.core.data.db.entity.TrackEntity
+import com.stash.core.data.library.TrackSourceRule
 import com.stash.core.data.mapper.toDomain
 import com.stash.core.data.prefs.StreamingPreference
 import com.stash.core.data.repository.MusicRepository
@@ -69,7 +70,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flow
@@ -117,6 +120,8 @@ class PlayerRepositoryImpl @Inject constructor(
     private val listenTogether: com.stash.core.media.listen.ListenTogetherController? = null,
     // The diagnostics bundle's "Recent playback errors". A fresh, unshared one in hand-built tests.
     private val diagnosticsLog: PlaybackDiagnosticsLog = PlaybackDiagnosticsLog(),
+    // Data saver: the next-song look-ahead is skipped where it applies. Null in hand-built tests (never applies).
+    private val qualityPolicy: com.stash.core.media.streaming.StreamQualityPolicy? = null,
 ) : PlayerRepository {
 
     /**
@@ -138,22 +143,7 @@ class PlayerRepositoryImpl @Inject constructor(
      * track is anywhere near this small, so there are no false negatives.
      */
     internal var filePathExistsOnDisk: (String) -> Boolean = { path ->
-        val bytes = try {
-            if (path.startsWith("content://")) {
-                DocumentFile.fromSingleUri(context, path.toUri())?.length() ?: 0L
-            } else {
-                // Handle both plain paths and file:// URIs.
-                val plainPath = if (path.startsWith("file://")) {
-                    path.toUri().path ?: path.removePrefix("file://")
-                } else {
-                    path
-                }
-                File(plainPath).length()
-            }
-        } catch (e: Exception) {
-            0L
-        }
-        bytes >= StashConstants.MIN_PLAYABLE_LOCAL_BYTES
+        com.stash.core.media.streaming.isUsableLocalFile(context, path)
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -346,6 +336,91 @@ class PlayerRepositoryImpl @Inject constructor(
                     prefetchNextTrack()
                 }
         }
+
+        watchNextUpDownload()
+        watchDataSaver()
+    }
+
+    /**
+     * Data saver coming into effect or leaving it (the phone moved between Wi-Fi and mobile data,
+     * or the switch flipped) while music plays: the policy has already dropped every cached link
+     * ([com.stash.core.media.streaming.StreamQualityPolicy.dataSaverChanges]); the next song's
+     * slot is lined up again here ([relineNextStream]). The song playing keeps its link to the end.
+     */
+    private fun watchDataSaver() {
+        val policy = qualityPolicy ?: return
+        scope.launch {
+            policy.dataSaverChanges()
+                .flowOn(Dispatchers.IO)
+                .drop(1) // the state at start: nothing lined up under another decision yet
+                .catch { e -> Log.w(TAG, "Data saver watch stopped: ${e.message}") }
+                .collect { dataSaver ->
+                    Log.d(TAG, "Data saver ${if (dataSaver) "in effect" else "off"}: lining the next song up again")
+                    relineNextStream()
+                }
+        }
+    }
+
+    /**
+     * The next song may hold a link resolved under the old decision: a FLAC link the look-ahead
+     * swapped in on Wi-Fi, which ExoPlayer starts buffering well before the transition. Its slot
+     * goes back to a placeholder, resolved when the song is reached under the new decision, and the
+     * look-ahead runs again (it skips itself while Data saver applies, and on Wi-Fi it lines up FLAC
+     * again). A file, a placeholder or a cloud song is already right. PR #759's
+     * `reresolveNextStream` does the same for a quality picked in Now Playing; once both are in,
+     * this becomes a call to it.
+     */
+    internal suspend fun relineNextStream() {
+        if (listenTogetherOwnsQueue) return
+        val controller = controllerDeferred ?: return
+        val index = controller.nextMediaItemIndex
+        // No next song, or it is this one again (a one-song queue on repeat): a new source would restart it.
+        if (index !in 0 until controller.mediaItemCount || index == controller.currentMediaItemIndex) return
+        val item = controller.getMediaItemAt(index)
+        val nextId = item.mediaMetadata.extras?.getLong(EXTRA_TRACK_ID, -1L) ?: return
+        streamUrlCache.invalidate(nextId)
+        val scheme = item.localConfiguration?.uri?.scheme
+        val queued = currentQueueTracks.firstOrNull { it.id == nextId }
+        if ((scheme == "https" || scheme == "http") && queued != null) {
+            val extras = Bundle(item.mediaMetadata.extras ?: Bundle()).apply {
+                listOf(EXTRA_STREAM_CODEC, EXTRA_STREAM_BIT_DEPTH, EXTRA_STREAM_SAMPLE_RATE, EXTRA_STREAM_BITRATE, EXTRA_STREAM_ORIGIN)
+                    .forEach(::remove)
+            }
+            val placeholder = item.buildUpon()
+                .setUri(queued.toStreamPlaceholderMediaItem().localConfiguration?.uri)
+                .setMediaMetadata(item.mediaMetadata.buildUpon().setExtras(extras).build())
+                .build()
+            replaceMediaItemKeepingShuffle(controller, index, placeholder)
+        }
+        prefetchNextTrack()
+    }
+
+    /**
+     * A download that lands while its song waits next in line: the prefetch watcher
+     * already ran (and may have swapped a stream in), so run it again; it now finds
+     * the row's file and points the slot at it.
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private fun watchNextUpDownload() {
+        scope.launch {
+            playerState
+                .map { it.currentIndex }
+                .distinctUntilChanged()
+                .flatMapLatest {
+                    val nextId = nextUpTrackId() ?: return@flatMapLatest flowOf(false)
+                    trackDao.observeById(nextId).map { it?.isDownloaded == true }.distinctUntilChanged().drop(1)
+                }
+                .catch { e -> Log.w(TAG, "next-up download watch stopped: ${e.message}") }
+                .collect { downloaded -> if (downloaded) prefetchNextTrack() }
+        }
+    }
+
+    /** The track id in the slot Media3 plays next, or null when there is none. */
+    private fun nextUpTrackId(): Long? {
+        val controller = controllerDeferred ?: return null
+        val index = controller.nextMediaItemIndex
+        if (index !in 0 until controller.mediaItemCount) return null
+        return controller.getMediaItemAt(index).mediaMetadata.extras?.getLong(EXTRA_TRACK_ID, -1L)?.takeIf { it > 0L }
     }
 
     private val _playerState = MutableStateFlow(PlayerState())
@@ -387,6 +462,14 @@ class PlayerRepositoryImpl @Inject constructor(
      * Gating the poll on `isPlaying` inside the flow fixes every collector at
      * once, whatever their scope — measured at 56 mAh/5h49m of cached-state
      * drain before the fix.
+     *
+     * [ListeningRecorder] now collects only while repeat-one is on, so with
+     * the screen off and repeat off nobody collects and the ticker doesn't
+     * run at all. A collector that arrives after such a gap must not start
+     * from the position of minutes ago (the recorder would read the jump to
+     * the real one as a repeat-one loop): `replayExpirationMillis = 0` drops
+     * the last value when the last collector leaves, and the restarted ticker
+     * emits the live position at once.
      */
     override val currentPosition: Flow<Long> = positionTicker(
         playerState = _playerState,
@@ -394,7 +477,7 @@ class PlayerRepositoryImpl @Inject constructor(
         readPositionMs = { controllerDeferred?.currentPosition ?: 0L },
     )
         .flowOn(Dispatchers.Main)
-        .shareIn(scope, SharingStarted.WhileSubscribed(), replay = 1)
+        .shareAsPositionTicker(scope)
 
     /** Cached [MediaController] instance; null until [ensureController] succeeds.
      * Internal as a test seam: gate/queue tests inject a mock controller here. */
@@ -528,6 +611,12 @@ class PlayerRepositoryImpl @Inject constructor(
      */
     private val prefetchInFlight: MutableSet<Long> =
         java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+    /**
+     * Bumped by [reresolveNextStream]. A prefetch whose resolve was in flight across a bump may
+     * hold the old quality's URL, so it resolves again rather than put that in the next slot.
+     */
+    @Volatile private var streamQualityChanges = 0
 
     private val cascadeGuard = StreamErrorCascadeGuard()
     private val _streamingHaltedEvents = MutableSharedFlow<StreamingHaltedEvent>(
@@ -668,7 +757,8 @@ class PlayerRepositoryImpl @Inject constructor(
                 controller.shuffleModeEnabled,
             )
         }
-        _userMessages.tryEmit("No earlier song is available offline right now.")
+        // Not "offline": that's the mode's name (2026-11-01).
+        _userMessages.tryEmit("No earlier song can play right now.")
     }
 
     /**
@@ -799,10 +889,12 @@ class PlayerRepositoryImpl @Inject constructor(
         // lazily; local playback errors already skip safely when encountered.
         // Construction stays on IO for the selected SAF probe and the large
         // allocation, but tap-to-audio no longer scales with filesystem work.
+        val streamOk = streamAllowed()
         val builtItems = withContext(Dispatchers.IO) {
             tracks.mapIndexedNotNull { index, track ->
                 track.toInitialQueueMediaItem(
                     validateLocalFile = index == safeStart,
+                    streamAllowed = streamOk,
                 )?.let { Triple(index, track, it) }
             }
         }
@@ -813,23 +905,29 @@ class PlayerRepositoryImpl @Inject constructor(
             Log.i(TAG, "setQueue: superseded by a later one while building, dropped")
             return
         }
-        // Every built item is accepted: streaming is always allowed, so a
-        // stash-resolve:// placeholder is as legitimate a queue entry as a
-        // file:// one. (Until 2026-09-17 Offline mode dropped the placeholders.)
+        // Every built item is accepted: in Stream only a stash-resolve:// placeholder is as
+        // legitimate a queue entry as a file:// one, and in Download mode none was built.
         val acceptedItems = builtItems
         val playable = acceptedItems.map { it.second }
         val items = acceptedItems.map { it.third }
         if (items.isEmpty()) {
-            _userMessages.tryEmit("Nothing in this queue is playable right now.")
+            _userMessages.tryEmit(if (streamOk) "Nothing in this queue is playable right now." else DOWNLOAD_MODE_MESSAGE)
             return
         }
         // startIndex maps through the playable filter by position, not by track
-        // id: a song queued twice starts at the copy that was tapped.
+        // id: a song queued twice starts at the copy that was tapped. In Download mode a
+        // play from the top (Play, Shuffle, a mix tile) whose first song isn't on the phone
+        // starts at the first one that is; a tap on a later song still says why it won't play.
         val startInPlayable = acceptedItems.indexOfFirst { it.first == safeStart }
+            .let { if (it < 0 && !streamOk && safeStart == 0) 0 else it }
         if (startInPlayable < 0) {
             _userMessages.tryEmit(
-                if (tracks[safeStart].isScannedSong) SCANNED_FILE_MISSING_MESSAGE
-                else "That song isn't available offline right now.",
+                when {
+                    tracks[safeStart].isScannedSong -> SCANNED_FILE_MISSING_MESSAGE
+                    !streamOk -> DOWNLOAD_MODE_MESSAGE
+                    // Online, and the player refused it: confirmed to have nowhere to stream from.
+                    else -> "That song isn't available right now."
+                },
             )
             // Don't fall back to track 0 — bail rather than silently substitute.
             return
@@ -883,9 +981,11 @@ class PlayerRepositoryImpl @Inject constructor(
             }
             // Timeline position of each rest entry (before + first + after), or -1 when the player can't take it.
             val all = rest.before + mine + rest.after
+            val streamOk = streamAllowed()
             val built = withContext(Dispatchers.IO) {
                 all.mapIndexed { i, t ->
-                    if (i >= rest.before.size && i < rest.before.size + mine.size) null else t.toInitialQueueMediaItem(validateLocalFile = false)
+                    if (i >= rest.before.size && i < rest.before.size + mine.size) null
+                    else t.toInitialQueueMediaItem(validateLocalFile = false, streamAllowed = streamOk)
                 }
             }
             val beforeItems = (rest.before.indices).mapNotNull { built[it] }
@@ -1025,6 +1125,7 @@ class PlayerRepositoryImpl @Inject constructor(
      *  - The next track has a usable downloaded file (no resolve needed).
      *  - The cache already has a fresh entry (expires in >60s).
      *  - The next track isn't streamable.
+     *  - Data saver applies (the switch on, a metered network): no look-ahead on mobile data.
      *
      * Failures are logged and swallowed — the original (possibly stale)
      * MediaItem stays in place and [RefreshingDataSourceFactory] handles
@@ -1040,7 +1141,20 @@ class PlayerRepositoryImpl @Inject constructor(
             .mediaMetadata.extras?.getLong(EXTRA_TRACK_ID, -1L) ?: return
         // An All Songs file plays from its file or not at all: nothing to resolve or swap in.
         if (isScannedTrackId(nextId)) return
-        val next = tracks.firstOrNull { it.id == nextId } ?: return
+        val queued = tracks.firstOrNull { it.id == nextId } ?: return
+        // The queue's copy is as old as the queue: a download that finished since is only
+        // in the row. Read it, so the next song plays its new file instead of a stream.
+        val row = withContext(Dispatchers.IO) { trackDao.getById(nextId) }
+        val next = if (row != null && row.isDownloaded && !queued.isDownloaded) {
+            queued.copy(
+                isDownloaded = true,
+                filePath = row.filePath,
+                fileSizeBytes = row.fileSizeBytes,
+                fileFormat = row.fileFormat,
+            )
+        } else {
+            queued
+        }
         val nextLocalPath = next.filePath
         val hasRecordedDownload = next.isDownloaded && !nextLocalPath.isNullOrBlank()
         val knownTooSmall = next.fileSizeBytes in 1 until StashConstants.MIN_PLAYABLE_LOCAL_BYTES
@@ -1052,8 +1166,13 @@ class PlayerRepositoryImpl @Inject constructor(
             val hasUsableLocal = withContext(Dispatchers.IO) {
                 filePathExistsOnDisk(nextLocalPath)
             }
-            if (hasUsableLocal) return
+            if (hasUsableLocal) {
+                if (next !== queued) playNextFromFile(controller, nextTimelineIndex, next)
+                return
+            }
         }
+        // Download mode never streams, so there is nothing to warm.
+        if (!streamAllowed()) return
         // Only a CONFIRMED-unstreamable row (checked and false) is skipped.
         // Synced-library rows are all "never checked" (isStreamable=false,
         // isStreamableCheckedAt=null) — the bare-flag gate silently killed
@@ -1063,15 +1182,32 @@ class PlayerRepositoryImpl @Inject constructor(
         // own link at open(); the online resolver below must never see it.
         if (next.source == com.stash.core.model.MusicSource.CLOUD) return
 
+        // Asked BEFORE the cache is read: the policy re-takes its decision, so a link saved
+        // under another one (a FLAC link from Wi-Fi, now on mobile data) is dropped first.
+        val dataSaver = qualityPolicy?.dataSaverApplies() == true
+
         // Fresh-cache check — avoid redundant resolve work when the URL is
         // good. Still upgrade the timeline slot before returning: the URL may
         // have been cached by LazyResolvingDataSource (cold jump), which can't
         // touch item metadata, so the placeholder would keep its unstamped
-        // extras and Now Playing would read the "opus" fallback for it.
-        val cached = streamUrlCache.get(next.id)
+        // extras and Now Playing would read the "opus" fallback for it. Under
+        // Data saver the cache serves no lossless link (StreamUrlCache.get), so
+        // only a link resolved under Data saver is swapped in: no new bytes.
+        val cached = streamUrlCache.get(next.id)?.takeIf {
+            (next.soundCloudId == null && next.source != com.stash.core.model.MusicSource.SOUNDCLOUD) || it.origin == "soundcloud"
+        }
         val nowMs = System.currentTimeMillis()
         if (cached != null && cached.expiresAtMs > nowMs + PREFETCH_FRESH_THRESHOLD_MS) {
             refreshControllerMediaItem(controller, nextTimelineIndex, next, cached)
+            return
+        }
+
+        // Data saver on mobile data: no speculative look-ahead. The slot stays a placeholder,
+        // which ExoPlayer's own buffering resolves ahead of the transition (LazyResolvingDataSource),
+        // so the song still starts on time; a song skipped before then costs nothing. After the
+        // fresh-cache upgrade above (no network) and the downloaded-file swap (none either).
+        if (dataSaver) {
+            Log.d(TAG, "prefetch-next skipped id=${next.id}: Data saver on a metered network")
             return
         }
 
@@ -1083,10 +1219,11 @@ class PlayerRepositoryImpl @Inject constructor(
         // capped lossless source (verified on-device 2026-06-21). Claim the id; a racing call for
         // the same next-up returns immediately and lets the winner cache it.
         if (!prefetchInFlight.add(next.id)) return
+        val qualityChangesAtStart = streamQualityChanges
 
         val t0 = System.currentTimeMillis()
         Log.d("LATDIAG", "prefetch-next-start id=${next.id} youtubeId=${next.youtubeId}")
-        val entity = trackDao.getById(next.id) ?: next.toEntity()
+        val entity = row ?: next.toEntity()
         val resolved = try {
             // Full-fat resolve (allowYtDlp = true) for the single next-up track
             // during active playback, so auto-advance stays seamless during a
@@ -1104,6 +1241,13 @@ class PlayerRepositoryImpl @Inject constructor(
             return
         }
         prefetchInFlight.remove(next.id)
+        if (qualityChangesAtStart != streamQualityChanges) {
+            // The streaming quality changed while this resolved (reresolveNextStream found it in
+            // flight and left it to finish): its answer may be the old quality's. Ask again.
+            Log.d("LATDIAG", "prefetch-next-end id=${next.id} outcome=quality-changed; resolving again")
+            prefetchNextTrack()
+            return
+        }
         if (resolved == null) {
             Log.d("LATDIAG", "prefetch-next-end id=${next.id} dt=${System.currentTimeMillis() - t0}ms outcome=null")
             return
@@ -1120,6 +1264,39 @@ class PlayerRepositoryImpl @Inject constructor(
         // The URL is also in StreamUrlCache, so even an unswapped placeholder
         // opens instantly on a cache hit.
         refreshControllerMediaItem(controller, nextTimelineIndex, next, resolved)
+    }
+
+    /**
+     * The next song was resolved when this one started, under the old setting: its URL is
+     * cached, and usually in its slot too, so a quality change would only have reached the
+     * song after it. The slot goes back to a placeholder and the cached URL is dropped, then
+     * the prefetch resolves it again under the new setting. Where that prefetch stops short
+     * (a speculative resolve never asks the Tidal relay), the placeholder resolves when the
+     * song plays, still under the new setting. Either resolve also drops every other cached
+     * URL ([com.stash.core.media.streaming.StreamQualityPolicy] sees the change).
+     */
+    override suspend fun reresolveNextStream() {
+        if (listenTogetherOwnsQueue) return
+        val controller = controllerDeferred ?: return
+        val index = controller.nextMediaItemIndex
+        // No next song, or it is this one again (a one-song queue on repeat): a new source would restart it.
+        if (index !in 0 until controller.mediaItemCount || index == controller.currentMediaItemIndex) return
+        val item = controller.getMediaItemAt(index)
+        val nextId = item.mediaMetadata.extras?.getLong(EXTRA_TRACK_ID, -1L) ?: return
+        streamQualityChanges++
+        streamUrlCache.invalidate(nextId)
+        // Only a slot holding a resolved stream: a file, a placeholder or a cloud song is already right.
+        val scheme = item.localConfiguration?.uri?.scheme
+        val queued = currentQueueTracks.firstOrNull { it.id == nextId }
+        if ((scheme == "https" || scheme == "http") && queued != null) {
+            val extras = Bundle(item.mediaMetadata.extras ?: Bundle()).apply { streamStampKeys.forEach(::remove) }
+            val placeholder = item.buildUpon()
+                .setUri(queued.toStreamPlaceholderMediaItem().localConfiguration?.uri)
+                .setMediaMetadata(item.mediaMetadata.buildUpon().setExtras(extras).build())
+                .build()
+            replaceMediaItemKeepingShuffle(controller, index, placeholder)
+        }
+        prefetchNextTrack()
     }
 
     /**
@@ -1140,6 +1317,10 @@ class PlayerRepositoryImpl @Inject constructor(
         resolved: StreamUrl,
     ): Boolean {
         if (timelineIndex !in 0 until controller.mediaItemCount) return false
+        // Playback reached the slot while it resolved (a re-resolve late in a song, a short
+        // song), or it is the one playing (a one-song queue on repeat): a new source would
+        // restart it. The URL stays cached for the next time it is opened.
+        if (!isStillNextUp(controller.currentMediaItemIndex, controller.nextMediaItemIndex, timelineIndex)) return false
         val item = controller.getMediaItemAt(timelineIndex)
         val itemTrackId = item.mediaMetadata.extras?.getLong(EXTRA_TRACK_ID) ?: return false
         if (itemTrackId != next.id) return false
@@ -1165,11 +1346,43 @@ class PlayerRepositoryImpl @Inject constructor(
         }
         val refreshed = item.buildUpon()
             // A cloud copy keeps the placeholder (its source has the fallback); see buildMediaItemForTrack.
-            .apply { if (resolved.origin != com.stash.core.media.streaming.CloudCopyFinder.ORIGIN) setUri(resolved.url) }
+            .apply { if (resolved.origin != com.stash.core.media.streaming.CloudCopyFinder.ORIGIN && resolved.origin != "soundcloud") setUri(resolved.url) }
             .setMediaMetadata(refreshedMeta.build())
             .build()
         replaceMediaItemKeepingShuffle(controller, timelineIndex, refreshed)
         return true
+    }
+
+    /**
+     * Points the next-up's [timelineIndex] slot at [next]'s downloaded file: its
+     * download finished after the queue was built, and the slot still holds a
+     * placeholder or a stream an earlier prefetch swapped in. Keeps the slot's
+     * metadata (art, extras) minus the stream stamps, which describe a stream it no
+     * longer plays, and updates the queue's copy so later reads see the file.
+     */
+    private fun playNextFromFile(controller: MediaController, timelineIndex: Int, next: Track) {
+        if (!isStillNextUp(controller.currentMediaItemIndex, controller.nextMediaItemIndex, timelineIndex)) {
+            // Playback moved while the row and file were read (an advance, a tap): the slot may be the one
+            // playing now, and swapping its source would restart it mid-song (review on #730).
+            Log.d(TAG, "next-up id=${next.id} isn't next any more; leaving its slot alone")
+            return
+        }
+        if (timelineIndex !in 0 until controller.mediaItemCount) return
+        val item = controller.getMediaItemAt(timelineIndex)
+        if (item.mediaMetadata.extras?.getLong(EXTRA_TRACK_ID) != next.id) return
+        val fileItem = next.toMediaItem()
+        val extras = Bundle(item.mediaMetadata.extras ?: Bundle()).apply {
+            streamStampKeys.forEach(::remove)
+            putBoolean(EXTRA_TRACK_IS_STREAMABLE, false)
+        }
+        val refreshed = item.buildUpon()
+            .setUri(fileItem.localConfiguration?.uri)
+            .setRequestMetadata(fileItem.requestMetadata)
+            .setMediaMetadata(item.mediaMetadata.buildUpon().setExtras(extras).build())
+            .build()
+        replaceMediaItemKeepingShuffle(controller, timelineIndex, refreshed)
+        currentQueueTracks = currentQueueTracks.map { if (it.id == next.id) next else it }
+        Log.d(TAG, "next-up id=${next.id} downloaded since it was queued; plays its file")
     }
 
     /**
@@ -1228,6 +1441,8 @@ class PlayerRepositoryImpl @Inject constructor(
         keepCurrent: Boolean,
     ): RadioStartResult {
         val controller = ensureController() ?: return RadioStartResult.PlayerNotReady
+        // A station is songs found online: Download mode plays only what is on the phone.
+        if (!streamAllowed()) return RadioStartResult.DownloadMode
         val (session, generated) = radioGenerator.start(seed)
         if (generated.isEmpty()) return RadioStartResult.NoStation
         // Library ids before queueing: the generator's ids are videoId hashes with no row, so a
@@ -1308,7 +1523,7 @@ class PlayerRepositoryImpl @Inject constructor(
             val session = radioSession ?: return
             val batch = radioGenerator.nextBatch(session)
             if (batch.isEmpty()) return
-            if (!radioActive) {
+            if (!radioActive || !streamAllowed()) {
                 stopRadio()
                 return
             }
@@ -1385,13 +1600,28 @@ class PlayerRepositoryImpl @Inject constructor(
     }
 
     /**
-     * A track may join the queue unless it is confirmed unavailable. Streaming
-     * is always allowed — only connectivity and the cellular setting can refuse
-     * it, and they do so at resolve time — so a not-yet-downloaded track enters
-     * as a stash-resolve:// placeholder and resolves when it is reached. Until
-     * 2026-09-17 Offline mode also demanded a usable local file here.
+     * In Stream only a track may join the queue unless it is confirmed unavailable:
+     * only connectivity and the cellular setting can refuse it, at resolve time, so a
+     * not-yet-downloaded track enters as a stash-resolve:// placeholder. In Download
+     * mode it needs a usable file on the phone.
      */
-    private fun Track.isPlayableForQueueAppend(): Boolean = !isUnavailableForDisplay
+    private fun Track.isPlayableForQueueAppend(streamAllowed: Boolean): Boolean =
+        if (streamAllowed) !isUnavailableForDisplay else hasUsableLocalFile()
+
+    /** A downloaded (or All Songs) file that is on the phone and big enough to play. */
+    private fun Track.hasUsableLocalFile(): Boolean {
+        val localPath = filePath
+        return (isDownloaded || isScannedSong) && !localPath.isNullOrBlank() &&
+            fileSizeBytes !in 1 until StashConstants.MIN_PLAYABLE_LOCAL_BYTES &&
+            filePathExistsOnDisk(localPath)
+    }
+
+    /**
+     * False in Download mode: the player then plays only what is on the phone, never a
+     * stream (owner, 2026-10-29: Download mode is offline again). Stream only streams
+     * whatever isn't downloaded.
+     */
+    private suspend fun streamAllowed(): Boolean = streamingPreference.current()
 
     /**
      * The controller's shuffle walk (timeline indexes in play order), or null with
@@ -1432,6 +1662,32 @@ class PlayerRepositoryImpl @Inject constructor(
             (reason == null || reason == Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED) &&
             (0 until controller.mediaItemCount).none { controller.getMediaItemAt(it).mediaId == previous.mediaId }
         playHistory.moveTo(entry, previousGone)
+    }
+
+    override suspend fun learnArtwork(arts: Map<Long, String>) {
+        if (arts.isEmpty()) return
+        val controller = ensureController() ?: return
+        withContext(Dispatchers.Main.immediate) {
+            // The rows Up next shows (the logical queue), then the player's items: the playing one is the notification's
+            currentQueueTracks = QueueArt.fill(currentQueueTracks, arts)
+            val withArt = HashMap<Int, MediaItem>()
+            for (i in 0 until controller.mediaItemCount) {
+                val item = controller.getMediaItemAt(i)
+                val id = item.mediaMetadata.extras?.getLong(EXTRA_TRACK_ID, -1L)?.takeIf { it > 0 } ?: item.mediaId.toLongOrNull() ?: continue
+                val art = arts[id] ?: continue
+                if (item.mediaMetadata.artworkUri != null) continue
+                // Metadata only: the same media (its URI, its Play next tag), so the player updates it in place (every
+                // source here takes a metadata-only change, ResolveFirstMediaSource included): the playing song goes on,
+                // the others keep their preparation, the shuffle order is untouched
+                withArt[i] = item.buildUpon().setMediaMetadata(item.mediaMetadata.buildUpon().setArtworkUri(Uri.parse(art)).build()).build()
+            }
+            // Neighbours in one call: each call is a timeline change (and a queue refresh for Android Auto)
+            val runs = QueueArt.runs(withArt.keys)
+            for (run in runs) controller.replaceMediaItems(run.first, run.last + 1, run.map { withArt.getValue(it) })
+            timelineDirty = true
+            updateState(controller)
+            Log.d(TAG, "learnArtwork: ${arts.size} covers, ${withArt.size} player items in ${runs.size} replaces")
+        }
     }
 
     /** replaceMediaItem, but under shuffle the play order is put back exactly as it was. */
@@ -1485,16 +1741,17 @@ class PlayerRepositoryImpl @Inject constructor(
      */
     override suspend fun addNext(track: Track): Boolean {
         val controller = ensureController() ?: return false
+        val streamOk = streamAllowed()
         val playable = track.takeIf {
-            it.isPlayableForQueueAppend()
+            withContext(Dispatchers.IO) { it.isPlayableForQueueAppend(streamOk) }
         }
         if (playable == null) {
-            _userMessages.tryEmit("Nothing in this queue is playable right now.")
+            _userMessages.tryEmit(if (streamOk) "Nothing in this queue is playable right now." else DOWNLOAD_MODE_MESSAGE)
             return false
         }
         val queueTrack = playable.withQueueIdentity()
-        if (!queueTrack.isPlayableForQueueAppend()) {
-            _userMessages.tryEmit("Nothing in this queue is playable right now.")
+        if (!withContext(Dispatchers.IO) { queueTrack.isPlayableForQueueAppend(streamOk) }) {
+            _userMessages.tryEmit(if (streamOk) "Nothing in this queue is playable right now." else DOWNLOAD_MODE_MESSAGE)
             return false
         }
         // Off the main thread: a downloaded track's disk check is a ContentResolver
@@ -1593,16 +1850,17 @@ class PlayerRepositoryImpl @Inject constructor(
 
     override suspend fun addToQueue(track: Track): Boolean {
         val controller = ensureController() ?: return false
+        val streamOk = streamAllowed()
         val playable = track.takeIf {
-            it.isPlayableForQueueAppend()
+            withContext(Dispatchers.IO) { it.isPlayableForQueueAppend(streamOk) }
         }
         if (playable == null) {
-            _userMessages.tryEmit("Nothing in this queue is playable right now.")
+            _userMessages.tryEmit(if (streamOk) "Nothing in this queue is playable right now." else DOWNLOAD_MODE_MESSAGE)
             return false
         }
         val queueTrack = playable.withQueueIdentity()
-        if (!queueTrack.isPlayableForQueueAppend()) {
-            _userMessages.tryEmit("Nothing in this queue is playable right now.")
+        if (!withContext(Dispatchers.IO) { queueTrack.isPlayableForQueueAppend(streamOk) }) {
+            _userMessages.tryEmit(if (streamOk) "Nothing in this queue is playable right now." else DOWNLOAD_MODE_MESSAGE)
             return false
         }
         // Off the main thread: a downloaded track's disk check is a ContentResolver
@@ -1626,9 +1884,10 @@ class PlayerRepositoryImpl @Inject constructor(
     override suspend fun addToQueue(tracks: List<Track>): Boolean {
         if (tracks.isEmpty()) return false
         val controller = ensureController() ?: return false
-        val playable = tracks.filter { it.isPlayableForQueueAppend() }
+        val streamOk = streamAllowed()
+        val playable = withContext(Dispatchers.IO) { tracks.filter { it.isPlayableForQueueAppend(streamOk) } }
         if (playable.isEmpty()) {
-            _userMessages.tryEmit("Nothing in this queue is playable right now.")
+            _userMessages.tryEmit(if (streamOk) "Nothing in this queue is playable right now." else DOWNLOAD_MODE_MESSAGE)
             return false
         }
         val persistedTracks = playable.map { it.withQueueIdentity() }
@@ -1730,9 +1989,13 @@ class PlayerRepositoryImpl @Inject constructor(
             return false
         }
 
+        if (!streamAllowed()) {
+            if (reportUnavailable) _userMessages.tryEmit(DOWNLOAD_MODE_MESSAGE)
+            return false
+        }
         if (target.isUnavailableForDisplay || !connectivity.isConnected()) {
             if (reportUnavailable) {
-                _userMessages.tryEmit("That song isn't available offline right now.")
+                _userMessages.tryEmit(FILE_MISSING_CANT_STREAM_MESSAGE)
             }
             return false
         }
@@ -1812,7 +2075,8 @@ class PlayerRepositoryImpl @Inject constructor(
         // A session owns the player's queue (the sheet isn't offered there); an empty player has
         // no queue to put a song back into.
         if (listenTogetherOwnsQueue || controller.mediaItemCount == 0) return false
-        if (!track.isPlayableForQueueAppend()) return false
+        val streamOk = streamAllowed()
+        if (!withContext(Dispatchers.IO) { track.isPlayableForQueueAppend(streamOk) }) return false
         val queueTrack = track.withQueueIdentity()
         // Off the main thread: a downloaded track's disk check is a ContentResolver query on a
         // SAF tree, which a slow provider stalls (as in addNext).
@@ -2292,6 +2556,8 @@ class PlayerRepositoryImpl @Inject constructor(
         albumArtUrl = thumbnailUrl,
         isDownloaded = false,
         isStreamable = true,
+        musicVideoType = musicVideoType,
+        explicit = explicit,
     )
 
     private suspend fun playFromStreamInner(item: TrackItem, trackId: Long): StreamRoutingResult {
@@ -2306,6 +2572,10 @@ class PlayerRepositoryImpl @Inject constructor(
         // first tap cached, second tap returned the FIRST track's URL and
         // Media3 no-op'd setMediaItem on the matching mediaId. Repeat taps
         // of the same videoId still hit the cache (intended TTL behaviour).
+        // The library row the tap landed on, when ensureTrackPersisted found one: its art is what
+        // the on-stream art swap below judges. The result's own thumbnail is a YouTube video frame,
+        // so judging that replaced a good library cover with whatever copy the chain picked.
+        val stored = trackDao.getById(trackId)
         val transient = TrackEntity(
             id = trackId,
             title = item.title,
@@ -2314,12 +2584,19 @@ class PlayerRepositoryImpl @Inject constructor(
             durationMs = (item.durationSeconds * 1000).toLong(),
             isDownloaded = false,
             isStreamable = true,
-            albumArtUrl = item.thumbnailUrl,
+            albumArtUrl = stored?.albumArtUrl?.takeIf { it.isNotBlank() } ?: item.thumbnailUrl,
             // Search results carry a YT videoId — propagate it so the
             // YouTube fallback resolver can extract directly when Qobuz
             // doesn't have the track. Without this the transient row's
             // youtubeId stays null and YouTubeStreamResolver bails.
             youtubeId = item.videoId,
+            // A YouTube result, whatever the library row is: the entity's default (SPOTIFY) made
+            // the lossless lookups trust the result's length as a song's. A music video's is an
+            // edit's (Shook Ones' top card is the 4:25 video; the album cut is 5:26), and Tidal
+            // then picked the copy nearest the video.
+            source = com.stash.core.model.MusicSource.YOUTUBE,
+            musicVideoType = item.musicVideoType,
+            explicit = item.explicit ?: stored?.explicit,
         )
         val result = buildMediaItemForTrack(transient)
         if (result is StreamRoutingResult.Item) {
@@ -2340,9 +2617,8 @@ class PlayerRepositoryImpl @Inject constructor(
      *    streaming is enabled — caching what you already have is free.
      * 2. No validated internet → [StreamRoutingResult.NoConnectivity].
      *    Includes airplane mode, captive-portal-not-yet-accepted, and
-     *    any other "associated but no real internet" state. (There is no
-     *    "streaming off" step: streaming is always allowed; the Download
-     *    switch only decides what sync writes to disk.)
+     *    any other "associated but no real internet" state. Before it, Download
+     *    mode → [StreamRoutingResult.DownloadMode]: it plays only what is on the phone.
      * 3. Cellular + cellular pref off → [StreamRoutingResult.CellularRefused].
      *    The user has a data plan they want to protect.
      * 4. URL cache hit → use the cached signed URL.
@@ -2381,7 +2657,9 @@ class PlayerRepositoryImpl @Inject constructor(
                             )
                             .setExtras(Bundle().apply {
                                 putLong(EXTRA_TRACK_ID, track.id)
+                            putSoundCloudMetadata(track.toDomain())
                                 track.youtubeId?.let { putString(EXTRA_TRACK_YOUTUBE_ID, it) }
+                                putTrackOrigin(track.source, track.spotifyUri)
                                 if (track.durationMs > 0) putLong(EXTRA_TRACK_DURATION_MS, track.durationMs)
                                 // This branch plays the local file, so it is never "stream-only",
                                 // whatever the row's is_streamable says: rows first seen via Search,
@@ -2394,6 +2672,7 @@ class PlayerRepositoryImpl @Inject constructor(
                     .build()
             )
         }
+        if (!streamAllowed()) return StreamRoutingResult.DownloadMode
         if (!connectivity.isConnected()) return StreamRoutingResult.NoConnectivity
         if (connectivity.isCellular() && !streamingPreference.streamOnCellular.first()) {
             return StreamRoutingResult.CellularRefused
@@ -2403,7 +2682,12 @@ class PlayerRepositoryImpl @Inject constructor(
             return StreamRoutingResult.Item(track.toDomain().toStreamPlaceholderMediaItem())
         }
 
-        val cached = streamUrlCache.get(track.id)
+        // Asked BEFORE the cache is read: a changed decision (Data saver now in effect) drops the
+        // links saved under the old one, and the cache serves no lossless link under Data saver.
+        qualityPolicy?.dataSaverApplies()
+        val cached = streamUrlCache.get(track.id)?.takeIf {
+            (track.soundCloudId == null && track.source != com.stash.core.model.MusicSource.SOUNDCLOUD) || it.origin == "soundcloud"
+        }
         val stream = cached ?: streamResolver.resolve(
             track,
             allowYouTube = allowYouTube,
@@ -2455,10 +2739,12 @@ class PlayerRepositoryImpl @Inject constructor(
                 // A cloud copy plays through the placeholder, whose source falls back to the stream
                 // chain when the copy won't open; the stash-cloud:// address itself has no fallback.
                 .setUri(
-                    if (stream.origin == com.stash.core.media.streaming.CloudCopyFinder.ORIGIN) {
+                    if (stream.origin == com.stash.core.media.streaming.CloudCopyFinder.ORIGIN || stream.origin == "soundcloud") {
                         com.stash.core.media.streaming.stashResolveUri(
                             track.id, track.youtubeId, track.title, track.artist, track.album, track.durationMs, track.isrc,
-                        )
+                        ).let { uri ->
+                            if (stream.origin == "soundcloud") uri.buildUpon().appendQueryParameter("sc", "1").build() else uri
+                        }
                     } else {
                         Uri.parse(stream.url)
                     },
@@ -2473,7 +2759,9 @@ class PlayerRepositoryImpl @Inject constructor(
                         )
                         .setExtras(Bundle().apply {
                             putLong(EXTRA_TRACK_ID, track.id)
+                            putSoundCloudMetadata(track.toDomain())
                             track.youtubeId?.let { putString(EXTRA_TRACK_YOUTUBE_ID, it) }
+                            putTrackOrigin(track.source, track.spotifyUri)
                             if (track.durationMs > 0) putLong(EXTRA_TRACK_DURATION_MS, track.durationMs)
                             putBoolean(EXTRA_TRACK_IS_STREAMABLE, track.isStreamable)
                             // Surface the actual format Qobuz served so Now Playing
@@ -2484,6 +2772,7 @@ class PlayerRepositoryImpl @Inject constructor(
                             stream.sampleRateHz?.let { putInt(EXTRA_STREAM_SAMPLE_RATE, it) }
                             stream.bitrateKbps?.let { putInt(EXTRA_STREAM_BITRATE, it) }
                             stream.origin?.let { putString(EXTRA_STREAM_ORIGIN, it) }
+                            if (stream.origin == "soundcloud") putBoolean(EXTRA_SOUNDCLOUD_PREVIEW, stream.isPreview)
                         })
                         .build()
                 )
@@ -2922,6 +3211,8 @@ class PlayerRepositoryImpl @Inject constructor(
         val failedId = failedItem.mediaMetadata.extras
             ?.getLong(EXTRA_TRACK_ID, -1L) ?: return false
         if (isScannedTrackId(failedId)) return false
+        // Download mode never streams: a broken download is skipped, not swapped for a stream.
+        if (!streamAllowed()) return false
         if (!connectivity.isConnected()) return false
         if (connectivity.isCellular() && !streamingPreference.streamOnCellular.first()) return false
         val mediaTrackId = failedItem.mediaId.toLongOrNull() ?: return false
@@ -2973,7 +3264,9 @@ class PlayerRepositoryImpl @Inject constructor(
                 isrc = track.isrc,
             )
         }
-        val replacement = failedItem.buildUpon().setUri(placeholder).build()
+        val replacement = failedItem.buildUpon().setUri(
+            if (track.soundCloudId != null) placeholder.buildUpon().appendQueryParameter("sc", "1").build() else placeholder,
+        ).build()
         replaceMediaItemKeepingShuffle(controller, failedIndex, replacement)
         controller.prepare()
         controller.play()
@@ -3056,7 +3349,7 @@ class PlayerRepositoryImpl @Inject constructor(
                 "silent-skip: offline + stream-only '$failingTitle' — end of queue, pausing",
             )
             controller.pause()
-            _userMessages.tryEmit("End of offline Mix")
+            _userMessages.tryEmit("No internet connection, and the rest of this queue isn't downloaded.")
         }
     }
 
@@ -3157,6 +3450,7 @@ class PlayerRepositoryImpl @Inject constructor(
             stream.sampleRateHz?.let { putInt(EXTRA_STREAM_SAMPLE_RATE, it) }
             stream.bitrateKbps?.let { putInt(EXTRA_STREAM_BITRATE, it) }
             stream.origin?.let { putString(EXTRA_STREAM_ORIGIN, it) }
+            if (stream.origin == "soundcloud") putBoolean(EXTRA_SOUNDCLOUD_PREVIEW, stream.isPreview)
         }
         // Upgrade the artwork to the source's square cover (e.g. the high-res
         // Qobuz cover) when the current art is a blank/low-res YouTube video
@@ -3202,7 +3496,8 @@ class PlayerRepositoryImpl @Inject constructor(
      * short-circuits the moment the extras DO carry an origin.
      */
     private fun withLiveStreamQuality(track: Track, item: MediaItem?): Track {
-        if (track.streamOrigin != null) return track // extras already carried it
+        if (item?.localConfiguration?.uri?.scheme in listOf("file", "content")) return track
+        if (track.streamOrigin != null && track.streamOrigin != "soundcloud") return track
         val trackId = item?.mediaMetadata?.extras?.getLong(EXTRA_TRACK_ID, 0L) ?: 0L
         if (trackId == 0L) return track
         // A downloaded row has no cache entry and must keep Room's truth — its
@@ -3215,6 +3510,8 @@ class PlayerRepositoryImpl @Inject constructor(
             sampleRateHz = stream.sampleRateHz ?: track.sampleRateHz,
             qualityKbps = stream.bitrateKbps ?: track.qualityKbps,
             streamOrigin = stream.origin ?: track.streamOrigin,
+            soundCloudPreview = if (stream.origin == "soundcloud") stream.isPreview else track.soundCloudPreview,
+            isDownloaded = if (stream.origin == "soundcloud") false else track.isDownloaded,
         )
     }
 
@@ -3415,6 +3712,11 @@ class PlayerRepositoryImpl @Inject constructor(
     companion object {
         private const val TAG = "StashPlayer"
 
+        /** The extras that describe the stream a slot plays, for Now Playing's quality line. */
+        private val streamStampKeys = listOf(
+            EXTRA_STREAM_CODEC, EXTRA_STREAM_BIT_DEPTH, EXTRA_STREAM_SAMPLE_RATE, EXTRA_STREAM_BITRATE, EXTRA_STREAM_ORIGIN,
+        )
+
         /**
          * Separate tag for the Now Playing quality stamp so its (chatty,
          * per-state-refresh) diagnostics can be filtered independently of
@@ -3434,6 +3736,12 @@ class PlayerRepositoryImpl @Inject constructor(
         private const val PREFETCH_FRESH_THRESHOLD_MS = 60_000L
 
         /** Shown when an All Songs file can't be played because it isn't where the scan found it. */
+        /** Offline (Download mode in code) refuses a song that isn't on the phone. */
+        internal const val DOWNLOAD_MODE_MESSAGE = "Offline plays only your downloads. Switch to Online to play this."
+
+        /** A downloaded song whose file is gone or broken, and it can't stream instead (no connection, or nowhere to stream from). */
+        internal const val FILE_MISSING_CANT_STREAM_MESSAGE = "That song's file is missing and it can't stream right now."
+
         internal const val SCANNED_FILE_MISSING_MESSAGE =
             "That file isn't there anymore. Rescan your folders: Library, then the disk icon at the top."
 
@@ -3470,6 +3778,7 @@ class PlayerRepositoryImpl @Inject constructor(
      */
     private fun Track.toInitialQueueMediaItem(
         validateLocalFile: Boolean,
+        streamAllowed: Boolean,
     ): MediaItem? {
         val localPath = filePath
         val hasRecordedDownload = isDownloaded && !localPath.isNullOrBlank()
@@ -3481,11 +3790,11 @@ class PlayerRepositoryImpl @Inject constructor(
         // which would resolve an online match by its title and artist.
         if (isScannedSong) return if (hasUsableLocal) toMediaItem() else null
 
-        // Streaming is always allowed: a track without a usable file becomes a
-        // stash-resolve:// placeholder unless it is confirmed unavailable.
+        // In Stream only a track without a usable file becomes a stash-resolve://
+        // placeholder unless it is confirmed unavailable; Download mode leaves it out.
         return when {
             hasUsableLocal -> toMediaItem()
-            isUnavailableForDisplay -> null
+            isUnavailableForDisplay || !streamAllowed -> null
             else -> toStreamPlaceholderMediaItem()
         }
     }
@@ -3506,7 +3815,9 @@ class PlayerRepositoryImpl @Inject constructor(
             durationMs = durationMs,
             isrc = isrc,
         )
-        return toMediaItem().buildUpon().setUri(placeholder).build()
+        return toMediaItem().buildUpon().setUri(
+            if (soundCloudId != null) placeholder.buildUpon().appendQueryParameter("sc", "1").build() else placeholder,
+        ).build()
     }
 
     /**
@@ -3524,6 +3835,7 @@ class PlayerRepositoryImpl @Inject constructor(
             )
             .setExtras(Bundle().apply {
                 putLong(EXTRA_TRACK_ID, id)
+                putSoundCloudMetadata(this@toMediaItem)
                 youtubeId?.let { putString(EXTRA_TRACK_YOUTUBE_ID, it) }
                 if (durationMs > 0) putLong(EXTRA_TRACK_DURATION_MS, durationMs)
                 // "Stream-only" means no local file (as AutoBrowse computes it): a
@@ -3537,8 +3849,8 @@ class PlayerRepositoryImpl @Inject constructor(
                 if (isScannedSong) putString(EXTRA_SCANNED_FILE_FORMAT, fileFormat)
                 // Now Playing rebuilds its Track from these extras: a cloud song must stay one, so
                 // its "find FLAC" / "wrong match" actions stay off and its format stays its own.
+                putTrackOrigin(source, spotifyUri)
                 if (source == com.stash.core.model.MusicSource.CLOUD) {
-                    putString(EXTRA_TRACK_SOURCE, source.name)
                     putString(EXTRA_CLOUD_FILE_FORMAT, fileFormat)
                 }
             })
@@ -3584,6 +3896,7 @@ class PlayerRepositoryImpl @Inject constructor(
         val streamBitrate = extras?.getInt(EXTRA_STREAM_BITRATE, 0)?.takeIf { it > 0 }
         val streamOrigin = extras?.getString(EXTRA_STREAM_ORIGIN)
         val isCloud = extras?.getString(EXTRA_TRACK_SOURCE) == com.stash.core.model.MusicSource.CLOUD.name
+        val youtubeId = extras?.getString(EXTRA_TRACK_YOUTUBE_ID) ?: if (trackId == 0L) mediaId else null
 
         return Track(
             id = trackId,
@@ -3598,13 +3911,13 @@ class PlayerRepositoryImpl @Inject constructor(
             // code (Now Playing's like-state observation, ensure-persisted
             // upsert) can resolve identity without a real DB row
             // (issue #105 follow-up).
-            youtubeId = extras?.getString(EXTRA_TRACK_YOUTUBE_ID)
-                ?: if (trackId == 0L) mediaId else null,
-            source = when {
-                isCloud -> com.stash.core.model.MusicSource.CLOUD
-                trackId == 0L -> com.stash.core.model.MusicSource.YOUTUBE
-                else -> com.stash.core.model.MusicSource.SPOTIFY
-            },
+            soundCloudId = extras?.getString(EXTRA_SOUNDCLOUD_ID),
+            soundCloudPermalink = extras?.getString(EXTRA_SOUNDCLOUD_PERMALINK),
+            soundCloudPreview = extras?.getBoolean(EXTRA_SOUNDCLOUD_PREVIEW, false) == true,
+            isDownloaded = extras?.getBoolean(EXTRA_SOUNDCLOUD_LOCAL, false) == true,
+            youtubeId = youtubeId,
+            spotifyUri = extras?.getString(EXTRA_TRACK_SPOTIFY_URI),
+            source = rebuiltTrackSource(extras, youtubeId),
             cloudUri = localConfiguration?.uri?.toString()?.takeIf { isCloud && it.startsWith(com.stash.core.model.STASH_CLOUD_SCHEME) },
             fileFormat = streamCodec ?: extras?.getString(EXTRA_CLOUD_FILE_FORMAT) ?: "opus",
             bitsPerSample = streamBitDepth,
@@ -3676,6 +3989,15 @@ internal fun positionTicker(
     }
     .distinctUntilChanged()
 
+/**
+ * Shares one [positionTicker] among all collectors, running only while someone collects. A new collector gets the last
+ * position at once while others are collecting; after a gap with no collector it gets the live position instead (the
+ * restarted ticker's first emission), never the one from before the gap: `replayExpirationMillis = 0`. See
+ * [PlayerRepositoryImpl.currentPosition]. Top-level + `internal` for [PositionTickerTest].
+ */
+internal fun Flow<Long>.shareAsPositionTicker(scope: CoroutineScope): SharedFlow<Long> =
+    shareIn(scope, SharingStarted.WhileSubscribed(replayExpirationMillis = 0), replay = 1)
+
 /** Inverse of the existing `Int.toRepeatMode()` mapper — used only to
  *  restore Media3's repeat mode from a persisted [RepeatMode] on resume. */
 internal fun RepeatMode.toPlayerRepeatMode(): Int = when (this) {
@@ -3695,8 +4017,45 @@ internal fun trackIdentity(title: String, artist: String): String {
 /** MediaMetadata extra: an All Songs file's format (its file extension), see [toScannedTrack]. */
 internal const val EXTRA_SCANNED_FILE_FORMAT = "stash_scanned_file_format"
 
-/** Set (to "CLOUD") on a cloud song's MediaItem so the Track rebuilt from it stays a cloud song. */
+/**
+ * A song's stored [com.stash.core.model.MusicSource], on every MediaItem ([putTrackOrigin]), so the
+ * Track rebuilt from it keeps its origin: a cloud song stays one, a YouTube stream is never a
+ * Spotify song ([TrackSourceRule]).
+ */
 internal const val EXTRA_TRACK_SOURCE = "stash_track_source"
+
+/** A song's Spotify URI, when it has one: [TrackSourceRule] needs it to keep a Spotify song Spotify's. */
+internal const val EXTRA_TRACK_SPOTIFY_URI = "stash_track_spotify_uri"
+
+/**
+ * Puts a song's origin on its MediaItem extras: its stored [source] and, when it has one, its
+ * [spotifyUri]. [toTrack] reads them back through [TrackSourceRule].
+ */
+internal fun Bundle.putTrackOrigin(source: com.stash.core.model.MusicSource, spotifyUri: String?) {
+    putString(EXTRA_TRACK_SOURCE, source.name)
+    spotifyUri?.takeIf { it.isNotBlank() }?.let { putString(EXTRA_TRACK_SPOTIFY_URI, it) }
+}
+
+/**
+ * The source of the Track rebuilt from a MediaItem's [extras] ([putTrackOrigin]): a cloud song or a
+ * SoundCloud upload stays one, and anything else is the item's own source unless its ids contradict
+ * it ([TrackSourceRule]). Every stream used to come back as a Spotify song, and a like or a listen
+ * then saved a YouTube stream as a green Spotify row.
+ *
+ * @param youtubeId the rebuilt Track's video id (a Search preview's media id when it has no row).
+ */
+internal fun rebuiltTrackSource(extras: Bundle?, youtubeId: String?): com.stash.core.model.MusicSource {
+    val stored = extras?.getString(EXTRA_TRACK_SOURCE)
+    return when {
+        stored == com.stash.core.model.MusicSource.CLOUD.name -> com.stash.core.model.MusicSource.CLOUD
+        extras?.getString(EXTRA_SOUNDCLOUD_ID) != null -> com.stash.core.model.MusicSource.SOUNDCLOUD
+        else -> TrackSourceRule.honestSource(
+            claimed = stored?.let { name -> runCatching { com.stash.core.model.MusicSource.valueOf(name) }.getOrNull() },
+            spotifyUri = extras?.getString(EXTRA_TRACK_SPOTIFY_URI),
+            youtubeId = youtubeId,
+        )
+    }
+}
 
 /** A cloud song's file format, for Now Playing's quality line (its Room row's truth). */
 internal const val EXTRA_CLOUD_FILE_FORMAT = "stash_cloud_file_format"
@@ -3731,3 +4090,10 @@ internal fun MediaItem.toScannedTrack(trackId: Long): Track {
 /** The ids of a queue that a resume can find again: every All Songs file is left out. */
 internal fun savableQueueIds(ids: List<Long>): List<Long> =
     if (ids.none(::isScannedTrackId)) ids else ids.filterNot(::isScannedTrackId)
+
+/**
+ * Whether the slot a prefetch captured at [timelineIndex] is still the next-up and not the one playing, read again right
+ * before replacing it: the prefetch suspends for the DB and the file check in between (review on #730).
+ */
+internal fun isStillNextUp(currentIndex: Int, nextIndex: Int, timelineIndex: Int): Boolean =
+    timelineIndex == nextIndex && timelineIndex != currentIndex

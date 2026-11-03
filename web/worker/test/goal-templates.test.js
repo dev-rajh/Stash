@@ -140,7 +140,7 @@ test("every Worker route is in run_worker_first, and the public files aren't", (
     const patterns = config.assets.run_worker_first;
     const glob = (p) => new RegExp(`^${p.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")}$`);
     const runsWorker = (path) => patterns.some((p) => !p.startsWith("!") && glob(p).test(path)) && !patterns.some((p) => p.startsWith("!") && glob(p.slice(1)).test(path));
-    for (const path of ["/", "/access", "/access/verify", "/request", "/signout", "/admin", "/player", "/gate/front", "/404", "/a-page-added-later"]) assert.ok(runsWorker(path), path);
+    for (const path of ["/", "/access", "/access/verify", "/request", "/signout", "/admin", "/player", "/goal.json", "/gate/front", "/404", "/a-page-added-later"]) assert.ok(runsWorker(path), path);
     for (const path of ["/_astro/x.css", "/favicon.ico", "/robots.txt", "/sitemap-index.xml", "/privacy", "/social-preview.jpg"]) assert.ok(!runsWorker(path), path);
     assert.equal(config.main, "worker/index.js");
     assert.equal(config.assets.binding, "ASSETS");
@@ -150,7 +150,7 @@ test("every Worker route is in run_worker_first, and the public files aren't", (
     assert.match(config.kv_namespaces[0].id, /^[0-9a-f]{32}$/, "the stash-early-access namespace id");
     // Previews get nothing but assets: no production KV or email (Cloudflare's Previews don't inherit bindings).
     assert.deepEqual(config.previews, {});
-    assert.equal(config.vars.GOAL_CENTS, "10000");
+    assert.equal(config.vars.GOAL_CENTS, "20000");
     // The web player's address is a plain var; its signing key is a secret and must never be in this file.
     assert.equal(config.vars.PLAYER_URL, "https://play.stashfm.app");
     assert.ok(!("PLAYER_TICKET_PRIVATE_KEY" in config.vars));

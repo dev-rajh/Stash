@@ -84,13 +84,21 @@ import com.stash.core.ui.theme.StashDarkColorScheme
 import com.stash.core.ui.theme.StashExtendedColorsDark
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
 /** The crossfade from one page to the next. */
 private const val PAGE_FADE_MS = 2_200L
+
+/**
+ * A new song's front over the last song's page: quick, since the song changed (a skip is a
+ * tap that wants an answer). The slow crossfade is for pages taking turns within a song.
+ */
+private const val SONG_FADE_MS = 300L
 
 /** The art growing from its square to the full width, and back. */
 private const val GROW_MS = 650
@@ -119,6 +127,20 @@ private const val RESYNC_MS = 700L
 private const val MAX_SHOWN = 3
 
 /**
+ * With the loops still (Remove animations, or Battery Saver) nothing pans or fades, so the clock
+ * ticks this often instead of every frame: a page's cut lands within half a second of its time. So
+ * it does whenever nothing moves: paused, or playing with nothing to pan (Full art pan off, or
+ * lyrics up over the art), with no page fading in. A page turned by hand, a new song's front, a
+ * page just loaded, full art opening, or the pan starting again (play resuming, the pan turned
+ * back on, lyrics closed) wakes it at once ([FullArtState.wake]).
+ */
+internal const val STILL_TICK_MS = 500L
+
+/** The longest step the clocks take in one tick: a frame's hiccup, or a still tick running late. */
+private const val MAX_STEP_MS = 100L
+private const val STILL_MAX_STEP_MS = 2 * STILL_TICK_MS
+
+/**
  * Just after a song changes the player can still report the last one's position for a tick: for
  * this long, only a position near the start is believed.
  */
@@ -142,8 +164,17 @@ internal class FullArtPage(
  */
 private class LoadedPage(val image: ImageBitmap, val small: ImageBitmap, val solid: Color)
 
-/** A page on screen: fading in from [bornMs] (frame time), its pan timed from [atPlayMs] (playing time). */
-internal class Shown(val page: FullArtPage, val bornMs: Long, val atPlayMs: Long, val direction: Int)
+/**
+ * A page on screen: fading in from [bornMs] (frame time) over [fadeMs], its pan timed from
+ * [atPlayMs] (playing time).
+ */
+internal class Shown(
+    val page: FullArtPage,
+    val bornMs: Long,
+    val atPlayMs: Long,
+    val direction: Int,
+    val fadeMs: Long = PAGE_FADE_MS,
+)
 
 /**
  * Full art's state, hoisted so Now Playing can hide its square art while the full art is out:
@@ -176,6 +207,15 @@ internal class FullArtState {
     private var offset = 0
     private var turns = 0
     private var pending: FullArtPage? = null
+
+    /** The last tick found nothing moving: the loop rested, so this tick comes a still tick later. */
+    private var resting = false
+
+    /** [pending] is a new song's front: it fades in over [SONG_FADE_MS]. */
+    private var pendingIsNewSong = false
+
+    /** Wakes a still frame loop ([awaitWake]) at once: a page is pending, or one just loaded. */
+    private val wakeups = Channel<Unit>(Channel.CONFLATED)
     private var reported = -1
 
     /** Set from the layer on each composition: what a page turned by hand turns through. */
@@ -199,6 +239,9 @@ internal class FullArtState {
         pending = null
         ready = false
         shown.add(Shown(pages[first], now - PAGE_FADE_MS, playMs, direction()))
+        // A loop resting between still ticks would see the page (and grow the art out) up to
+        // STILL_TICK_MS later: reopened while paused, the pages are usually in hand already.
+        wake()
     }
 
     /** A new song: its front, faded to over the page the last one ended on. */
@@ -208,6 +251,8 @@ internal class FullArtState {
         segment = 0
         offset = 0
         pending = pageFor(0)
+        pendingIsNewSong = true
+        wake()
     }
 
     /** A page turned by hand ([step] 1 the next, -1 the one before): the pages go on from it. */
@@ -217,13 +262,45 @@ internal class FullArtState {
         val next = (at + step).mod(pages.size)
         offset = (next - schedule.pageAt(segment.coerceAtLeast(0))).mod(pages.size)
         pending = pages[next]
+        pendingIsNewSong = false
+        wake()
     }
 
-    /** One frame: the clocks move, and the page the song has reached comes in once it's loaded. */
-    fun tick(now: Long, position: Long, playing: Boolean, failed: Set<String>, still: Boolean) {
-        val dt = if (lastFrameMs == 0L) 0L else (now - lastFrameMs).coerceIn(0L, 100L)
+    /** Something for the frame loop to do now (a page pending or loaded): a still loop ticks at once. */
+    fun wake() {
+        wakeups.trySend(Unit)
+    }
+
+    /**
+     * The still frame loop's pause between ticks: [ms], or less when [wake]d. A page turned by hand
+     * (or a new song's front) then cuts in at once rather than up to [STILL_TICK_MS] later.
+     */
+    suspend fun awaitWake(ms: Long) {
+        withTimeoutOrNull(ms) { wakeups.receive() }
+    }
+
+    /**
+     * One frame: the clocks move, and the page the song has reached comes in once it's loaded.
+     * Returns whether the art moves on from here (it pans while playing, a page fades in): the
+     * frame loop ticks every frame only then.
+     *
+     * @param pans The art is up and pans: Full art pan isn't off and lyrics aren't over it. Playing
+     *   without it, nothing moves but a page fading in.
+     */
+    fun tick(
+        now: Long,
+        position: Long,
+        playing: Boolean,
+        failed: Set<String>,
+        still: Boolean,
+        pans: Boolean = true,
+    ): Boolean {
+        // Resting, a step is a still tick long and real: the clocks keep up with a song playing with
+        // nothing to pan. Not when the pan starts again from a rest (play resuming): most of that
+        // step was paused, and a frame's step is all the pan may jump.
+        val maxStep = if (still || (resting && !(playing && pans))) STILL_MAX_STEP_MS else MAX_STEP_MS
+        val dt = if (lastFrameMs == 0L) 0L else (now - lastFrameMs).coerceIn(0L, maxStep)
         lastFrameMs = now
-        frameMs = now
         if (playing) playMs += dt
         // The last song's position, still reported a moment after the change, is passed over.
         val believed = now >= settleUntilMs || position < NEW_SONG_START_MS
@@ -232,12 +309,13 @@ internal class FullArtState {
             playing -> (songMs + dt).let { if (abs(it - position) > RESYNC_MS) position else it }
             else -> position
         }
-        if (pages.isEmpty()) return
+        if (pages.isEmpty()) return movesOn(now, still, playing, pans, fading = false)
 
         val at = schedule.segmentAt(songMs)
         if (at != segment) {
             segment = at
             pending = pageFor(at)
+            pendingIsNewSong = false
         }
         // A page that can't load is passed over for the one after it.
         var skips = 0
@@ -249,9 +327,11 @@ internal class FullArtState {
         val next = pending
         if (next != null && next.key in loaded) {
             pending = null
+            val fade = if (pendingIsNewSong) SONG_FADE_MS else PAGE_FADE_MS
+            pendingIsNewSong = false
             val current = shown.lastOrNull()
             if (current == null || current.page.key != next.key) {
-                shown.add(Shown(next, if (still) now - PAGE_FADE_MS else now, playMs, direction()))
+                shown.add(Shown(next, if (still) now - fade else now, playMs, direction(), fade))
                 while (shown.size > MAX_SHOWN) shown.removeAt(0)
             }
         }
@@ -260,9 +340,10 @@ internal class FullArtState {
             ready = true
             fadeMs = now
         }
-        if (top != null && now - top.bornMs < PAGE_FADE_MS) fadeMs = now
+        val fading = top != null && now - top.bornMs < top.fadeMs
+        if (fading) fadeMs = now
         // Pages fully covered by the one fading in over them are let go.
-        if (top != null && shown.size > 1 && now - top.bornMs >= PAGE_FADE_MS) {
+        if (top != null && shown.size > 1 && now - top.bornMs >= top.fadeMs) {
             shown.removeRange(0, shown.size - 1)
             fadeMs = now
         }
@@ -271,6 +352,21 @@ internal class FullArtState {
             reported = index
             onPage(index)
         }
+        return movesOn(now, still, playing, pans, fading)
+    }
+
+    /**
+     * Moves the frame clock, which the art is drawn on, when the art moves this frame, and says
+     * whether it does. Still, it neither pans nor fades; paused, or playing with nothing to pan
+     * ([pans] false), only a page fading in moves. Otherwise nothing is redrawn per tick (a cut, or
+     * the covered pages let go after a fade, redraws by itself): a paused Now Playing drew every
+     * frame for nothing, and so did one playing with the pan off or lyrics up.
+     */
+    private fun movesOn(now: Long, still: Boolean, playing: Boolean, pans: Boolean, fading: Boolean): Boolean {
+        val moving = !still && ((playing && pans) || fading)
+        if (moving) frameMs = now
+        resting = !moving
+        return moving
     }
 
     /** The pan's side, alternating page to page. */
@@ -282,12 +378,15 @@ internal fun rememberFullArtState(): FullArtState = remember { FullArtState() }
 
 /**
  * Now Playing's colours while full art is out: the dark theme's, whatever the app's, since the
- * controls sit on the art's darkened blend. Always composed (with [on] false it passes the theme
- * through) so turning full art on or off never rebuilds the screen under it.
+ * controls sit on the art's darkened blend, wearing the song's accent as the rest of the app does
+ * (it used to be the literal dark scheme, so full art turned the accents back to the idle colour).
+ * Always composed (with [on] false it passes the theme through) so turning full art on or off never
+ * rebuilds the screen under it.
  */
 @Composable
 internal fun FullArtTheme(on: Boolean, content: @Composable () -> Unit) {
-    val scheme = if (on) StashDarkColorScheme else MaterialTheme.colorScheme
+    val dark = com.stash.core.ui.ambient.rememberDarkAccentScheme(StashDarkColorScheme)
+    val scheme = if (on) dark else MaterialTheme.colorScheme
     CompositionLocalProvider(
         LocalIsDarkTheme provides (on || LocalIsDarkTheme.current),
         LocalStashColors provides (if (on) StashExtendedColorsDark else LocalStashColors.current),
@@ -313,6 +412,7 @@ internal fun FullArtTheme(on: Boolean, content: @Composable () -> Unit) {
  * @param running Now Playing is in sight: the pan's frame loop runs only then.
  * @param pages The front, then the back and the pages inside, those that are known.
  * @param startPage The page the square art shows: full art opens on it.
+ * @param cycle Settings' Cycle album art: off, the pages don't turn by themselves (a swipe still turns them).
  * @param trackKey The playing song: a new one starts on its front.
  * @param origin The square art in window coordinates: full art grows from it and back into it.
  * @param originCornerPx The square art's corner radius.
@@ -330,6 +430,7 @@ internal fun FullArtLayer(
     running: Boolean,
     pages: List<FullArtPage>,
     startPage: Int,
+    cycle: Boolean,
     trackKey: Any?,
     positionMs: () -> Long,
     durationMs: Long,
@@ -342,7 +443,11 @@ internal fun FullArtLayer(
     solidBlend: Boolean,
     modifier: Modifier = Modifier,
 ) {
+    // Growing out and the art's fade are one-shot transitions: they snap only with "Remove
+    // animations". The cycle (the frame loop, pans and page fades) is a loop: it also stands still
+    // under Battery Saver.
     val reducedMotion = rememberNpReducedMotion()
+    val loopsStill = rememberNpLoopsStill()
     val target = active && visible && pages.isNotEmpty()
     LaunchedEffect(target, visible, reducedMotion, state.ready) {
         when {
@@ -361,7 +466,7 @@ internal fun FullArtLayer(
     }
     if (!target && state.grow.value == 0f) return
 
-    val schedule = remember(durationMs, pages.size) { fullArtSchedule(durationMs, pages.size) }
+    val schedule = remember(durationMs, pages.size, cycle) { fullArtSchedule(durationMs, pages.size, cycle) }
     val loaded = remember { mutableStateMapOf<String, LoadedPage>() }
     val failed = remember { mutableStateMapOf<String, Boolean>() }
     val currentOnPage by rememberUpdatedState(onPage)
@@ -374,6 +479,9 @@ internal fun FullArtLayer(
     val currentPosition by rememberUpdatedState(positionMs)
     val currentPlaying by rememberUpdatedState(isPlaying)
     val currentStart by rememberUpdatedState(startPage)
+    // Nothing to pan with Full art pan off, or with lyrics up over the (invisible) art.
+    val pans = panDpPerS > 0f && artShown
+    val currentPans by rememberUpdatedState(pans)
 
     // Opened (or reopened with the sheet): the page the square art was showing.
     LaunchedEffect(target) {
@@ -392,14 +500,22 @@ internal fun FullArtLayer(
             state.newSong(withFrameMillis { it })
         }
     }
-    // The frame loop: while it's out and in sight.
-    LaunchedEffect(running) {
+    // The frame loop: while it's out and in sight. It ticks every frame only while the art moves
+    // (a pan while playing, a page fading in). Otherwise (motion still, paused, or nothing to pan)
+    // every STILL_TICK_MS: the pages only cut, so nothing needs the display's refresh rate.
+    LaunchedEffect(running, loopsStill) {
         if (!running) return@LaunchedEffect
         while (true) {
-            withFrameMillis { now ->
-                state.tick(now, currentPosition(), currentPlaying, failed.keys, reducedMotion)
+            val moving = withFrameMillis { now ->
+                state.tick(now, currentPosition(), currentPlaying, failed.keys, loopsStill, currentPans)
             }
+            if (!moving) state.awaitWake(STILL_TICK_MS)
         }
+    }
+    // The pan starting again (play resuming, the pan turned back on, lyrics closed): a loop waiting
+    // out a still tick picks it up at once.
+    LaunchedEffect(isPlaying, pans) {
+        if (isPlaying && pans) state.wake()
     }
 
     // The pages in hand: those on screen, the front and the back, and the page after the one up
@@ -412,7 +528,11 @@ internal fun FullArtLayer(
     }
     wanted.forEach { page ->
         key(page.key) {
-            PageLoader(page, onLoaded = { loaded[page.key] = it }, onFailed = { failed[page.key] = true })
+            PageLoader(
+                page,
+                onLoaded = { loaded[page.key] = it; state.wake() },
+                onFailed = { failed[page.key] = true; state.wake() },
+            )
             DisposableEffect(page.key) { onDispose { loaded.remove(page.key) } }
         }
     }
@@ -447,7 +567,7 @@ internal fun FullArtLayer(
                     val now = state.fadeMs
                     state.shown.forEachIndexed { index, shown ->
                         val page = loaded[shown.page.key] ?: return@forEachIndexed
-                        val alpha = fadeAlpha(index, now, shown, reducedMotion)
+                        val alpha = fadeAlpha(index, now, shown, loopsStill)
                         if (alpha <= 0f) return@forEachIndexed
                         if (solidBlend) {
                             drawRect(page.solid, alpha = alpha)
@@ -487,17 +607,17 @@ internal fun FullArtLayer(
                     clipPath(clip) {
                         state.shown.forEachIndexed { index, shown ->
                             val page = loaded[shown.page.key] ?: return@forEachIndexed
-                            val alpha = fadeAlpha(index, now, shown, reducedMotion)
+                            val alpha = fadeAlpha(index, now, shown, loopsStill)
                             if (alpha <= 0f) return@forEachIndexed
                             val w = page.image.width.toFloat()
                             val h = page.image.height.toFloat()
                             val square = coverCrop(w, h, from.width, from.height).translate(from.topLeft)
                             val panned = panCrop(
                                 w, h, full.width, full.height,
-                                elapsedS = if (reducedMotion) 0f else (state.playMs - shown.atPlayMs) / 1000f,
+                                elapsedS = if (loopsStill) 0f else (state.playMs - shown.atPlayMs) / 1000f,
                                 direction = shown.direction,
                                 holdS = state.schedule.holdMs / 1000f,
-                                speedPxPerS = if (reducedMotion) 0f else panSpeedPx,
+                                speedPxPerS = if (loopsStill) 0f else panSpeedPx,
                                 zoom = extraZoom,
                             )
                             drawPage(page.image, lerpRect(square, panned, t), alpha)
@@ -589,8 +709,12 @@ internal fun FullArtSwipe(state: FullArtState, modifier: Modifier = Modifier) {
     )
 }
 
-private fun fadeAlpha(index: Int, now: Long, shown: Shown, still: Boolean): Float =
-    if (index == 0 || still) 1f else easeInOutSine((now - shown.bornMs).toFloat() / PAGE_FADE_MS)
+private fun fadeAlpha(index: Int, now: Long, shown: Shown, still: Boolean): Float {
+    if (index == 0 || still) return 1f
+    val t = ((now - shown.bornMs).toFloat() / shown.fadeMs).coerceIn(0f, 1f)
+    // A new song's front lands fast and settles (ease-out); pages taking turns breathe in and out.
+    return if (shown.fadeMs < PAGE_FADE_MS) 1f - (1f - t) * (1f - t) * (1f - t) else easeInOutSine(t)
+}
 
 /** [image] drawn into [dst] at any fraction of a pixel, so a slow pan never steps. */
 private fun DrawScope.drawPage(image: ImageBitmap, dst: Rect, alpha: Float) {

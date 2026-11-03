@@ -81,10 +81,11 @@ class LibraryViewModelMixTest {
             on { getLibraryTracksIncludingOnline() } doReturn flowOf(emptyList())
             on { getAllPlaylists() } doReturn flowOf(emptyList())
             on { getAllArtists() } doReturn flowOf(emptyList())
-            on { getAllAlbums() } doReturn flowOf(emptyList())
+            on { getLibraryAlbums() } doReturn flowOf(emptyList())
             on { getUserCreatedPlaylists() } doReturn flowOf(emptyList())
             on { getRecentlyAdded(any()) } doReturn flowOf(emptyList())
             on { getTracksByPlaylist(77L) } doReturn flowOf(tracks)
+            on { getShownTracksByPlaylist(77L) } doReturn flowOf(tracks)
             // Stub every invocation: an unstubbed suspend Boolean returns null
             // (mockito default) → NPE on Kotlin's primitive unbox. Only id 2 is
             // protected elsewhere.
@@ -118,7 +119,7 @@ class LibraryViewModelMixTest {
         on { getLibraryTracksIncludingOnline() } doReturn flowOf(emptyList())
         on { getAllPlaylists() } doReturn flowOf(playlists)
         on { getAllArtists() } doReturn flowOf(emptyList())
-        on { getAllAlbums() } doReturn flowOf(emptyList())
+        on { getLibraryAlbums() } doReturn flowOf(emptyList())
         on { getUserCreatedPlaylists() } doReturn flowOf(emptyList())
         on { getRecentlyAdded(any()) } doReturn flowOf(emptyList())
     }

@@ -49,6 +49,25 @@ import org.mockito.kotlin.whenever
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class LibraryViewModelTest {
+    @Test fun `connected SoundCloud likes exclude another accounts retained likes`() = runTest {
+        val own = com.stash.core.model.Playlist(id = 7, name = "SoundCloud Liked", source = com.stash.core.model.MusicSource.SOUNDCLOUD,
+            sourceId = "soundcloud_liked_7", type = com.stash.core.model.PlaylistType.LIKED_SONGS, trackCount = 1)
+        val previous = own.copy(id = 8, sourceId = "soundcloud_liked_8")
+        val repo = musicRepoMock().stub {
+            on { getPlaylistsByType(com.stash.core.model.PlaylistType.LIKED_SONGS) } doReturn flowOf(listOf(previous, own))
+            on { getPlaylistsByType(com.stash.core.model.PlaylistType.STASH_LIKED) } doReturn flowOf(emptyList())
+            on { getShownTracksByPlaylist(7) } doReturn flowOf(listOf(track(70)))
+            on { getShownTracksByPlaylist(8) } doReturn flowOf(listOf(track(80)))
+        }
+        val tokens = tokenManagerMock().stub {
+            on { soundCloudSession } doReturn flowOf(com.stash.core.auth.soundcloud.SoundCloudSession("7", "Current", connectionId = "current"))
+        }
+        val vm = buildVm(musicRepository = repo, tokenManager = tokens)
+        val likes = kotlinx.coroutines.withContext(Dispatchers.Default) {
+            kotlinx.coroutines.withTimeout(5000) { vm.likedTracks.first { it.isNotEmpty() } }
+        }
+        assertEquals(listOf(70L), likes.map { it.id })
+    }
 
     private val dispatcher = StandardTestDispatcher()
 
@@ -213,9 +232,13 @@ class LibraryViewModelTest {
     )
     private val downloadModeSongs = streamOnlySongs.filter { it.isDownloaded }
 
+    /** The saved album "Views" as its Albums card holds it. */
+    private val VIEWS = AlbumInfo(playlistId = 7L, name = "Views", artist = "Drake", trackCount = 4)
+
     private fun pageRepo(songs: List<Track>): MusicRepository = musicRepoMock().stub {
         on { getTracksByArtist("Drake") } doReturn flowOf(songs)
-        on { getTracksByAlbum("Views", "Drake") } doReturn flowOf(songs)
+        // A saved album's card plays what its page lists, in album order.
+        on { getShownTracksByPlaylist(VIEWS.playlistId) } doReturn flowOf(songs)
     }
 
     private fun connectivity(online: Boolean): ConnectivityMonitor = mock { on { isConnected() } doReturn online }
@@ -288,7 +311,7 @@ class LibraryViewModelTest {
             val playerRepo = playerRepoMock()
             val vm = buildVm(musicRepository = pageRepo(streamOnlySongs), playerRepository = playerRepo, connectivityMonitor = connectivity(online))
 
-            vm.playAlbum("Views", "Drake")
+            vm.playAlbum(VIEWS)
             runCurrent()
 
             verify(playerRepo).setQueue(expected, 0, source = com.stash.core.model.PlaybackSource.Album("Views", "Drake"))
@@ -301,7 +324,7 @@ class LibraryViewModelTest {
             val playerRepo = playerRepoMock()
             val vm = buildVm(musicRepository = pageRepo(streamOnlySongs), playerRepository = playerRepo, connectivityMonitor = connectivity(online))
 
-            vm.addAlbumToQueue("Views", "Drake")
+            vm.addAlbumToQueue(VIEWS)
             runCurrent()
 
             verify(playerRepo).addToQueue(expected)
@@ -315,7 +338,7 @@ class LibraryViewModelTest {
         val vm = buildVm(musicRepository = pageRepo(notDownloaded), playerRepository = playerRepo, connectivityMonitor = connectivity(false))
         val messages = collectMessages(vm)
 
-        vm.playAlbum("Views", "Drake")
+        vm.playAlbum(VIEWS)
         runCurrent()
 
         verify(playerRepo, org.mockito.kotlin.never()).setQueue(any(), any(), any())
@@ -482,13 +505,14 @@ class LibraryViewModelTest {
         on { getAllTracks() } doReturn flowOf(emptyList())
         on { getAllPlaylists() } doReturn flowOf(emptyList())
         on { getAllArtists() } doReturn flowOf(emptyList())
-        on { getAllAlbums() } doReturn flowOf(emptyList())
+        on { getLibraryAlbums() } doReturn flowOf(emptyList())
         on { getUserCreatedPlaylists() } doReturn flowOf(emptyList())
         onBlocking { queueDownload(any()) } doReturn true
         onBlocking { deleteTrack(any()) } doReturn true
     }
 
     private fun tokenManagerMock(): TokenManager = mock {
+        on { soundCloudSession } doReturn flowOf(null)
         on { spotifyAuthState } doReturn MutableStateFlow<AuthState>(AuthState.NotConnected)
         on { youTubeAuthState } doReturn MutableStateFlow<AuthState>(AuthState.NotConnected)
     }

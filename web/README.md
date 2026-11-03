@@ -187,8 +187,8 @@ The site practises what the app promises:
 
 ## Early access
 
-The website is in early access. Supporters (Ko-fi automatically; GitHub Sponsors and PayPal added by
-hand) are on the list as a thank-you, anyone else can ask, and the owner and Evo answer requests on
+The website is in early access. Supporters (Ko-fi automatically, at $5 or more added up per email since
+2026-11-02; GitHub Sponsors and PayPal added by hand) are on the list as a thank-you, anyone else can ask, and the owner and Evo answer requests on
 `/admin`. Never word it as "donate to get in", and keep Qobuz, lossless and the relay out of this copy.
 
 The web player (play.stashfm.app) is in early access, and stashfm.app is where people sign in to it.
@@ -215,6 +215,7 @@ in `worker/index.js`.
 | `POST /signout` | Clears the cookie (the button is in the home page's footer) |
 | `GET` and `POST /admin` | Requests, the access list and the goal, behind Cloudflare Access |
 | `GET /player` | Signed in with early access: a 2-minute ticket and a redirect to the web player (below) |
+| `GET /goal.json` | This month's goal as data, `{ "raised_cents": 16800, "goal_cents": 20000, "month": "2026-11" }`, from the same KV keys as the page's bar. Public (CORS `*`, no cookie), kept 10 minutes at the edge; a 503 nobody caches when KV can't be read. The app's Support card reads it at most once a day (`worker/goal-json.js`) |
 
 Which paths reach the Worker at all is `assets.run_worker_first` in `wrangler.jsonc`. With
 `not_found_handling` set, a browser navigation (a form post too) to a path with no file never reaches
@@ -278,7 +279,7 @@ says a code is on its way sets one, listed or not.
 **The goal.** Every donation is its own key, `goal:<YYYY-MM>:kofi:<id>` (the tip jar) or
 `goal:<YYYY-MM>:manual:<id>` (`/admin`), with the amount in its metadata, so the two Workers never
 overwrite each other's totals. A month's total (UTC) is the sum of the keys listed under
-`goal:<YYYY-MM>:`, against `GOAL_CENTS` ($100). `/admin` can take a hand-added entry back out, not a
+`goal:<YYYY-MM>:`, against `GOAL_CENTS` ($200). `/admin` can take a hand-added entry back out, not a
 Ko-fi one. The pages show whole dollars, rounded down, and read the total at most once a minute.
 
 **Storage.** The Worker binds one KV namespace, `ACCESS_KV` (`stash-early-access`), shared with the tip
@@ -301,7 +302,7 @@ the Access session expired can be sent to its sign-in page.
 | `EMAIL_PEPPER` | secret, required | Keys the email hashes. The same value on the tip jar and for its import script. Without it, sign-in and requests are off |
 | `ACCESS_TEAM_DOMAIN` | var | `https://<team>.cloudflareaccess.com` |
 | `ACCESS_AUD` | var | The Access application's AUD tag |
-| `GOAL_CENTS` | var | The monthly goal in US cents (`10000`) |
+| `GOAL_CENTS` | var | The monthly goal in US cents (`20000`) |
 | `EMAIL_FROM` | var | `access@stashfm.app`, the only sender the `EMAIL` binding allows |
 
 | `PLAYER_URL` | var | The web player's origin, `https://play.stashfm.app`. https only, no path; anything else turns `/player` off |
@@ -322,8 +323,9 @@ not the access list's hash, so the player holds nothing that can be matched to e
 `SESSION_SECRET` changes everyone's `sub`, and signs everyone out of the site anyway). Signed out, `/player`
 goes to the sign-in page (`/access`), and signing in comes back to `/player` (the forms carry a hidden `next`
 that can only ever be `/player`). Signed in but taken off the list, it goes to `/`. A shared song or mix
-link on the player arrives as `/player?next=/t/...`, `/m/...` or `/play...` and is passed on as
-`PLAYER_URL/auth?next=...`; any other `next` is dropped. Without a valid `PLAYER_URL` or key, `/player` is a
+link on the player arrives as `/player?next=/t/...`, `/m/...` or `/play...`, and a Community page as
+`/community...` (the list, or `/community/<id>`); each is passed on as `PLAYER_URL/auth?next=...`. Any other
+`next`, or one whose path the URL parser would rewrite (`..`, a backslash) or that holds an encoded slash, backslash or dot (`%2f`, `%5c`, `%2e`), is dropped. Without a valid `PLAYER_URL` or key, `/player` is a
 503 that names neither (the log, `wrangler tail`, says which).
 
 **The ticket key.** In the player repo (`stash-web/player`), `npm run keys` prints a key pair (nothing is

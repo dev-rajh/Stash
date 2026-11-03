@@ -38,7 +38,7 @@ import org.mockito.kotlin.verifyBlocking
  *
  * Stream-only Mix tracks (isStreamable=true, isDownloaded=false) must NOT
  * enqueue when the device has no validated internet. Instead the VM emits a
- * "Online only — connect to play this track" message on [userMessages] so
+ * "No internet connection, and this song isn't downloaded." message on [userMessages] so
  * the screen shows a Snackbar. Downloaded tracks play normally even offline;
  * stream-only tracks play normally when online.
  *
@@ -87,7 +87,7 @@ class MixOfflineTapGuardTest {
         runCurrent()
 
         verifyBlocking(playerRepo, never()) { setQueue(any(), any(), any()) }
-        assertThat(messages).contains("Online only — connect to play this track")
+        assertThat(messages).contains("No internet connection, and this song isn't downloaded.")
 
         msgJob.cancel()
         uiJob.cancel()
@@ -127,7 +127,7 @@ class MixOfflineTapGuardTest {
         runCurrent()
 
         verifyBlocking(playerRepo) { setQueue(any(), any(), any()) }
-        assertThat(messages).doesNotContain("Online only — connect to play this track")
+        assertThat(messages).doesNotContain("No internet connection, and this song isn't downloaded.")
 
         msgJob.cancel()
         uiJob.cancel()
@@ -167,18 +167,17 @@ class MixOfflineTapGuardTest {
         runCurrent()
 
         verifyBlocking(playerRepo) { setQueue(any(), any(), any()) }
-        assertThat(messages).doesNotContain("Online only — connect to play this track")
+        assertThat(messages).doesNotContain("No internet connection, and this song isn't downloaded.")
 
         msgJob.cancel()
         uiJob.cancel()
     }
 
     @Test
-    fun `playTrack in Download mode + stream-only mix track is enqueued`() = runTest {
-        // The Download switch decides what sync writes to disk, never what
-        // plays: with a connection, a stream-only track is queued whichever
-        // way it is set. (Until 2026-09-17 Offline mode refused it with a
-        // "Switch to Online mode" prompt.)
+    fun `playTrack queues a stream-only mix track the list shows`() = runTest {
+        // The view model queues what the list shows. In Download mode the list doesn't
+        // show such a track (getShownTracksByPlaylist) and the player refuses it
+        // (PlayerRepositoryImpl.streamAllowed, 2026-10-29); neither is this test's.
         val downloaded = Track(
             id = 1L, title = "Local", artist = "A",
             isStreamable = true, isDownloaded = true,
@@ -193,7 +192,11 @@ class MixOfflineTapGuardTest {
             on { playerState } doReturn MutableStateFlow(PlayerState())
         }
         val connectivity = mock<ConnectivityMonitor> { on { isConnected() } doReturn true }
-        val offlinePref = mock<StreamingPreference> { onBlocking { current() } doReturn false }
+        // The tap reads Download mode (current()); the list is stubbed to show every song either way.
+        val offlinePref = mock<StreamingPreference> {
+            onBlocking { current() } doReturn false
+            on { enabled } doReturn flowOf(true)
+        }
         val vm = buildVm(
             playlistId = playlist.id,
             tracks = listOf(downloaded, streamOnly),
@@ -237,7 +240,11 @@ class MixOfflineTapGuardTest {
             on { playerState } doReturn MutableStateFlow(PlayerState())
         }
         val connectivity = mock<ConnectivityMonitor> { on { isConnected() } doReturn true }
-        val offlinePref = mock<StreamingPreference> { onBlocking { current() } doReturn false }
+        // The tap reads Download mode (current()); the list is stubbed to show every song either way.
+        val offlinePref = mock<StreamingPreference> {
+            onBlocking { current() } doReturn false
+            on { enabled } doReturn flowOf(true)
+        }
         val vm = buildVm(
             playlistId = playlist.id,
             tracks = listOf(downloaded, streamOnly),
@@ -279,10 +286,12 @@ class MixOfflineTapGuardTest {
         connectivityMonitor: ConnectivityMonitor,
         streamingPreference: StreamingPreference = mock {
             onBlocking { current() } doReturn true
+            on { enabled } doReturn flowOf(true)
         },
     ): PlaylistDetailViewModel {
         val musicRepo = mock<MusicRepository> {
-            on { getTracksByPlaylist(playlistId) } doReturn flowOf(tracks)
+            on { getSongsByPlaylist(playlistId) } doReturn flowOf(tracks)
+            on { getShownTracksByPlaylist(playlistId) } doReturn flowOf(tracks)
             on { observePlaylist(any()) } doReturn flowOf(null)
             onBlocking { getPlaylistWithTracks(playlistId) } doReturn playlist
             on { getUserCreatedPlaylists() } doReturn flowOf(emptyList())
@@ -307,6 +316,9 @@ class MixOfflineTapGuardTest {
             },
             downloadQueueDao = mock {
                 on { observeGivenUpTrackIds(any()) } doReturn flowOf(emptyList())
+            },
+            orderDao = mock {
+                on { observeIsCustom(any()) } doReturn flowOf(false)
             },
         )
     }

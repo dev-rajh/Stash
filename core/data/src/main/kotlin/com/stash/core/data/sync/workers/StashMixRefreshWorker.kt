@@ -35,13 +35,17 @@ import com.stash.core.data.mix.LastFmRecommendationSource
 import com.stash.core.data.mix.RecipeTagResolver
 import com.stash.core.data.mix.StashMixDefaults
 import com.stash.core.data.mix.TagPoolBuilder
+import com.stash.core.data.prefs.DataSaverSnapshot
 import com.stash.core.data.prefs.DownloadNetworkPreference
+import com.stash.core.data.record.MixTaste
+import com.stash.core.data.record.RecordMixTaste
 import com.stash.core.data.sync.TrackMatcher
 import com.stash.core.data.sync.enqueueUniquePeriodicWorkReviving
 import com.stash.core.model.MusicSource
 import com.stash.core.model.PlaylistType
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.withLock
@@ -93,7 +97,27 @@ class StashMixRefreshWorker @AssistedInject constructor(
     private val tagPoolBuilder: TagPoolBuilder,
     private val trackMatcher: TrackMatcher,
     private val downloadNetworkPreference: DownloadNetworkPreference,
+    /**
+     * Your record's taste (feature:record works it out from the imported history): read once per run. None (no import, or "Use
+     * your record in mixes" off) and every mix is made exactly as before.
+     */
+    private val recordMixTaste: RecordMixTaste = RecordMixTaste.NONE,
 ) : CoroutineWorker(appContext, params) {
+
+    /**
+     * Whether the phone has a validated internet connection right now. A seam so tests run the worker offline. Read when
+     * a run starts and when it ends: see [networkPartWorked].
+     */
+    internal var networkAvailable: () -> Boolean = { hasValidatedNetwork(applicationContext) }
+
+    /**
+     * Whether this run's network part worked, for [StashMixRefreshStamp]: a full refresh that ran offline must not be
+     * recorded, or the next online cold start would skip it for a day (and an airplane-mode night would do that every
+     * night). Cleared by a persona fetch that didn't fully come back and by a discovery queueing that failed. With Last.fm
+     * set up, the run must also have been online when it began and when it ended: the discovery seed calls swallow their
+     * failures (an offline run just finds no candidates), so for someone with no Last.fm username nothing else would tell.
+     */
+    private var networkPartWorked = true
 
     companion object {
         private const val TAG = "StashMixRefresh"
@@ -231,20 +255,40 @@ class StashMixRefreshWorker @AssistedInject constructor(
         const val KEY_MATERIALIZE_ONLY = "stash_mix_refresh_materialize_only"
 
         /**
-         * Schedule the periodic refresh. Default 24-hour cadence with no
-         * constraints — the library-only path works offline and fast
-         * enough to not care. Discovery is opportunistic and tolerates
-         * being skipped when the device is offline.
+         * Input-data key for the single-recipe [enqueueOneTime]: the mix made again in today's order (its discoveries rotated by
+         * the day, as the day's periodic run rotates them, never reshuffled as a "Refresh this mix" tap reshuffles them). What
+         * it is made from changed: "Use your record in mixes" was flipped.
          */
-        suspend fun schedulePeriodic(context: Context) {
-            val constraints = Constraints.Builder()
-                .setRequiresBatteryNotLow(true)
+        const val KEY_SAME_DAY = "stash_mix_refresh_same_day"
+
+        /**
+         * The periodic refresh's constraints: battery not low and, while Data saver is on, Wi-Fi
+         * ([backgroundNetworkType]). Otherwise no network constraint: the library-only path works
+         * offline, and discovery is opportunistic and tolerates being skipped when offline.
+         */
+        internal fun periodicConstraints(dataSaverOn: Boolean): Constraints = Constraints.Builder()
+            .setRequiresBatteryNotLow(true)
+            .setRequiredNetworkType(backgroundNetworkType(dataSaverOn, otherwise = NetworkType.NOT_REQUIRED))
+            .build()
+
+        /**
+         * The automatic full one-shot's constraints (cold start, after a discovery download, Stash
+         * Mixes switched on): any connection, Wi-Fi while Data saver is on. Its Last.fm look-ups and
+         * discovery queueing are background work. The materialize-only re-link is local and keeps
+         * any connection; a mix the user refreshes or makes ([enqueueOneTime] by recipe) is theirs.
+         */
+        internal fun oneShotConstraints(materializeOnly: Boolean, dataSaverOn: Boolean): Constraints =
+            Constraints.Builder()
+                .setRequiredNetworkType(if (materializeOnly) NetworkType.CONNECTED else backgroundNetworkType(dataSaverOn))
                 .build()
+
+        /** Schedule the periodic refresh: a 24-hour cadence with [periodicConstraints]. */
+        suspend fun schedulePeriodic(context: Context) {
             val work = PeriodicWorkRequestBuilder<StashMixRefreshWorker>(
                 repeatInterval = 1,
                 repeatIntervalTimeUnit = TimeUnit.DAYS,
             )
-                .setConstraints(constraints)
+                .setConstraints(periodicConstraints(DataSaverSnapshot.isOn(context)))
                 .build()
             // 2026-05-11: UPDATE (not KEEP) so existing installs reschedule against
             // the current worker spec on the next cold start. KEEP previously meant
@@ -259,18 +303,14 @@ class StashMixRefreshWorker @AssistedInject constructor(
         }
 
         /**
-         * Fire a one-shot refresh immediately — used on first app launch
-         * after seeding defaults so users see populated mixes without
-         * waiting 24 hours for the periodic schedule, and by the
-         * manual-refresh button on the Home Stash Mixes card.
+         * Fire a one-shot refresh immediately — used on app launch (at most
+         * about once a day, see [StashMixRefreshStamp]) so users see populated
+         * mixes without waiting 24 hours for the periodic schedule, by the
+         * Stash Mixes switch, and by the post-download chain.
          */
         fun enqueueOneTime(context: Context, materializeOnly: Boolean = false) {
             val builder = OneTimeWorkRequestBuilder<StashMixRefreshWorker>()
-                .setConstraints(
-                    Constraints.Builder()
-                        .setRequiredNetworkType(NetworkType.CONNECTED)
-                        .build(),
-                )
+                .setConstraints(oneShotConstraints(materializeOnly, DataSaverSnapshot.isOn(context)))
             if (materializeOnly) {
                 builder.setInputData(androidx.work.workDataOf(KEY_MATERIALIZE_ONLY to true))
             }
@@ -286,14 +326,31 @@ class StashMixRefreshWorker @AssistedInject constructor(
         }
 
         /**
+         * The Data saver switch flipped: the automatic full one-shot ([enqueueOneTime], cold start or
+         * after a discovery download), if still waiting for its network, is queued again with the new
+         * constraint ([requeueIfWaiting]).
+         */
+        suspend fun requeueAutomaticIfWaiting(context: Context, dataSaverOn: Boolean): Boolean =
+            WorkManager.getInstance(context).requeueIfWaiting(
+                ONE_SHOT_WORK_NAME,
+                OneTimeWorkRequestBuilder<StashMixRefreshWorker>()
+                    .setConstraints(oneShotConstraints(materializeOnly = false, dataSaverOn = dataSaverOn))
+                    .build(),
+            )
+
+        /**
          * Fire a one-shot refresh for a single recipe. Used by the Home
          * long-press "Refresh this mix" action. Distinct unique-work name
          * per recipe id so refreshing mix A doesn't clobber a still-pending
          * refresh of mix B; REPLACE means a rapid double-tap on the same
          * mix coalesces into one job.
          */
-        fun enqueueOneTime(context: Context, recipeId: Long) {
-            val data = androidx.work.workDataOf(KEY_RECIPE_ID to recipeId)
+        fun enqueueOneTime(context: Context, recipeId: Long, sameDay: Boolean = false) {
+            val data = if (sameDay) {
+                androidx.work.workDataOf(KEY_RECIPE_ID to recipeId, KEY_SAME_DAY to true)
+            } else {
+                androidx.work.workDataOf(KEY_RECIPE_ID to recipeId)
+            }
             val work = OneTimeWorkRequestBuilder<StashMixRefreshWorker>()
                 .setConstraints(
                     Constraints.Builder()
@@ -352,6 +409,10 @@ class StashMixRefreshWorker @AssistedInject constructor(
 
         val now = System.currentTimeMillis()
         val lastFmConfigured = lastFmCredentials.isConfigured
+        val taste = readTaste()
+
+        // Last.fm set up means this run has a network part (personas, discovery seeds): it must start online to count.
+        networkPartWorked = !lastFmConfigured || networkAvailable()
 
         val username = sessionPreference.session.first()?.username
         val personas = if (lastFmConfigured && !username.isNullOrBlank()) {
@@ -365,7 +426,10 @@ class StashMixRefreshWorker @AssistedInject constructor(
                 withTimeout(30_000L) { fetchPersonas(username) }
             }.getOrElse { e ->
                 Log.w(TAG, "persona fetch failed/timed-out, falling back to local seeds", e)
-                LastFmPersonas.EMPTY
+                null
+            }.let { fetched ->
+                if (fetched?.allCameBack != true) networkPartWorked = false
+                fetched?.personas ?: LastFmPersonas.EMPTY
             }
         } else LastFmPersonas.EMPTY
 
@@ -381,7 +445,7 @@ class StashMixRefreshWorker @AssistedInject constructor(
         // #287: manual single-recipe refresh rotates on every tap; periodic
         // batch runs rotate once per day (stable within the day so the
         // idempotency backstop still suppresses same-day no-op flashes).
-        val rotationSeed = if (targetId > 0L) now else now / DAY_MS
+        val rotationSeed = if (targetId > 0L && !inputData.getBoolean(KEY_SAME_DAY, false)) now else now / DAY_MS
 
         // v0.9.20 follow-up: single-recipe path needs explicit seeding from the
         // OTHER mixes' current playlist contents. The batch-mode loop accumulates
@@ -404,7 +468,7 @@ class StashMixRefreshWorker @AssistedInject constructor(
             // tests / future tracing can see exactly what was excluded
             // at the moment of the call.
             val excludeSnapshot = excludeIds.toSet()
-            val tracks = mixGenerator.generate(recipe, excludeSnapshot)
+            val tracks = mixGenerator.generate(recipe, excludeSnapshot, taste)
 
             // Empty-tracks skip is only safe for library-only recipes
             // (discoveryRatio == 0). Pure-discovery recipes like "Stash
@@ -429,7 +493,7 @@ class StashMixRefreshWorker @AssistedInject constructor(
             // mix" tap shouldn't wait for them. `recipe` was read before the
             // lock, so materializeMix also finds the playlist by its source id.
             val result = materializeMutex.withLock {
-                materializeMix(recipe, tracks, now, excludeSnapshot, rotationSeed)
+                materializeMix(recipe, tracks, now, excludeSnapshot, rotationSeed, taste)
             }
             recipeDao.setPlaylistId(recipe.id, result.playlistId)
             recipeDao.setLastRefreshedAt(recipe.id, now)
@@ -442,8 +506,13 @@ class StashMixRefreshWorker @AssistedInject constructor(
             // Skipped in materialize-only mode: the post-drain re-link must not
             // queue MORE candidates (that's the loop's fuel).
             if (recipe.discoveryRatio > 0f && lastFmConfigured && !materializeOnly) {
-                runCatching { queueDiscoveryForRecipe(recipe, personas) }
-                    .onFailure { Log.w(TAG, "discovery queueing failed for '${recipe.name}'", it) }
+                runCatching { queueDiscoveryForRecipe(recipe, personas, taste) }
+                    .onFailure {
+                        networkPartWorked = false
+                        Log.w(TAG, "discovery queueing failed for '${recipe.name}'", it)
+                    }
+            } else if (recipe.discoveryRatio > 0f && !lastFmConfigured && !materializeOnly) {
+                Log.i(TAG, "'${recipe.name}': no discovery this run, Last.fm isn't configured")
             }
         }
 
@@ -454,8 +523,22 @@ class StashMixRefreshWorker @AssistedInject constructor(
         // forget — backfill failure must never block a successful refresh,
         // so the enqueue itself is guarded (e.g. WorkManager not yet
         // initialised in a unit-test JVM throws IllegalStateException).
-        runCatching { ArtBackfillWorker.enqueueFromMixRefresh(applicationContext) }
+        // A mix the user made or refreshed (by recipe) gets its art on any connection.
+        runCatching { ArtBackfillWorker.enqueueFromMixRefresh(applicationContext, userAsked = targetId > 0L) }
             .onFailure { Log.w(TAG, "art-backfill enqueue failed; refresh still succeeded", it) }
+
+        // A full run (every mix, discovery queued) is what the cold-start one-shot repeats; stamp it so the next cold
+        // start within the day skips it (StashMixRefreshStamp). A single-mix or re-link run doesn't count, and neither
+        // does one whose network part didn't work (networkPartWorked): offline, the next online cold start runs it again.
+        // Never fails the refresh, which already worked.
+        if (targetId <= 0L && !materializeOnly) {
+            if (networkPartWorked && (!lastFmConfigured || networkAvailable())) {
+                runCatching { StashMixRefreshStamp(applicationContext).markFullRefresh() }
+                    .onFailure { Log.w(TAG, "couldn't stamp the full refresh; the next cold start runs one again", it) }
+            } else {
+                Log.i(TAG, "full refresh not recorded: its network part didn't work, so the next cold start runs one")
+            }
+        }
 
         // Drain the discovery_queue we just FILLED. queueDiscoveryForRecipe
         // above only enqueues PENDING candidate rows — it does not turn them
@@ -484,6 +567,25 @@ class StashMixRefreshWorker @AssistedInject constructor(
         }
 
         return Result.success()
+    }
+
+    /**
+     * Your record's taste for this run ([RecordMixTaste.current]): null with none, or when it can't be read (a mix is never held
+     * up by the record).
+     */
+    private suspend fun readTaste(): MixTaste? {
+        val taste = try {
+            recordMixTaste.current()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "your record's taste couldn't be read; mixes without it", e)
+            null
+        }
+        if (taste != null) {
+            Log.i(TAG, "your record: ${taste.artists.size} seed artists, ${taste.avoid.size} songs kept out, ${taste.weights.size} weighted")
+        }
+        return taste
     }
 
     /**
@@ -537,6 +639,7 @@ class StashMixRefreshWorker @AssistedInject constructor(
         now: Long,
         excludeIds: Set<Long>,
         rotationSeed: Long,
+        taste: MixTaste? = null,
     ): MaterializeResult {
         // Existing playlist: verify it's still there (could have been
         // deleted by the user). If gone, fall through to re-create.
@@ -622,7 +725,16 @@ class StashMixRefreshWorker @AssistedInject constructor(
         val rawCandidateIds = playlistDao
             .getStreamableOrDoneTrackIdsForRecipe(recipe.id)
             .take(SURVIVOR_POOL_LIMIT)
-        val nonLibraryCandidates = rawCandidateIds.filter { it !in librarySet }
+        val notInLibrary = rawCandidateIds.filter { it !in librarySet }
+        // Your record's taste: a find it keeps out (hidden on Spotify, always skipped) leaves before the window is cut, so the mix
+        // still fills its places (stash-player discover/mix.ts `discoveryWindow`)
+        val nonLibraryCandidates = if (taste == null || taste.avoid.isEmpty() || notInLibrary.isEmpty()) {
+            notInLibrary
+        } else {
+            val out = trackDao.getByIds(notInLibrary).filter { taste.avoids(it.title, it.artist) }.mapTo(HashSet()) { it.id }
+            Log.i(TAG, "'${recipe.name}': your record avoided ${out.size} of ${notInLibrary.size} finds")
+            notInLibrary.filter { it !in out }
+        }
         // v0.9.21: soft cross-mix dedup. Prefer survivors not already claimed
         // by an earlier-ordered mix; if dedup leaves us below the cap, backfill
         // from the shared pool rather than ship an empty discovery section.
@@ -700,6 +812,10 @@ class StashMixRefreshWorker @AssistedInject constructor(
                 // Name can still drift (e.g. a recipe rename) even when the
                 // track set matches; keep that cheap, non-destructive update.
                 playlistDao.updateName(existing.id, recipe.name)
+                // The cover can too: discovery stubs get their art after they are
+                // linked (ArtBackfillWorker), so a mix first built from art-less
+                // stubs would keep a blank cover until its membership changed.
+                playlistDao.refreshMixCover(existing.id)
                 return MaterializeResult(existing.id, discoveryTrackIds)
             }
         }
@@ -743,12 +859,10 @@ class StashMixRefreshWorker @AssistedInject constructor(
         // tracks carry album art. Up to 4 distinct arts, "|"-joined: the mix
         // card renders a tile mosaic, and single-image call sites take the
         // first (PlaylistMapper). Recomputed every refresh, so the mosaic
-        // fills in once stub art is backfilled. Cosmetic, so it deliberately
-        // stays OUTSIDE the membership transaction, reading the committed rows.
-        val coverArtUrls = playlistDao.getCoverArtUrlsForPlaylist(playlistId, limit = 4)
-        if (coverArtUrls.isNotEmpty()) {
-            playlistDao.updateArtUrl(playlistId, coverArtUrls.joinToString("|"))
-        }
+        // fills in once stub art is backfilled (ArtBackfillWorker also rebuilds
+        // it after filling art). Cosmetic, so it deliberately stays OUTSIDE the
+        // membership transaction, reading the committed rows.
+        playlistDao.refreshMixCover(playlistId)
         return MaterializeResult(playlistId, discoveryTrackIds)
     }
 
@@ -764,6 +878,7 @@ class StashMixRefreshWorker @AssistedInject constructor(
     private suspend fun queueDiscoveryForRecipe(
         recipe: StashMixRecipeEntity,
         personas: LastFmPersonas,
+        taste: MixTaste? = null,
     ) {
         val strategy = MixSeedStrategy.fromStored(recipe.seedStrategy)
         if (strategy == MixSeedStrategy.NONE) return
@@ -772,7 +887,7 @@ class StashMixRefreshWorker @AssistedInject constructor(
         // not the user's global top tags — the custom-mix + retuned-Deep-Cuts path.
         // Other strategies keep the persona-seeded path below, unchanged.
         if (strategy == MixSeedStrategy.TAG_GRAPH) {
-            queueTagSeededDiscovery(recipe)
+            queueTagSeededDiscovery(recipe, taste)
             return
         }
 
@@ -791,13 +906,17 @@ class StashMixRefreshWorker @AssistedInject constructor(
         val recentArtists = listeningEventDao
             .getTopArtistsSince(recentSince, TOP_ARTISTS_LIMIT)
             .map { it.artist }
-        val affinityArtists = personas.topArtistsByPeriod[LastFmPeriod.ONE_MONTH]
-            ?.takeIf { it.isNotEmpty() }
-            ?.take(TOP_ARTISTS_LIMIT)?.map { it.name }
-            ?: listeningEventDao.getTopArtistsSince(since, TOP_ARTISTS_LIMIT)
-                .map { it.artist }
-                .ifEmpty { trackDao.getTopArtistsByTrackCount(TOP_ARTISTS_LIMIT) }
-        val seedArtists = blendRecentFirst(recentArtists, affinityArtists, TOP_ARTISTS_LIMIT)
+        val seedArtists = if (taste != null && strategy == MixSeedStrategy.ARTIST_SIMILAR) {
+            tasteSeeds(recipe, recentArtists, personas, since, taste)
+        } else {
+            val affinityArtists = personas.topArtistsByPeriod[LastFmPeriod.ONE_MONTH]
+                ?.takeIf { it.isNotEmpty() }
+                ?.take(TOP_ARTISTS_LIMIT)?.map { it.name }
+                ?: listeningEventDao.getTopArtistsSince(since, TOP_ARTISTS_LIMIT)
+                    .map { it.artist }
+                    .ifEmpty { trackDao.getTopArtistsByTrackCount(TOP_ARTISTS_LIMIT) }
+            blendRecentFirst(recentArtists, affinityArtists, TOP_ARTISTS_LIMIT)
+        }
 
         // v0.9.20 PR 8: seedTracks gets the same fallback chain as
         // seedArtists (persona > local events > library top-by-LFM-playcount),
@@ -825,7 +944,16 @@ class StashMixRefreshWorker @AssistedInject constructor(
             seedTracks = seedTracks,
             personas = personas,
         )
-        if (candidates.isEmpty()) return
+        if (candidates.isEmpty()) {
+            // An empty Daily Discover hides its Home slot, so say why the run found nothing. Counts only:
+            // artist names say what someone listens to.
+            Log.i(
+                TAG,
+                "'${recipe.name}': 0 candidates via $strategy from ${seedArtists.size} seed artists, " +
+                    "${seedTracks.size} seed tracks, ${topTags.size} tags (${recentArtists.size} recent artists)",
+            )
+            return
+        }
 
         // v0.9.20: pre-filter against library + skip-ban so discovery_queue
         // PENDING rows represent genuinely-new music, not "rediscovery" hits.
@@ -885,7 +1013,38 @@ class StashMixRefreshWorker @AssistedInject constructor(
             "'${recipe.name}': ${final.size} candidates via $strategy " +
                 "(${candidates.size - filtered.size} filtered as library/banned)",
         )
-        mixGenerator.queueDiscoveryCandidates(recipe, final)
+        mixGenerator.queueDiscoveryCandidates(recipe, final, taste)
+    }
+
+    /**
+     * Daily Discover's seeds with Your record (stash-player `discover/mix.ts` `seedArtists`): this phone's own (the last 48 hours,
+     * then the Last.fm month or the local 180 days, [blendRecentFirst] as ever), with the taste's seed artists not among them
+     * keeping `max(3, 8 - own)` places ([MixTaste.blendSeeds]). No own seeds: the taste alone, before the library's top artists
+     * (those are not "own": they are what the library holds, not what was played).
+     */
+    private suspend fun tasteSeeds(
+        recipe: StashMixRecipeEntity,
+        recentArtists: List<String>,
+        personas: LastFmPersonas,
+        since: Long,
+        taste: MixTaste,
+    ): List<String> {
+        val longRun = personas.topArtistsByPeriod[LastFmPeriod.ONE_MONTH]
+            ?.takeIf { it.isNotEmpty() }
+            ?.take(TOP_ARTISTS_LIMIT)?.map { it.name }
+            ?: listeningEventDao.getTopArtistsSince(since, TOP_ARTISTS_LIMIT).map { it.artist }
+        val own = blendRecentFirst(recentArtists, longRun, TOP_ARTISTS_LIMIT)
+        val blend = MixTaste.blendSeeds(own, taste.artists)
+        val ownKept = blend.count { it in own }
+        val seeds = if (blend.isNotEmpty()) {
+            blend
+        } else {
+            blendRecentFirst(recentArtists, trackDao.getTopArtistsByTrackCount(TOP_ARTISTS_LIMIT), TOP_ARTISTS_LIMIT)
+        }
+        val from = if (own.isNotEmpty()) "plays" else if (blend.isNotEmpty()) "history" else "library"
+        // Counts only: logs can go out with shared diagnostics, and artist names say what someone listens to
+        Log.i(TAG, "'${recipe.name}': ${seeds.size} seeds from $from: $ownKept of ${own.size} own, ${blend.size - ownKept} from your record")
+        return seeds
     }
 
     /**
@@ -895,7 +1054,7 @@ class StashMixRefreshWorker @AssistedInject constructor(
      * the same library/skip pre-filter as the persona path, plus a relaxation
      * ladder (drop era -> drop moods) when the filtered pool is below the floor.
      */
-    private suspend fun queueTagSeededDiscovery(recipe: StashMixRecipeEntity) {
+    private suspend fun queueTagSeededDiscovery(recipe: StashMixRecipeEntity, taste: MixTaste? = null) {
         val userTopTags = mixGenerator.computeUserTopTags(limit = 10)
         val userTopArtists = trackDao.getTopArtistsByTrackCount(TOP_ARTISTS_LIMIT)
             .map { it.trim().lowercase() }.toHashSet()
@@ -939,7 +1098,7 @@ class StashMixRefreshWorker @AssistedInject constructor(
             return
         }
         Log.i(TAG, "'${recipe.name}': queueing ${pool.size} tag-seeded candidates")
-        mixGenerator.queueDiscoveryCandidates(recipe, pool)
+        mixGenerator.queueDiscoveryCandidates(recipe, pool, taste)
     }
 
     /**
@@ -962,9 +1121,10 @@ class StashMixRefreshWorker @AssistedInject constructor(
      * without redundant network calls. Sequential with a small inter-call
      * delay to stay polite under Last.fm's rate ceiling. Wrapped by
      * [withTimeout] at the call site — failures here surface as the
-     * cancelled-coroutine path which the caller turns into [LastFmPersonas.EMPTY].
+     * cancelled-coroutine path which the caller turns into [LastFmPersonas.EMPTY]. Each call's own failure reads as an
+     * empty slice, as before; [PersonaFetch.allCameBack] says whether every call came back.
      */
-    private suspend fun fetchPersonas(username: String): LastFmPersonas {
+    private suspend fun fetchPersonas(username: String): PersonaFetch {
         val periods = listOf(
             LastFmPeriod.SEVEN_DAY,
             LastFmPeriod.ONE_MONTH,
@@ -974,13 +1134,26 @@ class StashMixRefreshWorker @AssistedInject constructor(
         )
         val tracks = mutableMapOf<LastFmPeriod, List<LastFmTopTrack>>()
         val artists = mutableMapOf<LastFmPeriod, List<LastFmTopArtist>>()
+        var allCameBack = true
         for (period in periods) {
-            tracks[period] = lastFmApiClient.getUserTopTracks(username, period, limit = 100)
-                .getOrNull().orEmpty()
-            artists[period] = lastFmApiClient.getUserTopArtists(username, period, limit = 50)
-                .getOrNull().orEmpty()
+            val topTracks = lastFmApiClient.getUserTopTracks(username, period, limit = 100)
+            val topArtists = lastFmApiClient.getUserTopArtists(username, period, limit = 50)
+            if (topTracks.isFailure || topArtists.isFailure) allCameBack = false
+            tracks[period] = topTracks.getOrNull().orEmpty()
+            artists[period] = topArtists.getOrNull().orEmpty()
             delay(SIMILAR_REQUEST_INTERVAL_MS)
         }
-        return LastFmPersonas(tracks, artists)
+        return PersonaFetch(LastFmPersonas(tracks, artists), allCameBack)
     }
+
+    /** [fetchPersonas]' result, and whether every Last.fm call in it came back (offline, none does). */
+    private class PersonaFetch(val personas: LastFmPersonas, val allCameBack: Boolean)
+}
+
+/** Whether the default network has internet and Android has validated it; true when it can't tell (no manager). */
+private fun hasValidatedNetwork(context: Context): Boolean {
+    val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager ?: return true
+    val caps = cm.getNetworkCapabilities(cm.activeNetwork) ?: return false
+    return caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+        caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED)
 }

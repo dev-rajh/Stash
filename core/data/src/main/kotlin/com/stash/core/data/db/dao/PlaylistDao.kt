@@ -7,6 +7,7 @@ import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Transaction
 import androidx.room.Update
+import com.stash.core.data.db.chunkedForBind
 import com.stash.core.data.db.chunkedForBindWrite
 import com.stash.core.data.db.entity.PlaylistEntity
 import com.stash.core.data.db.entity.PlaylistTrackCrossRef
@@ -243,6 +244,34 @@ interface PlaylistDao {
      * Route through [com.stash.core.data.db.chunkedForBind]; a library-sized
      * playlist id list overflows SQLite's bind cap unchunked.
      */
+    /**
+     * The live memberships of [trackIds] in switched-on, active playlists other than Stash Mixes:
+     * where the sync's requeue finds each song it skips, so it can link the song's copy there
+     * ([com.stash.core.data.library.LibraryReconciliationUseCase]).
+     */
+    @Query("""
+        SELECT pt.* FROM playlist_tracks pt
+        INNER JOIN playlists p ON p.id = pt.playlist_id
+        WHERE pt.track_id IN (:trackIds)
+          AND pt.removed_at IS NULL
+          AND p.sync_enabled = 1
+          AND p.is_active = 1
+          AND p.type != 'STASH_MIX'
+    """)
+    suspend fun getSyncedMembershipsRaw(trackIds: List<Long>): List<PlaylistTrackCrossRef>
+
+    /** [getSyncedMembershipsRaw], chunked for SQLite's bind cap. */
+    suspend fun getSyncedMemberships(trackIds: List<Long>): List<PlaylistTrackCrossRef> =
+        trackIds.chunkedForBind { getSyncedMembershipsRaw(it) }
+
+    /**
+     * Inserts links that are absent and leaves any existing one as it is: a copy already in the
+     * playlist keeps its place, and one the user took out (a removal mark written meanwhile
+     * included) stays out. For a song's copy linked where the song sits.
+     */
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertCrossRefsIfAbsent(crossRefs: List<PlaylistTrackCrossRef>)
+
     @Query("SELECT * FROM playlist_tracks WHERE playlist_id IN (:playlistIds)")
     suspend fun getCrossRefsForPlaylists(playlistIds: List<Long>): List<PlaylistTrackCrossRef>
 
@@ -574,6 +603,30 @@ interface PlaylistDao {
     @Query("UPDATE playlists SET last_synced = :timestamp WHERE id = :playlistId")
     suspend fun updateLastSynced(playlistId: Long, timestamp: Long)
 
+    // ── Like mirroring: "is it liked on Spotify already?" ────────────────
+
+    /**
+     * When the synced Spotify Liked Songs was last read (epoch millis), or null when it never was. A Liked Songs snapshot
+     * carries no revision, so every sync re-diffs it and moves this ([com.stash.core.data.sync.workers.DiffWorker]).
+     */
+    @Query("SELECT MAX(last_synced) FROM playlists WHERE type = 'LIKED_SONGS' AND source = 'SPOTIFY'")
+    suspend fun spotifyLikedSongsLastSynced(): Long?
+
+    /** Whether the synced Spotify Liked Songs holds the song: its row, or any row with the same Spotify URI. */
+    @Query(
+        """
+        SELECT EXISTS(
+            SELECT 1 FROM playlist_tracks pt
+            INNER JOIN playlists p ON p.id = pt.playlist_id
+            INNER JOIN tracks t ON t.id = pt.track_id
+            WHERE p.type = 'LIKED_SONGS' AND p.source = 'SPOTIFY'
+              AND pt.removed_at IS NULL
+              AND (pt.track_id = :trackId OR (:spotifyUri IS NOT NULL AND t.spotify_uri = :spotifyUri))
+        )
+        """
+    )
+    suspend fun isInSpotifyLikedSongs(trackId: Long, spotifyUri: String?): Boolean
+
     // ── Snapshot queries ─────────────────────────────────────────────────
 
     /** Retrieve the snapshot ID for a playlist, used for change detection. */
@@ -731,12 +784,22 @@ interface PlaylistDao {
      * it there (`pinned_to_home_at`, an earlier pin stamp is kept so the rail
      * order stays put), turning sync off unpins it. Liked Songs is exempt: it
      * has its own Home card and never belongs on the Your playlists rail.
+     *
+     * Mixes are exempt too, both ways (2026-11-02): on a mix the pin is its
+     * Favorite (#686), which only the user sets. Switching a mix on used to
+     * pin it, and v0.9.119 showed every one of those pins as a heart.
+     *
+     * Saved albums likewise ([SAVED_ALBUM], 2026-11-02): one goes on Home only
+     * by hand, and the switch leaves that pin alone either way.
      */
     @Query(
         """
         UPDATE playlists SET
             sync_enabled = :enabled,
             pinned_to_home_at = CASE
+                WHEN type IN ('DAILY_MIX', 'STASH_MIX') THEN pinned_to_home_at
+                -- A saved album goes on Home only by hand, like a mix (2026-11-02).
+                WHEN EXISTS (SELECT 1 FROM playlists p WHERE p.id = :playlistId AND """ + SAVED_ALBUM + """) THEN pinned_to_home_at
                 WHEN :enabled = 0 THEN NULL
                 WHEN type IN ('LIKED_SONGS', 'STASH_LIKED') THEN pinned_to_home_at
                 ELSE COALESCE(pinned_to_home_at, :now)
@@ -749,16 +812,38 @@ interface PlaylistDao {
     /**
      * One-time backfill for installs that synced playlists before the pin
      * rule existed: every active, synced, unpinned playlist gets pinned now,
-     * Liked Songs excepted. Returns the number of rows pinned. Idempotent.
+     * Liked Songs and mixes excepted. Returns the number of rows pinned. Idempotent.
      */
     @Query(
         """
         UPDATE playlists SET pinned_to_home_at = :now
         WHERE is_active = 1 AND sync_enabled = 1 AND pinned_to_home_at IS NULL
-          AND type NOT IN ('LIKED_SONGS', 'STASH_LIKED')
+          AND type NOT IN ('LIKED_SONGS', 'STASH_LIKED', 'DAILY_MIX', 'STASH_MIX')
         """
     )
     suspend fun pinSyncedPlaylists(now: Long): Int
+
+    /**
+     * One-time cleanup (2026-11-02, [com.stash.core.data.db.MixPinCleanup]):
+     * a mix pinned before [before] loses its pin, and with it the heart. Only
+     * mixes; every other type keeps its pin. Returns the number of rows cleared.
+     */
+    @Query(
+        """
+        UPDATE playlists SET pinned_to_home_at = NULL
+        WHERE type IN ('DAILY_MIX', 'STASH_MIX') AND pinned_to_home_at < :before
+        """
+    )
+    suspend fun clearMixPinsBefore(before: Long): Int
+
+    /** How many mixes are pinned (favorited) now: the cleanup's log line. */
+    @Query(
+        """
+        SELECT COUNT(*) FROM playlists
+        WHERE type IN ('DAILY_MIX', 'STASH_MIX') AND pinned_to_home_at IS NOT NULL
+        """
+    )
+    suspend fun countPinnedMixes(): Int
 
     /** Toggle whether a playlist is hidden from the Home rails. */
     @Query("UPDATE playlists SET hide_from_home = :hidden WHERE id = :playlistId")
@@ -825,6 +910,27 @@ interface PlaylistDao {
     suspend fun getCoverArtUrlsForPlaylist(playlistId: Long, limit: Int): List<String>
 
     /**
+     * Rebuilds a Stash Mix's cover from its songs' art: up to 4 distinct arts
+     * ([getCoverArtUrlsForPlaylist]), "|"-joined, as the mix card draws a tile
+     * mosaic and single-image call sites take the first (PlaylistMapper).
+     * Keeps the old cover while no song has art, and writes only when the
+     * cover changes, so an unchanged one doesn't re-emit every playlist flow.
+     */
+    @Transaction
+    suspend fun refreshMixCover(playlistId: Long) {
+        val arts = getCoverArtUrlsForPlaylist(playlistId, limit = 4)
+        if (arts.isNotEmpty()) updateArtUrlIfChanged(playlistId, arts.joinToString("|"))
+    }
+
+    /** [updateArtUrl] that touches no row when the cover is already [artUrl]. */
+    @Query("UPDATE playlists SET art_url = :artUrl WHERE id = :playlistId AND art_url IS NOT :artUrl")
+    suspend fun updateArtUrlIfChanged(playlistId: Long, artUrl: String)
+
+    /** Every Stash Mix playlist's id, for [refreshMixCover]. */
+    @Query("SELECT id FROM playlists WHERE type = 'STASH_MIX'")
+    suspend fun getStashMixPlaylistIds(): List<Long>
+
+    /**
      * Refreshes the user-facing name for a synced playlist. Spotify changes
      * the display name for its generated mixes over time (e.g. "Your Daily
      * Mix 1" → "Daily Mix 1" or back), so sync runs update the name to
@@ -836,7 +942,7 @@ interface PlaylistDao {
     /** All Spotify playlists ordered by type (liked first, then mixes, then custom) and name. */
     @Query("""
         SELECT * FROM playlists
-        WHERE source = 'SPOTIFY' AND is_active = 1
+        WHERE source = 'SPOTIFY' AND (is_active = 1 OR user_hidden = 1)
         ORDER BY
             CASE type
                 WHEN 'LIKED_SONGS' THEN 0
@@ -850,7 +956,7 @@ interface PlaylistDao {
     /** All YouTube Music playlists ordered by type (liked first, then mixes) and name. */
     @Query("""
         SELECT * FROM playlists
-        WHERE source = 'YOUTUBE' AND is_active = 1
+        WHERE source = 'YOUTUBE' AND (is_active = 1 OR user_hidden = 1)
         ORDER BY
             CASE type
                 WHEN 'LIKED_SONGS' THEN 0
@@ -860,6 +966,14 @@ interface PlaylistDao {
             name ASC
     """)
     fun getYouTubePlaylistsForPreferences(): Flow<List<PlaylistEntity>>
+
+    /**
+     * Whether any of [source]'s playlists are still in the library: the rows the
+     * Sync screens list for it (the two queries above). Keeps a disconnected
+     * account's Refresh/Accumulate counting while its songs are here (#273).
+     */
+    @Query("SELECT EXISTS(SELECT 1 FROM playlists WHERE source = :source AND (is_active = 1 OR user_hidden = 1))")
+    suspend fun hasLibraryPlaylists(source: MusicSource): Boolean
 
     /** The followed mix's "Download this mix" switch (spec §6): sync_enabled only, no Home pin. */
     @Query("UPDATE playlists SET sync_enabled = :enabled WHERE id = :playlistId")
@@ -965,6 +1079,10 @@ interface PlaylistDao {
      * inventory. With [hasCurrentIds] false every active one goes. Worked out
      * in memory and written in chunks for the same bind-cap reason as
      * [deactivateMissingForSource].
+     *
+     * Saved albums ([com.stash.core.data.album.SavedAlbums]) are never in the
+     * playlist listing, so they are left out: Spotify's saved albums (item 5)
+     * need their own "still saved" check against the album listing.
      */
     @Transaction
     suspend fun deactivateMissingSpotifyCustomPlaylists(
@@ -974,6 +1092,7 @@ interface PlaylistDao {
         val current = currentSourceIds.toHashSet()
         val missing = getActivePlaylistsBySource(MusicSource.SPOTIFY)
             .filter { it.type == PlaylistType.CUSTOM && (!hasCurrentIds || it.sourceId !in current) }
+            .filterNot { com.stash.core.data.album.SavedAlbums.isSavedAlbum(it.type, it.source, it.sourceId) }
             .map { it.id }
         return deactivateByIdsChunked(missing)
     }
@@ -984,6 +1103,31 @@ interface PlaylistDao {
      *  remaining silently hidden. */
     @Query("UPDATE playlists SET is_active = 1 WHERE id = :playlistId AND is_active = 0")
     suspend fun reactivateById(playlistId: Long): Int
+
+    /**
+     * Take a playlist out of the library, or put it back (the account page's
+     * "In your library"). Out is inactive, which every surface already leaves
+     * out, and off Home; sync leaves a hidden playlist alone. Back in shows it
+     * again; the next sync re-hides it as usual if the account no longer has it.
+     */
+    @Query(
+        """
+        UPDATE playlists SET
+            user_hidden = :hidden,
+            is_active = CASE WHEN :hidden THEN 0 ELSE 1 END,
+            pinned_to_home_at = CASE WHEN :hidden THEN NULL ELSE pinned_to_home_at END
+        WHERE id = :playlistId
+        """
+    )
+    suspend fun setUserHidden(playlistId: Long, hidden: Boolean)
+
+    /** A mix's Stack switch ([PlaylistEntity.stackSongs]). */
+    @Query("UPDATE playlists SET stack_songs = :on WHERE id = :playlistId")
+    suspend fun setStackSongs(playlistId: Long, on: Boolean)
+
+    /** Every service mix, in or out of the library. */
+    @Query("SELECT * FROM playlists WHERE type = 'DAILY_MIX'")
+    suspend fun getMixPlaylists(): List<PlaylistEntity>
 
     /**
      * Set [is_active] on one playlist, either direction. Used by app-managed
@@ -1014,15 +1158,99 @@ interface PlaylistDao {
     @Query("SELECT COALESCE(MAX(position), -1) + 1 FROM playlist_tracks WHERE playlist_id = :playlistId AND removed_at IS NULL")
     suspend fun getNextPosition(playlistId: Long): Int
 
-    /** All user-created custom playlists (source = BOTH means local). */
+    /**
+     * All user-created custom playlists (source = BOTH means local): the "Add to playlist"
+     * pickers. A saved album ([SAVED_ALBUM]) is a release, not a list to add songs to, so it
+     * stays out (owner, 2026-11-02).
+     */
     @Query(
         """
-        SELECT * FROM playlists WHERE type = 'CUSTOM' AND source = 'BOTH' AND is_active = 1
-          AND id NOT IN (SELECT playlist_id FROM shared_mixes WHERE role = 'FOLLOWER' AND status = 'ACTIVE')
-        ORDER BY name ASC
+        SELECT p.* FROM playlists p WHERE p.type = 'CUSTOM' AND p.source = 'BOTH' AND p.is_active = 1
+          AND NOT """ + SAVED_ALBUM + """
+          AND p.id NOT IN (SELECT playlist_id FROM shared_mixes WHERE role = 'FOLLOWER' AND status = 'ACTIVE')
+        ORDER BY p.name ASC
         """
     )
     fun getUserCreatedPlaylists(): Flow<List<PlaylistEntity>>
+
+    /**
+     * Library › Albums' rows: every active saved album ([SAVED_ALBUM]) with its songs counted and
+     * named ([SavedAlbumRow]). One row per saved copy; merging copies of one album and Download
+     * mode's rule are [com.stash.core.data.album.SavedAlbums.forLibrary]'s.
+     *
+     * Its songs are what the album page lists in Stream only: live memberships, blocked songs left
+     * out, and a song counted once however many rows hold it ([SavedAlbumSlot]: a copy already on
+     * the phone is linked beside the song's own row when the album downloads). A song is on the
+     * phone when one of its rows is (`is_downloaded`, what Download mode lists,
+     * [com.stash.core.data.repository.MusicRepository.getShownTracksByPlaylist]), and explicit when
+     * one of its rows is marked so (a clean edition has no explicit song).
+     *
+     * The songs' artists and titles come in no set order (SQLite doesn't promise GROUP_CONCAT's):
+     * they're only compared as a set. The album's order is the page's ([TrackDao.getByPlaylist]).
+     */
+    @Query(
+        """
+        SELECT p.id AS id, p.name AS name, p.source AS source, p.source_id AS sourceId,
+               p.art_url AS artUrl, p.date_added AS dateAdded,
+               COUNT(m.playlist_id) AS trackCount,
+               COALESCE(SUM(m.on_phone), 0) AS downloadedCount,
+               COALESCE(SUM(m.is_explicit), 0) AS explicitCount,
+               GROUP_CONCAT(m.artist, char(31)) AS artists,
+               GROUP_CONCAT(m.title, char(31)) AS titles
+        FROM playlists p
+        LEFT JOIN (
+            SELECT pt.playlist_id AS playlist_id,
+                   MIN(t.artist) AS artist, MIN(t.title) AS title,
+                   MAX(t.is_downloaded = 1) AS on_phone,
+                   MAX(t.explicit = 1) AS is_explicit
+            FROM playlist_tracks pt
+            INNER JOIN playlists p ON p.id = pt.playlist_id
+            INNER JOIN tracks t ON t.id = pt.track_id
+            WHERE pt.removed_at IS NULL
+              AND p.is_active = 1
+              AND """ + SAVED_ALBUM + """
+              AND NOT EXISTS (
+                  SELECT 1 FROM track_blocklist bl
+                  WHERE bl.canonical_key = (t.canonical_artist || '|' || t.canonical_title)
+                     OR (bl.spotify_uri IS NOT NULL AND bl.spotify_uri = t.spotify_uri)
+                     OR (bl.youtube_id  IS NOT NULL AND bl.youtube_id  = t.youtube_id)
+              )
+            -- One row per song: its own row and a copy linked beside it fill one slot.
+            GROUP BY pt.playlist_id, pt.position, t.canonical_title, t.canonical_artist
+        ) m ON m.playlist_id = p.id
+        WHERE p.is_active = 1
+          AND """ + SAVED_ALBUM + """
+        GROUP BY p.id
+        ORDER BY p.date_added DESC, p.id DESC
+        """
+    )
+    fun observeSavedAlbums(): Flow<List<SavedAlbumRow>>
+
+    /**
+     * [playlistId]'s live memberships with the song slot each fills, when it is a saved album
+     * ([SAVED_ALBUM]); empty for any other playlist. What collapses a saved album's copies to one
+     * row per song ([com.stash.core.data.album.SavedAlbums.oneRowPerSong]).
+     */
+    @Query(
+        """
+        SELECT pt.track_id AS trackId, pt.position AS position,
+               t.canonical_title AS canonicalTitle, t.canonical_artist AS canonicalArtist
+        FROM playlist_tracks pt
+        INNER JOIN playlists p ON p.id = pt.playlist_id
+        INNER JOIN tracks t ON t.id = pt.track_id
+        WHERE pt.playlist_id = :playlistId
+          AND pt.removed_at IS NULL
+          AND """ + SAVED_ALBUM + """
+        """
+    )
+    fun observeSavedAlbumSlots(playlistId: Long): Flow<List<SavedAlbumSlot>>
+
+    /**
+     * Whether [playlistId] is a saved album ([SAVED_ALBUM]). Reads the playlists table only, so a
+     * song's write (a download landing) never re-runs it.
+     */
+    @Query("SELECT EXISTS(SELECT 1 FROM playlists p WHERE p.id = :playlistId AND " + SAVED_ALBUM + ")")
+    fun observeIsSavedAlbum(playlistId: Long): Flow<Boolean>
 
     /**
      * v0.9.23 — playlists the user can pick as a destination for
@@ -1041,28 +1269,31 @@ interface PlaylistDao {
      * (Stash-native customs) is included as a defensive third arm so
      * brand-new empty custom playlists are always pickable as a save
      * destination, even before they have tracks.
+     *
+     * A saved album ([SAVED_ALBUM]) is never a destination (owner, 2026-11-02).
      */
     @Query(
         """
-        SELECT * FROM playlists
-        WHERE is_active = 1
-          AND type IN ('CUSTOM')
+        SELECT p.* FROM playlists p
+        WHERE p.is_active = 1
+          AND p.type IN ('CUSTOM')
+          AND NOT """ + SAVED_ALBUM + """
           -- An active followed shared mix is read-only (spec §6).
-          AND id NOT IN (SELECT playlist_id FROM shared_mixes WHERE role = 'FOLLOWER' AND status = 'ACTIVE')
+          AND p.id NOT IN (SELECT playlist_id FROM shared_mixes WHERE role = 'FOLLOWER' AND status = 'ACTIVE')
           AND (
-              source = 'BOTH'
-              OR sync_enabled = 1
+              p.source = 'BOTH'
+              OR p.sync_enabled = 1
               OR EXISTS (
                   SELECT 1 FROM playlist_tracks pt
                   JOIN tracks t ON pt.track_id = t.id
-                  WHERE pt.playlist_id = playlists.id
+                  WHERE pt.playlist_id = p.id
                     AND pt.removed_at IS NULL
                     AND (t.is_downloaded = 1 OR t.source = 'CLOUD')
               )
           )
         ORDER BY
-          CASE WHEN source = 'BOTH' THEN 0 ELSE 1 END,
-          name ASC
+          CASE WHEN p.source = 'BOTH' THEN 0 ELSE 1 END,
+          p.name ASC
         """
     )
     fun getPickablePlaylists(): Flow<List<PlaylistEntity>>

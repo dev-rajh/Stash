@@ -14,6 +14,7 @@ import com.stash.core.data.prefs.NowPlayingAction.RADIO
 import com.stash.core.data.prefs.NowPlayingAction.SAVE_TO_PLAYLIST
 import com.stash.core.data.prefs.NowPlayingAction.SHARE
 import com.stash.core.data.prefs.NowPlayingAction.SLEEP_TIMER
+import com.stash.core.data.prefs.NowPlayingAction.STREAM_QUALITY
 import com.stash.core.data.prefs.NowPlayingAction.VIEW_ALBUM
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -22,6 +23,12 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class NowPlayingActionsTest {
+
+    @Test fun `preview downloads and wrong-match actions for exact SoundCloud uploads stay hidden`() {
+        assertFalse(isActionAvailable(DOWNLOAD, ActionContext(isPreview = true)))
+        assertFalse(isActionAvailable(FLAG_WRONG_MATCH, ActionContext(isSoundCloudSong = true)))
+        assertTrue(isActionAvailable(DOWNLOAD, ActionContext(isSoundCloudSong = true)))
+    }
 
     private val solo = ActionContext()
 
@@ -100,6 +107,24 @@ class NowPlayingActionsTest {
         assertTrue(POST_TO_COMMUNITY in topRowActions(setOf(POST_TO_COMMUNITY), on).leading)
     }
 
+    @Test fun `Streaming quality is a menu row right after Speed while songs stream`() {
+        assertEquals(
+            // Fork: MORE_ON_ARTIST after View Album, SLEEP_TIMER after Streaming quality.
+            listOf(LYRICS, LISTEN_TOGETHER, SAVE_TO_PLAYLIST, SHARE, VIEW_ALBUM, MORE_ON_ARTIST, PLAYBACK_SPEED, STREAM_QUALITY, SLEEP_TIMER, DOWNLOAD, FLAG_WRONG_MATCH),
+            menuActions(NowPlayingAction.DefaultPins, ActionContext(streams = true)),
+        )
+    }
+
+    @Test fun `Streaming quality stays out of the menu and the row in Download mode`() {
+        assertFalse(STREAM_QUALITY in menuActions(emptySet(), solo))
+        assertFalse(STREAM_QUALITY in topRowActions(setOf(STREAM_QUALITY), solo).leading)
+        // A room or a cast changes nothing: the next song still streams under these switches.
+        val streaming = ActionContext(streams = true)
+        assertTrue(STREAM_QUALITY in menuActions(emptySet(), streaming.copy(inRoom = true)))
+        assertTrue(STREAM_QUALITY in menuActions(emptySet(), streaming.copy(casting = true)))
+        assertTrue(STREAM_QUALITY in topRowActions(setOf(STREAM_QUALITY), streaming).leading)
+    }
+
     // ── the editor ───────────────────────────────────────────────────────────────────────────
 
     @Test fun `the editor lists room-hidden actions so they stay editable, with a reason`() {
@@ -110,6 +135,14 @@ class NowPlayingActionsTest {
         assertEquals("Hidden while listening together", hiddenReason(RADIO, room))
         assertEquals("Hidden while casting", hiddenReason(PLAYBACK_SPEED, ActionContext(casting = true)))
         assertNull(hiddenReason(SHARE, room))
+    }
+
+    @Test fun `the editor lists Streaming quality in Download mode and says why it is hidden`() {
+        assertTrue(STREAM_QUALITY in editableActions(emptySet(), solo))
+        assertEquals("Nothing streams in Download mode", hiddenReason(STREAM_QUALITY, solo))
+        // Download mode is the reason even in a room, not the room.
+        assertEquals("Nothing streams in Download mode", hiddenReason(STREAM_QUALITY, ActionContext(inRoom = true)))
+        assertNull(hiddenReason(STREAM_QUALITY, ActionContext(streams = true)))
     }
 
     @Test fun `the editor hides Post to Community while Community is off unless it is still pinned`() {

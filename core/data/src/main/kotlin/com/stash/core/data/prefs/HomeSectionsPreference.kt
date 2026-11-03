@@ -43,7 +43,46 @@ enum class HomeSection(val key: String) {
      * a stale saved order appends it; Home shows it first until the user reorders Home
      * ([effectiveHomeSectionOrder]). Home renders it only once there's a listen.
      */
-    YOUR_LISTENING("your_listening");
+    YOUR_LISTENING("your_listening"),
+
+    /**
+     * Your record (PLAN record-in-app 2026-10-26: "Home card, like the web"): the way into the record. Like the web, directly
+     * under Daily Discover: a saved order without it gets it there ([resolveHomeSectionOrder]), so it shows for everyone who
+     * already has one. Last in the enum only so the enum's order stays the old default's.
+     */
+    YOUR_RECORD("your_record"),
+
+    /**
+     * "From your record" (record-in-app phase 5c): mixes only years of history make, a different few each day, with Show all
+     * into the record's Mixes tab. Only with an import (Home renders nothing without picks). Always directly under
+     * [YOUR_RECORD], wherever the card is (owner 2026-11-01: the mixes belong with the record): it has no place of its own
+     * ([withRecordMixesUnderRecord], [movedHomeSectionOrder]), only its own switch, so the card can be hidden and the mixes
+     * kept. Last in the enum so the enum's order stays the old default's.
+     */
+    RECORD_MIXES("record_mixes"),
+
+    /**
+     * "New from your artists": this year's and last year's releases from the artists you listen to most
+     * ([com.stash.core.data.home.NewFromArtists]). Streaming content, so Home hides it in Offline mode, and shows
+     * nothing without listening history. Above the catalogs, your artists' releases before everyone's: a saved
+     * order without it gets it there ([ADDED_SECTION_ANCHORS]).
+     */
+    NEW_FROM_ARTISTS("new_from_artists"),
+
+    /**
+     * "Moods & moments": YouTube Music's mood tiles, each opening a page of its playlists
+     * ([com.stash.core.data.home.MoodsRepository]). Works signed out and with no history, so a brand-new Home has music
+     * two taps away. Streaming content, hidden in Offline mode. Under New from your artists, above the catalogs.
+     */
+    MOODS("moods"),
+
+    /**
+     * "Because you like ‹song›": two or three rows, each YouTube Music's related songs for a song you play a lot
+     * lately or liked lately ([com.stash.core.data.home.BecauseYouLike]). Streaming content, hidden in Offline mode,
+     * and nothing until there's listening to seed from. Home's most personal discovery after Daily Discover, so it
+     * leads the new shelves: above New from your artists and Moods & moments, above the catalogs.
+     */
+    BECAUSE_YOU_LIKE("because_you_like");
 
     companion object {
         fun fromKey(key: String): HomeSection? = entries.firstOrNull { it.key == key }
@@ -56,30 +95,125 @@ enum class HomeSection(val key: String) {
  * from the saved order are appended in default order (added in an
  * update) — so a stale preference can never hide a new section.
  *
- * The exception is DISCOVER when it's missing: every order saved before it
+ * Three exceptions. DISCOVER when it's missing: every order saved before it
  * existed had Discover pinned on top, so a missing DISCOVER goes to the FRONT.
+ * YOUR_RECORD when it's missing: the web's card sits directly under Daily
+ * Discover, so it goes there when Discover is first, otherwise first.
+ * RECORD_MIXES when it's missing: directly under YOUR_RECORD. The sections
+ * added since each have a place of their own too ([ADDED_SECTION_ANCHORS]).
+ *
+ * This is the saved order as it was saved; what Home shows is
+ * [effectiveHomeSectionOrder], where RECORD_MIXES follows the card wherever
+ * the saved order had put it.
  */
 fun resolveHomeSectionOrder(savedKeys: List<String>): List<HomeSection> {
     val known = savedKeys.mapNotNull(HomeSection::fromKey).distinct()
     val missing = HomeSection.entries.filter { it !in known }
     val front = if (HomeSection.DISCOVER in missing) listOf(HomeSection.DISCOVER) else emptyList()
-    return front + known + (missing - HomeSection.DISCOVER)
+    val order = front + known + (missing - HomeSection.DISCOVER - HomeSection.YOUR_RECORD - HomeSection.RECORD_MIXES)
+    val withRecord = when {
+        HomeSection.YOUR_RECORD !in missing -> order
+        order.firstOrNull() == HomeSection.DISCOVER -> listOf(HomeSection.DISCOVER, HomeSection.YOUR_RECORD) + order.drop(1)
+        else -> listOf(HomeSection.YOUR_RECORD) + order
+    }
+    val withMixes = if (HomeSection.RECORD_MIXES in missing) withRecordMixesUnderRecord(withRecord) else withRecord
+    return withAddedSectionsPlaced(withMixes, missing)
+}
+
+/**
+ * The sections added after "From your record", each with where it goes in an order saved before it existed:
+ * directly above the first of its anchors there, or last when none of them is, and never above Discover (an anchor
+ * the user moved over Discover puts the new section directly under it, so Discover keeps its lead). Placed in this
+ * list's order, so one anchored like an earlier one lands under it. A fresh install's order comes out of the same
+ * rule, and a saved order is never rewritten: this is applied each time it's read, until the user's next reorder
+ * saves it whole.
+ */
+internal val ADDED_SECTION_ANCHORS: List<Pair<HomeSection, List<HomeSection>>> = listOf(
+    // Your artists' new releases right above everyone's (Qobuz's New Releases, then the other catalogs)
+    HomeSection.NEW_FROM_ARTISTS to listOf(HomeSection.NEW_RELEASES, HomeSection.QOBUZ_PLAYLISTS, HomeSection.TOP_ALBUMS),
+    // The way into music without any history, above the catalogs (so under New from your artists when both are new)
+    HomeSection.MOODS to listOf(HomeSection.NEW_RELEASES, HomeSection.QOBUZ_PLAYLISTS, HomeSection.TOP_ALBUMS),
+    // Above the other new shelves wherever they are (a saved order may hold them already), else above the catalogs
+    HomeSection.BECAUSE_YOU_LIKE to listOf(
+        HomeSection.NEW_FROM_ARTISTS, HomeSection.MOODS,
+        HomeSection.NEW_RELEASES, HomeSection.QOBUZ_PLAYLISTS, HomeSection.TOP_ALBUMS,
+    ),
+)
+
+/** [order] with each of [ADDED_SECTION_ANCHORS]' sections that the saved order was [missing] moved to its place. */
+internal fun withAddedSectionsPlaced(order: List<HomeSection>, missing: Collection<HomeSection>): List<HomeSection> {
+    var placed = order
+    val placedNow = HashSet<HomeSection>()
+    for ((section, anchors) in ADDED_SECTION_ANCHORS) {
+        if (section !in missing) continue
+        val rest = placed - section
+        val anchor = rest.indexOfFirst { it in anchors }
+        val discover = rest.indexOf(HomeSection.DISCOVER)
+        val at = if (anchor >= 0 && discover >= 0 && anchor <= discover) {
+            // Under Discover, and under the new sections already put there unless it's anchored above them
+            var under = discover + 1
+            while (under < rest.size && rest[under] in placedNow && rest[under] !in anchors) under++
+            under
+        } else {
+            anchor
+        }
+        placed = if (at < 0) rest + section else rest.take(at) + section + rest.drop(at)
+        placedNow += section
+    }
+    return placed
+}
+
+/**
+ * [order] with "From your record" directly under "Your record", wherever the card is (owner 2026-11-01: the mixes belong
+ * with the record, not way below everything else). The mixes have no position of their own, only their own switch, so
+ * [visibleHomeSections] does the rest: the card hidden, the mixes take its place; the mixes hidden, the card alone. Applied
+ * when the order is read, never written over a saved one: an order saved before this keeps every choice in it, and the
+ * mixes simply show under the card. An order without the card comes back as it is.
+ */
+fun withRecordMixesUnderRecord(order: List<HomeSection>): List<HomeSection> {
+    val rest = order.filter { it != HomeSection.RECORD_MIXES }
+    val card = rest.indexOf(HomeSection.YOUR_RECORD)
+    if (card < 0) return order
+    return rest.take(card + 1) + HomeSection.RECORD_MIXES + rest.drop(card + 1)
 }
 
 /**
  * The order Home uses. Until the user reorders Home after this update ([promoted] false), Your listening
  * leads (owner 2026-10-19: show the new feature first, once); any reorder saves the order and ends that.
- * It goes directly under Discover when Discover is first, otherwise first.
+ * It goes directly under Discover when Discover is first, otherwise first; and under Your record (and its
+ * mixes) when that sits right there (Discover, Your record, From your record, Your listening).
+ *
+ * The record's mixes go under the card last ([withRecordMixesUnderRecord]): placed before the promotion,
+ * Your listening would land between the card and its mixes.
  */
 fun effectiveHomeSectionOrder(savedKeys: List<String>, promoted: Boolean): List<HomeSection> {
-    val resolved = resolveHomeSectionOrder(savedKeys)
-    if (promoted) return resolved
-    val rest = resolved - HomeSection.YOUR_LISTENING
-    return if (rest.firstOrNull() == HomeSection.DISCOVER) {
-        listOf(HomeSection.DISCOVER, HomeSection.YOUR_LISTENING) + rest.drop(1)
+    // The promotion is placed among the sections that have a place of their own; the mixes follow the card.
+    val resolved = resolveHomeSectionOrder(savedKeys).filter { it != HomeSection.RECORD_MIXES }
+    val order = if (promoted) {
+        resolved
     } else {
-        listOf(HomeSection.YOUR_LISTENING) + rest
+        val rest = resolved - HomeSection.YOUR_LISTENING
+        var lead = if (rest.firstOrNull() == HomeSection.DISCOVER) 1 else 0
+        if (rest.getOrNull(lead) == HomeSection.YOUR_RECORD) lead++
+        rest.take(lead) + HomeSection.YOUR_LISTENING + rest.drop(lead)
     }
+    return withRecordMixesUnderRecord(order)
+}
+
+/**
+ * [order] with [section] swapped one slot up or down, among the sections that have a place of their own, and the record's
+ * mixes under the card again: moving "Your record" moves its mixes with it, and one tap takes the pair past a neighbour
+ * (never a dead tap against its own mixes). Null when nothing moves: [section] is already at that end, isn't in [order], or
+ * is RECORD_MIXES, which goes wherever the card goes.
+ */
+fun movedHomeSectionOrder(order: List<HomeSection>, section: HomeSection, up: Boolean): List<HomeSection>? {
+    if (section == HomeSection.RECORD_MIXES) return null
+    val movable = order.filter { it != HomeSection.RECORD_MIXES }.toMutableList()
+    val idx = movable.indexOf(section)
+    val target = if (up) idx - 1 else idx + 1
+    if (idx < 0 || target !in movable.indices) return null
+    movable[idx] = movable[target].also { movable[target] = movable[idx] }
+    return withRecordMixesUnderRecord(movable)
 }
 
 /** Home before the preference loads, and when it can't be read: every section but Community, which is opt-in. */
@@ -187,15 +321,15 @@ class HomeSectionsPreference @Inject constructor(
         )
     }.distinctUntilChanged().catch { emit(DEFAULT_HOME_SECTIONS) }
 
-    /** Swap [section] one slot up or down in the full order. */
+    /**
+     * Swap [section] one slot up or down ([movedHomeSectionOrder]): "Your record" moves with its mixes, and the
+     * mixes alone don't move (nothing is written).
+     */
     suspend fun move(section: HomeSection, up: Boolean) {
         context.homeSectionsDataStore.edit { prefs ->
-            val current = effectiveHomeSectionOrder(prefs[orderKey].toKeys(), prefs[listeningPromotedKey] ?: false).toMutableList()
-            val idx = current.indexOf(section)
-            val target = if (up) idx - 1 else idx + 1
-            if (idx < 0 || target !in current.indices) return@edit
-            current[idx] = current[target].also { current[target] = current[idx] }
-            prefs[orderKey] = current.joinToString(",") { it.key }
+            val current = effectiveHomeSectionOrder(prefs[orderKey].toKeys(), prefs[listeningPromotedKey] ?: false)
+            val moved = movedHomeSectionOrder(current, section, up) ?: return@edit
+            prefs[orderKey] = moved.joinToString(",") { it.key }
             prefs[listeningPromotedKey] = true
             // Placed by hand before it was ever on: keep that spot when it's turned on.
             if (section == HomeSection.COMMUNITY && prefs[communityOnKey] == null) prefs[communityOnKey] = false

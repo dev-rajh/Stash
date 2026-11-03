@@ -572,6 +572,29 @@ class NowPlayingViewModelTrackTapTest {
             }
         }
 
+    /** Blinding Lights tapped in Search: Last.fm filled the row's album as "Now 35" by Various Artists. */
+    @Test fun `onTrackInfoTapped opens the song's artist, not its compilation's Various Artists`() =
+        runTest(dispatcher) {
+            val api = mockk<YTMusicApiClient>()
+            coEvery { api.resolveArtist(any()) } returns
+                ArtistSummary(id = "UC0WP5P-ufpRfjbNrmOWwLBQ", name = "The Weeknd", avatarUrl = "http://a")
+            playerStateFlow.value = playerStateFlow.value.copy(
+                currentTrack = Track(
+                    id = 20023L, title = "Blinding Lights", artist = "The Weeknd",
+                    album = "Now 35", albumArtist = "Various Artists",
+                ),
+            )
+            val vm = newViewModel(api)
+            advanceUntilIdle()
+
+            vm.artistNavEvents.test {
+                vm.onTrackInfoTapped()
+                assertEquals("The Weeknd", awaitItem().name)
+                cancelAndIgnoreRemainingEvents()
+            }
+            coVerify(exactly = 1) { api.resolveArtist("The Weeknd") }
+        }
+
     @Test fun `onTrackInfoTapped emits toast and no nav on null resolve`() =
         runTest(dispatcher) {
             val api = mockk<YTMusicApiClient>()
@@ -638,6 +661,13 @@ class NowPlayingViewModelRadioTest {
         every { mirrorFailures } returns MutableSharedFlow()
     }
 
+    /** Resolves the shared radio failure lines (core:media's strings, the Library's too). */
+    private val appContext: Context = mockk(relaxed = true) {
+        every { getString(com.stash.core.media.R.string.radio_failed_player_not_ready) } returns "not ready"
+        every { getString(com.stash.core.media.R.string.radio_failed_no_station) } returns "no station"
+        every { getString(com.stash.core.media.R.string.radio_failed_download_mode) } returns "download mode"
+    }
+
     /** VM with a youtubeId-bearing track already playing. */
     private fun playingVm(): NowPlayingViewModel {
         playerStateFlow.value = playerStateFlow.value.copy(
@@ -652,7 +682,7 @@ class NowPlayingViewModelRadioTest {
             lyricsPreference = mockk(relaxed = true),
             nowPlayingPreference = mockk(relaxed = true),
             lyricsSidecarWriter = mockk(relaxed = true),
-            appContext = mockk(relaxed = true),
+            appContext = appContext,
             sleepTimerController = mockk(relaxed = true),
             ytMusicApiClient = mockk(relaxed = true),
         )
@@ -668,13 +698,19 @@ class NowPlayingViewModelRadioTest {
                     RadioStartResult.PlayerNotReady
                 vm.startRadioFromCurrent()
                 advanceUntilIdle()
-                assertEquals("Player is still starting — try again.", awaitItem())
+                assertEquals("not ready", awaitItem())
 
                 coEvery { playerRepository.startRadio(any(), any()) } returns
                     RadioStartResult.NoStation
                 vm.startRadioFromCurrent()
                 advanceUntilIdle()
-                assertEquals("Couldn't find similar tracks for this song.", awaitItem())
+                assertEquals("no station", awaitItem())
+
+                coEvery { playerRepository.startRadio(any(), any()) } returns
+                    RadioStartResult.DownloadMode
+                vm.startRadioFromCurrent()
+                advanceUntilIdle()
+                assertEquals("download mode", awaitItem())
 
                 coEvery { playerRepository.startRadio(any(), any()) } returns
                     RadioStartResult.Started
@@ -858,6 +894,44 @@ class NowPlayingViewModelTransientTrackTest {
         advanceUntilIdle()
 
         coVerify { musicRepository.setMatchFlagged(900L, true) }
+    }
+
+    @Test fun `flag goes straight to the fix on the persisted row, no toast pointing to Sync`() = runTest(dispatcher) {
+        val vm = newViewModel()
+        advanceUntilIdle()
+
+        turbineScope {
+            val fixes = vm.matchFixEvents.testIn(backgroundScope)
+            val messages = vm.userMessages.testIn(backgroundScope)
+            vm.flagCurrentTrackAsWrongMatch()
+            advanceUntilIdle()
+
+            // The persisted id, not the stream's transient one: Failed Matches lists the row by it.
+            assertEquals(900L, fixes.awaitItem())
+            messages.expectNoEvents()
+            fixes.cancelAndIgnoreRemainingEvents()
+            messages.cancelAndIgnoreRemainingEvents()
+        }
+        coVerify { musicRepository.setMatchFlagged(900L, true) }
+    }
+
+    @Test fun `a flag that couldn't be saved opens nothing and says so`() = runTest(dispatcher) {
+        coEvery { musicRepository.ensureTrackPersisted(any()) } throws IllegalStateException("db")
+        val vm = newViewModel()
+        advanceUntilIdle()
+
+        turbineScope {
+            val fixes = vm.matchFixEvents.testIn(backgroundScope)
+            val messages = vm.userMessages.testIn(backgroundScope)
+            vm.flagCurrentTrackAsWrongMatch()
+            advanceUntilIdle()
+
+            assertEquals("Couldn't flag this song.", messages.awaitItem())
+            fixes.expectNoEvents()
+            fixes.cancelAndIgnoreRemainingEvents()
+            messages.cancelAndIgnoreRemainingEvents()
+        }
+        coVerify(exactly = 0) { musicRepository.setMatchFlagged(any(), any()) }
     }
 
     @Test fun `delete of a stream not in the library does nothing and says so`() = runTest(dispatcher) {

@@ -678,6 +678,8 @@ class DatabaseBackupManager @Inject constructor(
                     cleanupStaging(stagedDb, stagedDatastore)
                     // No restart follows a merge, so the re-key runs now.
                     rearmCanonicalRecompute(runNow = true)
+                    rearmDuplicateCleanup(runNow = true)
+                    rearmMixPinCleanup(runNow = true)
                     return@runCatching BackupImportResult(
                         restoredTreeUri = null,
                         requiresRestart = false,
@@ -725,7 +727,11 @@ class DatabaseBackupManager @Inject constructor(
             }
             // After the settings files: a restored canonical_recompute file must not
             // hide that the swapped-in library needs the re-key.
-            if (scope.swapsDatabaseFile) rearmCanonicalRecompute(runNow = false)
+            if (scope.swapsDatabaseFile) {
+                rearmCanonicalRecompute(runNow = false)
+                rearmDuplicateCleanup(runNow = false)
+                rearmMixPinCleanup(runNow = false)
+            }
 
             // 5. Read the restored Tree URI from DataStore — only meaningful
             //    when this scope actually restored settings files. We use a
@@ -762,6 +768,48 @@ class DatabaseBackupManager @Inject constructor(
             throw e
         } catch (e: Exception) {
             android.util.Log.w("BackupManager", "Couldn't re-arm the canonical re-key", e)
+        }
+    }
+
+    /**
+     * A restored or merged backup made before schema 76 brings back the id-less stubs the one-time
+     * duplicate cleanup tidied ([com.stash.core.data.library.duplicates.DuplicateCleanup]).
+     * Re-arming makes it run again (at the next start, or now after a merge, which restarts
+     * nothing); over rows it already tidied it changes nothing. Best-effort, like
+     * [rearmCanonicalRecompute]: a missed re-arm only leaves the restored stubs as they were.
+     */
+    private suspend fun rearmDuplicateCleanup(runNow: Boolean) {
+        try {
+            com.stash.core.data.library.duplicates.DuplicateCleanupState.forContext(context).rearm()
+            if (runNow) com.stash.core.data.sync.workers.DuplicateCleanupWorker.enqueueAfterRearm(context)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            android.util.Log.w("BackupManager", "Couldn't re-arm the duplicate cleanup", e)
+        }
+    }
+
+    /**
+     * A restored or merged backup made before v0.9.119 brings back the mix pins the one-time
+     * [MixPinCleanup] cleared: hearts nobody gave. Its done flag lives in SharedPreferences, which a
+     * restore leaves alone, so it is re-armed here. A swap leaves the run to the restart (the old
+     * database is closed; the DAO is only handed over, never queried); [runNow] runs it at once after
+     * a merge, which restarts nothing. It only touches mix pins from before Favorite existed.
+     * Best-effort, like [rearmCanonicalRecompute].
+     */
+    private suspend fun rearmMixPinCleanup(runNow: Boolean) {
+        try {
+            val cleanup = MixPinCleanup.forContext(context, database.playlistDao())
+            cleanup.rearm()
+            if (runNow) {
+                cleanup.runOnce()?.let {
+                    android.util.Log.i("BackupManager", "Mix pin cleanup: cleared ${it.cleared}, ${it.kept} left")
+                }
+            }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            android.util.Log.w("BackupManager", "Couldn't re-arm the mix pin cleanup", e)
         }
     }
 
@@ -874,12 +922,24 @@ class DatabaseBackupManager @Inject constructor(
                 // backup track takes the first that SameSongRule calls it.
                 val liveBySpotifyUri = HashMap<String, Long>()
                 val liveByYoutubeId = HashMap<String, Long>()
+                val liveBySoundCloudId = HashMap<String, Long>()
                 val liveByCanonical = HashMap<String, MutableList<TrackEntity>>()
                 for (t in trackDao.getAllForIntegrityScan().sortedBy { it.id }) {
                     t.spotifyUri?.let { liveBySpotifyUri.putIfAbsent(it, t.id) }
                     t.youtubeId?.let { liveByYoutubeId.putIfAbsent(it, t.id) }
+                    t.soundCloudId?.let { liveBySoundCloudId.putIfAbsent(it, t.id) }
                     if (hasCanonicalIdentity(t.canonicalTitle, t.canonicalArtist)) {
                         liveByCanonical.getOrPut(canonicalKey(t.canonicalTitle, t.canonicalArtist)) { mutableListOf() }.add(t)
+                    }
+                }
+                // A Spotify or YouTube id a duplicate merge took away (schema 76) finds the row
+                // it went into, so a backup made before the merge doesn't bring the duplicate
+                // back. After the rows' own ids: a row holding the id in its column owns it.
+                val aliasKinds = listOf(com.stash.core.data.db.entity.TrackAliasEntity.KIND_SPOTIFY_URI, com.stash.core.data.db.entity.TrackAliasEntity.KIND_YOUTUBE_ID)
+                for (alias in database.duplicateDao().aliasesOfKinds(aliasKinds)) {
+                    when (alias.kind) {
+                        com.stash.core.data.db.entity.TrackAliasEntity.KIND_SPOTIFY_URI -> liveBySpotifyUri.putIfAbsent(alias.value, alias.trackId)
+                        com.stash.core.data.db.entity.TrackAliasEntity.KIND_YOUTUBE_ID -> liveByYoutubeId.putIfAbsent(alias.value, alias.trackId)
                     }
                 }
 
@@ -893,7 +953,8 @@ class DatabaseBackupManager @Inject constructor(
                     // are skipped with it (they map through trackIdMap).
                     if (track.source == com.stash.core.model.MusicSource.CLOUD) continue
                     val words = lookupWords(track)
-                    val existing = track.spotifyUri?.let { liveBySpotifyUri[it] }
+                    val existing = track.soundCloudId?.let { liveBySoundCloudId[it] }
+                        ?: track.spotifyUri?.let { liveBySpotifyUri[it] }
                         ?: track.youtubeId?.let { liveByYoutubeId[it] }
                         ?: if (hasCanonicalIdentity(words.first, words.second)) {
                             // By words only when it is the same song: no id disagrees and the
@@ -907,6 +968,7 @@ class DatabaseBackupManager @Inject constructor(
                                         youtubeId = track.youtubeId,
                                         spotifyUri = track.spotifyUri,
                                         forDownload = false,
+                                        soundCloudId = track.soundCloudId,
                                     )
                                 }
                                 ?.id
@@ -954,6 +1016,7 @@ class DatabaseBackupManager @Inject constructor(
                     val newId = trackDao.insert(inserted)
                     track.spotifyUri?.let { liveBySpotifyUri.putIfAbsent(it, newId) }
                     track.youtubeId?.let { liveByYoutubeId.putIfAbsent(it, newId) }
+                    track.soundCloudId?.let { liveBySoundCloudId.putIfAbsent(it, newId) }
                     if (hasCanonicalIdentity(words.first, words.second)) {
                         liveByCanonical.getOrPut(canonicalKey(words.first, words.second)) { mutableListOf() }
                             .add(inserted.copy(id = newId))

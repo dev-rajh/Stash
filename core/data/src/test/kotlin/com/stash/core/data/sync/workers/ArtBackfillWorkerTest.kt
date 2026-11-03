@@ -15,12 +15,15 @@ import androidx.work.testing.WorkManagerTestInitHelper
 import com.google.common.truth.Truth.assertThat
 import com.stash.core.data.audio.AudioDurationExtractor
 import com.stash.core.data.db.StashDatabase
+import com.stash.core.data.db.entity.PlaylistEntity
 import com.stash.core.data.db.entity.TrackEntity
 import com.stash.core.data.lastfm.LastFmApiClient
 import com.stash.core.data.lastfm.LastFmApiException
 import com.stash.core.data.lastfm.LastFmCredentials
 import com.stash.core.data.lastfm.LastFmEnrichmentBackoff
 import com.stash.core.data.lastfm.LastFmTrackInfo
+import com.stash.core.model.MusicSource
+import com.stash.core.model.PlaylistType
 import io.mockk.coEvery
 import io.mockk.mockk
 import kotlinx.coroutines.CoroutineScope
@@ -38,6 +41,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import java.io.File
 import java.io.IOException
+import java.time.Instant
 
 /**
  * [ArtBackfillWorker] asks Last.fm only about rows a lookup can fill: never
@@ -88,7 +92,7 @@ class ArtBackfillWorkerTest {
         .setWorkerFactory(object : WorkerFactory() {
             override fun createWorker(appContext: Context, workerClassName: String, workerParameters: WorkerParameters) =
                 ArtBackfillWorker(
-                    appContext, workerParameters, db.trackDao(), api,
+                    appContext, workerParameters, db.trackDao(), db.playlistDao(), api,
                     LastFmCredentials(apiKey = "k", apiSecret = "s"),
                     mockk<AudioDurationExtractor>(relaxed = true),
                     backoff, schedule,
@@ -132,9 +136,14 @@ class ArtBackfillWorkerTest {
         assertThat(backoff.backedOff(LastFmEnrichmentBackoff.Pass.ART_BACKFILL, now)).containsExactly(voiceNote)
     }
 
-    @Test fun `a song with no album gets Last fm's, asked about once, and an album it has is kept`() = runBlocking<Unit> {
-        // Already has art and a duration, and has been played: only the album pass looks at it.
-        val bare = db.trackDao().insertAll(
+    /**
+     * Last.fm's album is its most scrobbled release, often a compilation ("Blinding Lights" on
+     * "Now 35" by Various Artists), so a song with no album of its own keeps none.
+     */
+    @Test fun `a song with no album gets art and a length from Last fm, never its album`() = runBlocking<Unit> {
+        val stub = stub("The Weeknd", "Blinding Lights")
+        // Has art and a length, and was played: only the retired album pass looked at it.
+        val played = db.trackDao().insertAll(
             listOf(
                 TrackEntity(
                     title = "Roygbiv", artist = "Boards of Canada", isStreamable = true,
@@ -142,44 +151,45 @@ class ArtBackfillWorkerTest {
                 ),
             ),
         ).single()
-        // A stub the stream-only pass asks about: the album pass reuses that answer.
-        val stub = stub("Dead Kennedys", "Police Truck")
-        val tagged = db.trackDao().insertAll(
-            listOf(TrackEntity(title = "Kid A", artist = "Radiohead", album = "Kid A", isStreamable = true, albumArtUrl = "https://img/kida.png", durationMs = 1)),
-        ).single()
+        answers["The Weeknd" to "Blinding Lights"] = Result.success(info("https://img/now35.png", 200_000, album = "Now 35"))
         answers["Boards of Canada" to "Roygbiv"] = Result.success(info(null, null, album = "Music Has the Right to Children"))
-        answers["Dead Kennedys" to "Police Truck"] =
-            Result.success(info("https://img/gmc.png", 170_000, album = "Give Me Convenience or Give Me Death"))
-        answers["Radiohead" to "Kid A"] = Result.success(info(null, null, album = "Some Compilation"))
 
         worker().doWork()
 
         val dao = db.trackDao()
-        assertThat(dao.getById(bare)!!.album).isEqualTo("Music Has the Right to Children")
-        assertThat(dao.getById(bare)!!.albumArtist).isEqualTo("Album Artist")
-        assertThat(dao.getById(stub)!!.album).isEqualTo("Give Me Convenience or Give Me Death")
-        assertThat(dao.getById(tagged)!!.album).isEqualTo("Kid A")
-        assertThat(asked.count { it == ("Dead Kennedys" to "Police Truck") }).isEqualTo(1)
-        assertThat(asked).doesNotContain("Radiohead" to "Kid A")
+        assertThat(art(stub)).isEqualTo("https://img/now35.png")
+        assertThat(dao.getById(stub)!!.durationMs).isEqualTo(200_000)
+        assertThat(dao.getById(stub)!!.album).isEmpty()
+        assertThat(dao.getById(stub)!!.albumArtist).isEmpty()
+        assertThat(dao.getById(played)!!.album).isEmpty()
+        assertThat(asked).doesNotContain("Boards of Canada" to "Roygbiv")
     }
 
-    @Test fun `a mix's song with no album, never played or saved, waits until it is`() = runBlocking<Unit> {
-        // Art and a duration already: nothing but the album pass would ask about it.
-        val fromMix = db.trackDao().insertAll(
-            listOf(
-                TrackEntity(
-                    title = "Dayvan Cowboy", artist = "Boards of Canada", isStreamable = true,
-                    albumArtUrl = "https://img/tcn.png", durationMs = 300_000,
-                ),
-            ),
-        ).single()
-        answers["Boards of Canada" to "Dayvan Cowboy"] = Result.success(info(null, null, album = "The Campfire Headphase"))
+    /**
+     * A mix refresh builds a mix's cover from its songs' art when it links them, and discovery's stubs
+     * have none yet: the owner's Daily Discover showed a blank cover on Home. The run that gives them
+     * art rebuilds the Stash Mix covers, and leaves other playlists' covers alone.
+     */
+    @Test fun `a mix built from songs without art gets its cover once their art comes`() = runBlocking<Unit> {
+        val first = stub("Jerry Lee Lewis", "High School Confidential")
+        val second = stub("The Ventures", "Pipeline")
+        answers["Jerry Lee Lewis" to "High School Confidential"] = Result.success(info("https://img/jll.png", 150_000))
+        answers["The Ventures" to "Pipeline"] = Result.success(info("https://img/ventures.png", 140_000))
+        val playlists = db.playlistDao()
+        val mix = playlists.createMixWithMembership(playlist(PlaylistType.STASH_MIX), listOf(first, second), Instant.EPOCH)
+        val mine = playlists.createMixWithMembership(playlist(PlaylistType.CUSTOM), listOf(first), Instant.EPOCH)
+        assertThat(playlists.getById(mix)!!.artUrl).isNull()
 
         worker().doWork()
 
-        assertThat(asked).doesNotContain("Boards of Canada" to "Dayvan Cowboy")
-        assertThat(db.trackDao().getById(fromMix)!!.album).isEmpty()
+        assertThat(playlists.getById(mix)!!.artUrl).isEqualTo("https://img/jll.png|https://img/ventures.png")
+        assertThat(playlists.getById(mine)!!.artUrl).isNull()
     }
+
+    private fun playlist(type: PlaylistType) = PlaylistEntity(
+        name = type.name, source = MusicSource.BOTH, sourceId = type.name, type = type,
+        syncEnabled = true, isActive = true,
+    )
 
     @Test fun `a second run with nothing new asks nothing`() = runBlocking<Unit> {
         stub("Nobody", "Missing")
@@ -244,7 +254,7 @@ class ArtBackfillWorkerTest {
         assertThat(backoff.backedOff(LastFmEnrichmentBackoff.Pass.ART_BACKFILL, now)).containsExactly(id)
     }
 
-    @Test fun `both enqueue paths share one unique work`() {
+    @Test fun `both enqueue paths share one unique work`() = runBlocking<Unit> {
         WorkManagerTestInitHelper.initializeTestWorkManager(
             context,
             Configuration.Builder().setExecutor(SynchronousExecutor()).setTaskExecutor(SynchronousExecutor()).build(),

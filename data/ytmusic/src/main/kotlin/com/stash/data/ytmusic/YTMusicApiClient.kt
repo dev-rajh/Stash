@@ -8,10 +8,13 @@ import com.stash.data.ytmusic.model.AlbumDetail
 import com.stash.data.ytmusic.model.AlbumSearch
 import com.stash.data.ytmusic.model.AlbumSource
 import com.stash.data.ytmusic.model.AlbumSummary
+import com.stash.data.ytmusic.model.ArtistLookup
 import com.stash.data.ytmusic.model.ArtistPhotoResolution
 import com.stash.data.ytmusic.model.ArtistProfile
 import com.stash.data.ytmusic.model.PagedAlbums
 import com.stash.data.ytmusic.model.ArtistSummary
+import com.stash.data.ytmusic.model.MoodPage
+import com.stash.data.ytmusic.model.MoodTile
 import com.stash.data.ytmusic.model.MusicVideoType
 import com.stash.data.ytmusic.model.PagedPlaylists
 import com.stash.data.ytmusic.model.PagedTracks
@@ -55,6 +58,9 @@ class YTMusicApiClient @Inject constructor(
         /** InnerTube browse ID for the YouTube Music home feed. */
         private const val BROWSE_HOME = "FEmusic_home"
 
+        /** Home-feed pages read per sync: page one plus up to four continuations. */
+        private const val HOME_MAX_PAGES = 5
+
         /**
          * Library Playlists tab — user-created + user-saved playlists.
          * Returns a tabbed browse with a `gridRenderer` of
@@ -84,6 +90,12 @@ class YTMusicApiClient @Inject constructor(
          * exceeds the user's expectation for these "Daily Mix"-style surfaces.
          */
         internal const val RADIO_MAX_PAGES = 1
+
+        /** Pages of a playlist the album page reads ([getPlaylistAlbum]): about 300 songs, more than a mood's playlists hold. */
+        internal const val PLAYLIST_PAGE_MAX_PAGES = 3
+
+        /** YouTube Music's Moods & genres page: the "Moods & moments" and "Genres" grids ([getMoodTiles]). */
+        private const val BROWSE_MOODS_AND_GENRES = "FEmusic_moods_and_genres"
 
         /** Backoff delays (ms) between retries on transient failures. */
         private val RETRY_BACKOFFS_MS = listOf(500L, 1500L)
@@ -167,7 +179,20 @@ class YTMusicApiClient @Inject constructor(
         if (response == null) {
             return SyncResult.Error("InnerTube browse($BROWSE_HOME) returned null — check CLIENT_VERSION or cookie")
         }
-        val mixes = parseMixesFromHome(response)
+        // The first page holds only a few shelves; "Mixed for you" (My Supermix, My Mix N,
+        // New Release Mix) often sits further down, and reading page one alone found 5 mixes
+        // on a real account (2026-10-29). Follow the feed's own continuations, a few pages deep.
+        val found = parseMixesFromHome(response).toMutableList()
+        var token = homeContinuationToken(response)
+        var pages = 1
+        while (token != null && pages < HOME_MAX_PAGES) {
+            val next = innerTubeClient.browseContinuation(token) ?: break
+            pages++
+            found += parseMixesFromHome(next)
+            token = homeContinuationToken(next)
+        }
+        val mixes = found.distinctBy { it.playlistId }
+        Log.d(TAG, "getHomeMixes: ${mixes.size} mixes over $pages page(s)")
         return if (mixes.isEmpty()) {
             SyncResult.Empty("Home feed returned no mixes")
         } else {
@@ -506,9 +531,13 @@ class YTMusicApiClient @Inject constructor(
      * than [searchAll] for streaming fallback — `searchAll` gates on a literal
      * "Songs" shelf title and returns nothing for tracks YouTube labels
      * differently (older / compilation catalog), which silently broke playback.
+     *
+     * [explicit] is the source track's parental advisory: between the explicit
+     * and clean copies of the song it picks the explicit one unless it is `false`
+     * ([InnerTubeClient.searchCanonicalLookup]).
      */
-    suspend fun searchCanonicalVideoId(artist: String, title: String): String? =
-        innerTubeClient.searchCanonical(artist, title)
+    suspend fun searchCanonicalVideoId(artist: String, title: String, explicit: Boolean? = null): String? =
+        innerTubeClient.searchCanonical(artist, title, explicit)
 
     /** [searchCanonicalVideoId] plus the matched song's square album art. */
     suspend fun searchCanonicalMatch(artist: String, title: String): CanonicalMatch? =
@@ -682,6 +711,21 @@ class YTMusicApiClient @Inject constructor(
     }
 
     /**
+     * Look an artist name up for a caller that remembers the answer (Home's "New from your artists"): the same
+     * artists-filtered search and name guard as [resolveArtist], but three-way ([ArtistLookup]), so "answered, no
+     * such artist" can be remembered while "no answer" is retried, and saying whether the match is exact
+     * ([ArtistLookup.Found.exact]): a loose one ("Bon" in "Bon Iver") is the caller's to confirm.
+     */
+    suspend fun lookUpArtist(name: String): ArtistLookup {
+        if (name.isBlank()) return ArtistLookup.NotFound
+        val outcome = innerTubeClient.searchWithStatus(name, params = ARTISTS_FILTER)
+        val body = outcome.body ?: return ArtistLookup.NoAnswer
+        val candidates = artistsOnShelf(body)
+        exactArtist(candidates, name)?.let { return ArtistLookup.Found(it, exact = true) }
+        return selectArtist(candidates, name)?.let { ArtistLookup.Found(it, exact = false) } ?: ArtistLookup.NotFound
+    }
+
+    /**
      * Resolve an artist name to its official photo for the artist-photo
      * backfill. Same artists-filtered search — and the same name-match
      * guard, so the worker never stamps an unrelated artist's photo — as
@@ -729,13 +773,9 @@ class YTMusicApiClient @Inject constructor(
      */
     private fun selectArtist(candidates: List<ArtistSummary>, wanted: String): ArtistSummary? {
         if (candidates.isEmpty()) return null
+        exactArtist(candidates, wanted)?.let { return it }
         val candidateKeys = candidates.map { artistMatchKey(it.name) }
-        val wantedParts = (listOf(wanted) + wanted.splitArtistCredits())
-            .map { artistMatchKey(it) }.filter { it.isNotEmpty() }.distinct()
-        for (part in wantedParts) {
-            val exact = candidateKeys.indexOf(part)
-            if (exact >= 0) return candidates[exact]
-        }
+        val wantedParts = wantedArtistKeys(wanted)
         for (part in wantedParts) {
             val overlap = candidateKeys.indexOfFirst { key ->
                 key.length >= 3 && part.length >= 3 && (key.contains(part) || part.contains(key))
@@ -749,6 +789,20 @@ class YTMusicApiClient @Inject constructor(
         )
         return null
     }
+
+    /** [selectArtist]'s first pass alone: the first of [candidates] whose name equals [wanted] or one of its credits. */
+    private fun exactArtist(candidates: List<ArtistSummary>, wanted: String): ArtistSummary? {
+        val candidateKeys = candidates.map { artistMatchKey(it.name) }
+        for (part in wantedArtistKeys(wanted)) {
+            val exact = candidateKeys.indexOf(part)
+            if (exact >= 0) return candidates[exact]
+        }
+        return null
+    }
+
+    /** [wanted] whole, then credit by credit, as [artistMatchKey]s. */
+    private fun wantedArtistKeys(wanted: String): List<String> =
+        (listOf(wanted) + wanted.splitArtistCredits()).map { artistMatchKey(it) }.filter { it.isNotEmpty() }.distinct()
 
     /**
      * Canonical key for artist-name equality: case- and diacritic-folded
@@ -769,7 +823,7 @@ class YTMusicApiClient @Inject constructor(
      *
      * The browse response for an artist channel (browseId starting with `UC`
      * or `MPLAUC`) contains:
-     *   - `header.musicImmersiveHeaderRenderer` — name, avatar, subscribers.
+     *   - `header.musicImmersiveHeaderRenderer` — name, avatar, monthly audience.
      *   - A single `singleColumnBrowseResultsRenderer` tab holding a mix of
      *     `musicShelfRenderer` (Popular) and `musicCarouselShelfRenderer`
      *     (Albums, Singles, "Fans also like") sections.
@@ -785,7 +839,19 @@ class YTMusicApiClient @Inject constructor(
      * @return A populated [ArtistProfile]; shelves that the real response
      *   lacks are empty lists.
      */
-    suspend fun getArtist(browseId: String): ArtistProfile {
+    suspend fun getArtist(browseId: String): ArtistProfile = artistPage(browseId, followViewAll = true)
+
+    /**
+     * The artist's page as one browse, never its "View all" grids: the Albums
+     * and Singles carousels as they come, about ten of each, led by the newest.
+     * Enough for anything that only wants an artist's newest releases (Home's
+     * "New from your artists"), at a third of [getArtist]'s requests. Same
+     * parsing and the same blank-name "no answer" profile as [getArtist].
+     */
+    suspend fun getArtistPage(browseId: String): ArtistProfile = artistPage(browseId, followViewAll = false)
+
+    /** [getArtist] and [getArtistPage]: [followViewAll] fetches the carousels' full grids too. */
+    private suspend fun artistPage(browseId: String, followViewAll: Boolean): ArtistProfile {
         val normalized = normalizeArtistBrowseId(browseId)
         val response = innerTubeClient.browse(normalized)
             ?: return emptyArtistProfile(normalized)
@@ -805,17 +871,20 @@ class YTMusicApiClient @Inject constructor(
             ?.maxByOrNull { it.asObject()?.get("width")?.asString()?.toIntOrNull() ?: 0 }
             ?.asObject()?.get("url")?.asString()
             ?.let { com.stash.core.common.ArtUrlUpgrader.upgrade(it) }
+        // Kept for cache compatibility only (see ArtistProfile.subscribersText): never shown.
         val subscribersText = header?.navigatePath(
             "subscriptionButton", "subscribeButtonRenderer",
             "subscriberCountText", "runs",
         )?.firstArray()?.firstOrNull()?.asObject()?.get("text")?.asString()
+        // The listener count the page shows when Spotify has none: YouTube's monthly audience.
+        val monthlyAudience = header?.let { parseMonthlyAudience(it) }
 
         val sections = response.navigatePath(
             "contents", "singleColumnBrowseResultsRenderer", "tabs",
         )?.firstArray()?.firstOrNull()?.asObject()
             ?.navigatePath("tabRenderer", "content", "sectionListRenderer", "contents")
             ?.asArray()
-            ?: return emptyArtistProfile(normalized, name, avatarUrl, subscribersText)
+            ?: return emptyArtistProfile(normalized, name, avatarUrl, subscribersText, monthlyAudience)
 
         var popular = emptyList<TrackSummary>()
         var albums = emptyList<AlbumSummary>()
@@ -868,7 +937,8 @@ class YTMusicApiClient @Inject constructor(
                             singlesMore = parseCarouselMore(carousel)
                         }
                     }
-                    title.contains("Fans also like", ignoreCase = true) ->
+                    // YouTube Music renamed the shelf "Fans might also like" (seen 2026-10-31); match the part that stayed.
+                    title.contains("also like", ignoreCase = true) ->
                         related = parseArtistsCarousel(carousel)
                     // Surface locale regressions (e.g. a translated "Albumes"
                     // or a new shelf we don't dispatch yet) in logs instead of
@@ -885,6 +955,10 @@ class YTMusicApiClient @Inject constructor(
         // each take their own browse call (~50KB each), so the cost is
         // ~2 extra HTTP requests per artist page load. Worth it: this is
         // the only way to surface artists with > 10 albums (Drake, etc).
+        if (!followViewAll) {
+            albumsMore = null
+            singlesMore = null
+        }
         albumsMore?.let { more ->
             runCatching {
                 innerTubeClient.browse(more.browseId, more.params)?.let { gridResponse ->
@@ -922,6 +996,7 @@ class YTMusicApiClient @Inject constructor(
             albums = albums,
             singles = singles,
             related = related,
+            monthlyAudience = monthlyAudience,
         )
     }
 
@@ -931,6 +1006,7 @@ class YTMusicApiClient @Inject constructor(
         name: String = "",
         avatarUrl: String? = null,
         subscribersText: String? = null,
+        monthlyAudience: Long? = null,
     ): ArtistProfile = ArtistProfile(
         id = id,
         name = name,
@@ -940,6 +1016,7 @@ class YTMusicApiClient @Inject constructor(
         albums = emptyList(),
         singles = emptyList(),
         related = emptyList(),
+        monthlyAudience = monthlyAudience,
     )
 
     /**
@@ -977,6 +1054,104 @@ class YTMusicApiClient @Inject constructor(
                 moreByArtist = emptyList(),
             )
         return AlbumResponseParser.parse(browseId, response)
+    }
+
+    /**
+     * A playlist's name, maker and cover (a pasted playlist link's preview), or null when its page can't be read. An album's
+     * own playlist (`OLAK5uy_…`) has no such header: [albumOfPlaylist] finds its album instead.
+     */
+    suspend fun getPlaylistHeader(playlistId: String): YTPlaylistHeader? {
+        val browseId = if (playlistId.startsWith("VL")) playlistId else "VL$playlistId"
+        val response = innerTubeClient.browse(browseId) ?: return null
+        return LinkResponseParser.playlistHeader(response)
+    }
+
+    /**
+     * A YouTube Music playlist as the album page shows one ([com.stash.data.ytmusic.model.AlbumSource.YOUTUBE_PLAYLIST]):
+     * its name, maker and cover from the page's header ([LinkResponseParser.playlistHeader]) and its songs from the
+     * same browse ([parseTracksFromBrowse], the parser sync uses), continued for up to [PLAYLIST_PAGE_MAX_PAGES]
+     * pages (a radio-style `VLRD…` playlist: its first page only). Each song keeps its own album. A browse that
+     * didn't answer comes back as a blank, song-less playlist, as [getAlbum] answers a failed album.
+     */
+    suspend fun getPlaylistAlbum(playlistId: String): AlbumDetail {
+        val browseId = if (playlistId.startsWith("VL")) playlistId else "VL$playlistId"
+        val response = innerTubeClient.browse(browseId)
+            ?: return AlbumDetail(browseId, "", "", null, null, null, emptyList(), emptyList())
+        val header = LinkResponseParser.playlistHeader(response)
+        val radio = browseId.startsWith("VLRD")
+        val tracks = paginateBrowse(response, maxPages = if (radio) RADIO_MAX_PAGES else PLAYLIST_PAGE_MAX_PAGES) { page ->
+            val isContinuation = page["continuationContents"] != null || page["onResponseReceivedActions"] != null
+            if (isContinuation) parseContinuationPage(page) else parseTracksFromBrowse(page)
+        }.items
+        return AlbumDetail(
+            id = browseId,
+            title = header?.title.orEmpty(),
+            artist = header?.author.orEmpty(),
+            artistId = null,
+            thumbnailUrl = header?.thumbnailUrl,
+            year = null,
+            tracks = tracks.map { t ->
+                TrackSummary(
+                    videoId = t.videoId,
+                    title = t.title,
+                    artist = t.artists,
+                    album = t.album,
+                    durationSeconds = (t.durationMs ?: 0L) / 1000.0,
+                    thumbnailUrl = t.thumbnailUrl,
+                    explicit = t.explicit,
+                    musicVideoType = t.musicVideoType?.name,
+                )
+            },
+            moreByArtist = emptyList(),
+        )
+    }
+
+    /**
+     * The songs YouTube Music relates to [videoId] (its watch page's "Related" tab, "You might also like" first):
+     * `next(videoId)`, then a browse of the tab found by its `MPTRt_` id ([RelatedResponseParser]). Works signed out;
+     * signed in, the request carries the account like every other and the answer may be personal. Null when either
+     * call didn't answer, and when the watch page has no Related tab: YouTube moving or renaming it would otherwise
+     * read as every song having no related songs, an answer Home would keep for the day. The tabs seen are logged.
+     */
+    suspend fun getRelatedSongs(videoId: String): List<TrackSummary>? {
+        val next = innerTubeClient.next(videoId) ?: return null
+        val relatedId = RelatedResponseParser.relatedBrowseId(next) ?: run {
+            Log.w(TAG, "no Related (${RelatedResponseParser.RELATED_PREFIX}) tab for $videoId among ${RelatedResponseParser.tabIds(next)}")
+            return null
+        }
+        val related = innerTubeClient.browse(relatedId) ?: return null
+        return RelatedResponseParser.songs(related)
+    }
+
+    /**
+     * YouTube Music's "Moods & moments" tiles ([MoodsResponseParser.tiles]): one browse of `FEmusic_moods_and_genres`.
+     * Works signed out. Null when YouTube didn't answer; empty when it answered without the grid.
+     */
+    suspend fun getMoodTiles(): List<MoodTile>? {
+        val response = innerTubeClient.browse(BROWSE_MOODS_AND_GENRES) ?: return null
+        return MoodsResponseParser.tiles(response)
+    }
+
+    /**
+     * A mood's page of YouTube Music playlists ([MoodsResponseParser.page]): one browse of
+     * `FEmusic_moods_and_genres_category` with the tile's [params]. Null when YouTube didn't answer.
+     */
+    suspend fun getMoodPage(params: String, title: String): MoodPage? {
+        val response = innerTubeClient.browse(MoodsResponseParser.CATEGORY_BROWSE_ID, params) ?: return null
+        return MoodsResponseParser.page(response, fallbackTitle = title)
+    }
+
+    /** The album (`MPREb_…`) an album's own playlist (`OLAK5uy_…`) is of, or null. */
+    suspend fun albumOfPlaylist(playlistId: String): String? {
+        val browseId = if (playlistId.startsWith("VL")) playlistId else "VL$playlistId"
+        val response = innerTubeClient.browse(browseId) ?: return null
+        return LinkResponseParser.albumBrowseId(response)
+    }
+
+    /** One song by its video id (a pasted `watch?v=` or `youtu.be` link), or null when YouTube Music doesn't show it. */
+    suspend fun getSong(videoId: String): YTSong? {
+        val response = innerTubeClient.next(videoId) ?: return null
+        return LinkResponseParser.song(response)?.takeIf { it.videoId == videoId }
     }
 
     // `normalizeArtistBrowseId` lives as a top-level `internal` fun in
@@ -1168,6 +1343,9 @@ class YTMusicApiClient @Inject constructor(
             durationMs = durationMs,
             thumbnailUrl = thumbnailUrl,
             musicVideoType = musicVideoType,
+            // Playlist and Liked Music rows carry the same badge as search rows;
+            // synced, it tells the matchers this song is the explicit original.
+            explicit = explicitFromBadge(renderer),
         )
     }
 
@@ -1177,18 +1355,35 @@ class YTMusicApiClient @Inject constructor(
      * Looks for `musicCarouselShelfRenderer` sections and parses
      * `musicTwoRowItemRenderer` items that have a playlist navigation endpoint.
      */
-    private fun parseMixesFromHome(response: JsonObject): List<YTMusicPlaylist> {
-        val playlists = mutableListOf<YTMusicPlaylist>()
-
-        val sections = response.navigatePath(
+    /**
+     * The home feed's section list: under the first tab on page one, under
+     * `continuationContents.sectionListContinuation` on the pages after it.
+     */
+    private fun homeSectionList(response: JsonObject): JsonObject? =
+        response.navigatePath(
             "contents",
             "singleColumnBrowseResultsRenderer",
             "tabs",
         )?.firstArray()?.firstOrNull()
             ?.asObject()
-            ?.navigatePath("tabRenderer", "content", "sectionListRenderer", "contents")
-            ?.asArray()
-            ?: return emptyList()
+            ?.navigatePath("tabRenderer", "content", "sectionListRenderer")
+            ?.asObject()
+            ?: response.navigatePath("continuationContents", "sectionListContinuation")?.asObject()
+
+    /** The next home-feed page's token, in either of the two places YouTube puts it; null at the end. */
+    private fun homeContinuationToken(response: JsonObject): String? {
+        val list = homeSectionList(response) ?: return null
+        return list["continuations"]?.asArray()?.firstOrNull()?.asObject()
+            ?.navigatePath("nextContinuationData", "continuation")?.asString()
+            ?: list["contents"]?.asArray()?.lastOrNull()?.asObject()
+                ?.navigatePath("continuationItemRenderer", "continuationEndpoint", "continuationCommand", "token")
+                ?.asString()
+    }
+
+    private fun parseMixesFromHome(response: JsonObject): List<YTMusicPlaylist> {
+        val playlists = mutableListOf<YTMusicPlaylist>()
+
+        val sections = homeSectionList(response)?.get("contents")?.asArray() ?: return emptyList()
 
         for (section in sections) {
             val carousel = section.asObject()

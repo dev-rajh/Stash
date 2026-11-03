@@ -10,6 +10,7 @@ import androidx.media3.datasource.cache.SimpleCache
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.exoplayer.dash.DashMediaSource
+import androidx.media3.exoplayer.hls.HlsMediaSource
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.source.MediaSource
 import com.stash.core.data.db.dao.TrackDao
@@ -66,6 +67,13 @@ class StreamingMediaSourceFactory @Inject constructor(
     private val urlCache: StreamUrlCache,
     private val trackDao: TrackDao,
 ) {
+    /**
+     * False in Download mode, read when each source opens ([DownloadModeGate]): the playback service sets it once. Every
+     * source these factories make is gated, cached or not, DASH segments included.
+     */
+    @Volatile
+    var streamAllowed: () -> Boolean = { true }
+
     fun create(trackId: Long): MediaSource.Factory {
         val cachedFactory = CacheDataSource.Factory()
             .setCache(streamCache)
@@ -77,7 +85,8 @@ class StreamingMediaSourceFactory @Inject constructor(
                 CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR or
                     CacheDataSource.FLAG_BLOCK_ON_CACHE,
             )
-        return DefaultMediaSourceFactory(cachedFactory)
+        // Outside the cache: a cached stream doesn't play in Download mode either.
+        return DefaultMediaSourceFactory(DownloadModeGate.gate(cachedFactory, { streamAllowed() }))
     }
 
     /**
@@ -105,7 +114,30 @@ class StreamingMediaSourceFactory @Inject constructor(
             .setUri(mpdUrl)
             .setMimeType(MimeTypes.APPLICATION_MPD)
             .build()
-        return DashMediaSource.Factory(httpFactory).createMediaSource(item)
+        return DashMediaSource.Factory(DownloadModeGate.gate(httpFactory, { streamAllowed() })).createMediaSource(item)
+    }
+
+    fun createHlsMediaSource(mediaItem: MediaItem, stream: StreamUrl): MediaSource {
+        val current = java.util.concurrent.atomic.AtomicReference(stream.url)
+        val trackId = mediaItem.mediaId.toLongOrNull()
+        val http = DefaultHttpDataSource.Factory().setConnectTimeoutMs(10_000).setReadTimeoutMs(30_000)
+            .setAllowCrossProtocolRedirects(false)
+        val source = DataSource.Factory {
+            HlsManifestDataSource(http.createDataSource(), stream.url, current, { streamAllowed() },
+                refresh = {
+                    if (trackId == null) null else kotlinx.coroutines.runBlocking(kotlinx.coroutines.Dispatchers.IO) {
+                        kotlinx.coroutines.withTimeoutOrNull(30_000) {
+                            trackDao.getById(trackId)?.let { resolver.resolve(it) }
+                                ?.takeIf { it.isHls && it.origin == "soundcloud" && it.codec == stream.codec && it.isPreview == stream.isPreview }
+                                ?.also { urlCache.put(trackId, it) }?.url
+                        }
+                    }
+                },
+                invalidate = { trackId?.let(urlCache::invalidate) },
+            )
+        }
+        val item = mediaItem.buildUpon().setUri(stream.url).setMimeType(MimeTypes.APPLICATION_M3U8).build()
+        return HlsMediaSource.Factory(DownloadModeGate.gate(source, { streamAllowed() })).createMediaSource(item)
     }
 
     /**
@@ -120,12 +152,15 @@ class StreamingMediaSourceFactory @Inject constructor(
             .setUserAgent("Stash/0.9.26")
             .setConnectTimeoutMs(10_000)
             .setReadTimeoutMs(30_000)
-        return RefreshingDataSourceFactory(
-            innerFactory = httpFactory,
-            resolver = resolver,
-            cache = urlCache,
-            trackDao = trackDao,
-            trackId = trackId,
+        return DownloadModeGate.gate(
+            RefreshingDataSourceFactory(
+                innerFactory = httpFactory,
+                resolver = resolver,
+                cache = urlCache,
+                trackDao = trackDao,
+                trackId = trackId,
+            ),
+            { streamAllowed() },
         )
     }
 }

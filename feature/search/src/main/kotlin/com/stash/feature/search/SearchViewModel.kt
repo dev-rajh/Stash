@@ -364,8 +364,7 @@ class SearchViewModel @Inject constructor(
         viewModelScope.launch {
             _tappedTrackId.value = item.syntheticId()
             try {
-                // Streaming is always allowed: a tap plays the full track.
-                // (Until 2026-09-17, Offline mode routed this to a 30 s preview.)
+                // A tap plays the full track; Download mode refuses it (DownloadMode below).
                 val result = playerRepository.playFromStream(item)
                 when (result) {
                     is StreamRoutingResult.Item -> Unit // playback started by the repo
@@ -375,7 +374,10 @@ class SearchViewModel @Inject constructor(
                     StreamRoutingResult.CellularRefused ->
                         _userMessages.emit("Streaming on cellular is off in Settings.")
                     StreamRoutingResult.NoConnectivity ->
-                        _userMessages.emit("You're offline — can't stream this track.")
+                        // "Offline" is the mode's name; the network is "no internet connection".
+                        _userMessages.emit("No internet connection, and this song isn't downloaded.")
+                    StreamRoutingResult.DownloadMode ->
+                        _userMessages.emit("Offline plays only your downloads. Switch to Online to play this.")
                 }
             } finally {
                 _tappedTrackId.value = null
@@ -470,6 +472,8 @@ internal fun TrackSummary.toTrackItem() = com.stash.core.model.TrackItem(
     durationSeconds = durationSeconds,
     thumbnailUrl = thumbnailUrl,
     album = album,
+    musicVideoType = musicVideoType,
+    explicit = explicit,
 )
 
 /**

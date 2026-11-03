@@ -19,8 +19,10 @@ import com.stash.core.data.db.entity.PlaylistEntity
 import com.stash.core.data.db.entity.PlaylistTrackCrossRef
 import com.stash.core.data.db.entity.RemotePlaylistSnapshotEntity
 import com.stash.core.data.db.entity.RemoteTrackSnapshotEntity
+import com.stash.core.data.db.entity.TrackAliasEntity
 import com.stash.core.data.db.entity.TrackEntity
 import com.stash.core.data.library.SameSongRule
+import com.stash.core.data.library.libraryCopiesOf
 import com.stash.core.data.repository.MusicRepository
 import com.stash.core.data.sync.SyncPreferencesManager
 import com.stash.core.data.sync.SyncStateManager
@@ -29,6 +31,7 @@ import com.stash.core.model.DownloadStatus
 import com.stash.core.model.MusicSource
 import com.stash.core.model.PlaylistType
 import com.stash.core.model.SyncMode
+import com.stash.core.data.sync.MixStacking
 import com.stash.core.model.SyncState
 import com.stash.data.spotify.SpotifyApiClient
 import dagger.assisted.Assisted
@@ -54,6 +57,25 @@ import kotlinx.coroutines.flow.first
  */
 @Suppress("UNUSED_PARAMETER")
 internal fun defaultSyncEnabled(type: PlaylistType, online: Boolean): Boolean = false
+
+/**
+ * Whether a playlist sync finds for the first time goes straight onto Home's
+ * Your playlists rail: after "Stream everything" on the first-sync sheet
+ * ([pinNewPlaylists]), in Stream only, and only the user's own playlists. Mixes
+ * have their own Home rails and Liked Songs its own card. In Download mode a
+ * pinned playlist would sit on Home with nothing on the phone, so it waits for
+ * its Save switch like before.
+ */
+internal fun pinOnDiscovery(
+    type: PlaylistType,
+    streamingMode: Boolean,
+    pinNewPlaylists: Boolean,
+    source: MusicSource,
+    sourceId: String,
+): Boolean =
+    pinNewPlaylists && streamingMode && type == PlaylistType.CUSTOM &&
+        // A saved album lives in Library › Albums: 300 synced albums would flood Your playlists.
+        !com.stash.core.data.album.SavedAlbums.isSavedAlbum(type, source, sourceId)
 
 /**
  * The type to re-write onto an existing playlist row, or null to leave it.
@@ -167,6 +189,9 @@ class DiffWorker @AssistedInject constructor(
     private val syncUndoDao: com.stash.core.data.db.dao.SyncUndoDao,
     private val syncLog: com.stash.core.data.sync.SyncLog,
     private val canonicalRecompute: com.stash.core.data.library.CanonicalRecomputeRunner,
+    private val soundCloudAccounts: com.stash.core.auth.soundcloud.SoundCloudAccountManager? = null,
+    /** Whether Spotify Liked Songs were fetched in full: like mirroring reads "not liked there" only from such a fetch. */
+    private val likedSongsFetch: com.stash.core.data.social.SpotifyLikedSongsFetch? = null,
 ) : CoroutineWorker(appContext, params) {
 
     companion object {
@@ -244,14 +269,37 @@ class DiffWorker @AssistedInject constructor(
                 ?: syncPreferencesManager.spotifySyncMode.first()
             val youtubeSyncMode = syncPreferencesManager.youtubeSyncMode.first()
 
+
             // Read the streaming-mode toggle ONCE up front. When on, new
             // track rows still land in the `tracks` table (the metadata is
             // needed regardless — Home playlist surfaces + playlist detail
             // rely on it) but skip the `download_queue` enqueue. Tracks
             // become available via streaming-tap through KennyySource.
             val streamingMode = streamingPreference.current()
+            val pinNewPlaylists = syncPreferencesManager.pinNewPlaylists.first()
+
+            // Stacking became a switch per mix (2026-10-29). Once, before the first diff under
+            // it: an account that was accumulating keeps EVERY mix it has stacking, not only the
+            // ones that offer the switch to new mixes (Release Radar, My Supermix, a Daily Mix
+            // under another locale's name all collected too), so an upgrade never shrinks a
+            // collected mix back to this week's songs (review on #737). They keep the switch
+            // ([MixStacking.showsSwitch]) to turn it off.
+            if (!syncPreferencesManager.mixStackSeeded.first()) {
+                var seeded = 0
+                for (mix in playlistDao.getMixPlaylists()) {
+                    val accountMode = if (mix.source == MusicSource.YOUTUBE) youtubeSyncMode else spotifySyncMode
+                    if (accountMode == SyncMode.ACCUMULATE) {
+                        playlistDao.setStackSongs(mix.id, true)
+                        seeded++
+                    }
+                }
+                syncPreferencesManager.markMixStackSeeded()
+                if (seeded > 0) Log.i(TAG, "Stack switched on for $seeded mix(es) that were accumulating")
+            }
 
             val playlistSnapshots = remoteSnapshotDao.getPlaylistSnapshotsBySyncId(syncId)
+            val soundCloudSyncMode = if (playlistSnapshots.any { it.source == MusicSource.SOUNDCLOUD })
+                syncPreferencesManager.soundCloudSyncMode.first() else SyncMode.ACCUMULATE
             syncStateManager.onDiffing(playlistsDiffed = 0, totalPlaylists = playlistSnapshots.size)
             var newTrackCount = 0
             var playlistsDiffed = 0
@@ -261,18 +309,27 @@ class DiffWorker @AssistedInject constructor(
             var skippedUnchanged = 0
 
             for (playlistSnapshot in playlistSnapshots) {
-                // Pick the mode for this specific playlist's source so a
-                // user can Refresh Spotify Daily Mixes while Accumulating
-                // YouTube Liked Music on the same sync run.
-                val playlistSyncMode = when (playlistSnapshot.source) {
-                    MusicSource.YOUTUBE -> youtubeSyncMode
-                    else -> spotifySyncMode
-                }
-
+                val applySnapshot: suspend () -> Unit = applySnapshot@ {
                 // Find or create the local playlist (writes, but outside
                 // the per-playlist transaction — it owns its own atomicity
                 // and needs its id to drive the block below).
-                val localPlaylist = findOrCreatePlaylist(playlistSnapshot, streamingMode)
+                val localPlaylist = findOrCreatePlaylist(playlistSnapshot, streamingMode, pinNewPlaylists)
+
+                // A mix follows its own Stack switch: stacking accumulates, anything else
+                // mirrors what the service gave this time. The user's own playlists and Liked
+                // keep their account's mode (whether a song removed there goes here too).
+                val playlistSyncMode = when {
+                    localPlaylist.type == PlaylistType.DAILY_MIX ->
+                        if (localPlaylist.stackSongs) SyncMode.ACCUMULATE else SyncMode.REFRESH
+                    playlistSnapshot.source == MusicSource.YOUTUBE -> youtubeSyncMode
+                    playlistSnapshot.source == MusicSource.SOUNDCLOUD -> soundCloudSyncMode
+                    else -> spotifySyncMode
+                }
+                if (localPlaylist.userHidden) {
+                    Log.d(TAG, "Playlist '${playlistSnapshot.playlistName}' is out of the library, skipping")
+                    skippedSwitchedOff++
+                    return@applySnapshot
+                }
 
                 // Skip playlists the user has switched off — EXCEPT algorithmic
                 // mixes, and EXCEPT anything at all in Online mode.
@@ -297,7 +354,7 @@ class DiffWorker @AssistedInject constructor(
                 ) {
                     Log.d(TAG, "Playlist '${playlistSnapshot.playlistName}' sync disabled, skipping")
                     skippedSwitchedOff++
-                    continue
+                    return@applySnapshot
                 }
 
                 // A Spotify library playlist the fetch step didn't re-read: its
@@ -319,7 +376,7 @@ class DiffWorker @AssistedInject constructor(
                     // Checked, with nothing to do: the progress still moves.
                     playlistsDiffed++
                     syncStateManager.onDiffing(playlistsDiffed, playlistSnapshots.size)
-                    continue
+                    return@applySnapshot
                 }
 
                 // Get track snapshots for this playlist (read is outside
@@ -346,6 +403,13 @@ class DiffWorker @AssistedInject constructor(
                 newTrackCount += playlistNewTracks
                 playlistsDiffed++
                 syncStateManager.onDiffing(playlistsDiffed, playlistSnapshots.size)
+                }
+                if (playlistSnapshot.source == MusicSource.SOUNDCLOUD) {
+                    val connection = playlistSnapshot.soundCloudConnectionId
+                    if (connection != null) soundCloudAccounts?.withCurrentSession(connection, applySnapshot)
+                } else {
+                    applySnapshot()
+                }
             }
 
             // Soft-hide YouTube playlists that rotated off the home feed
@@ -495,6 +559,7 @@ class DiffWorker @AssistedInject constructor(
     private suspend fun findOrCreatePlaylist(
         snapshot: RemotePlaylistSnapshotEntity,
         streamingMode: Boolean,
+        pinNewPlaylists: Boolean,
     ): PlaylistEntity {
         val existing = playlistDao.findBySourceId(snapshot.sourcePlaylistId)
         if (existing != null) {
@@ -534,6 +599,9 @@ class DiffWorker @AssistedInject constructor(
             ) {
                 playlistDao.updateName(existing.id, snapshot.playlistName)
             }
+            // One the user took out of their library stays out: not
+            // reactivated, and the caller skips it (no linking, no downloads).
+            if (existing.userHidden) return existing
             // Re-activate a previously auto-hidden playlist when it
             // reappears in today's snapshot. Pairs with the post-loop
             // deactivateMissingForSource call below — without it, a mix
@@ -567,6 +635,11 @@ class DiffWorker @AssistedInject constructor(
             // Home is decided by PlaylistDao.getAllVisible, not by this flag:
             // Online, a playlist holding streamable tracks shows regardless.
             syncEnabled = defaultSyncEnabled(snapshot.playlistType, streamingMode),
+            pinnedToHomeAt = if (pinOnDiscovery(snapshot.playlistType, streamingMode, pinNewPlaylists, snapshot.source, snapshot.sourcePlaylistId)) {
+                System.currentTimeMillis()
+            } else {
+                null
+            },
         )
         val id = playlistDao.insert(newPlaylist)
         // A playlist or mix that wasn't here before is news — arguably the most
@@ -676,12 +749,27 @@ class DiffWorker @AssistedInject constructor(
             .map { (t, a) -> t to a }
             .distinct()
 
-        val candidates = trackDao.findExistingForBatch(spotifyUris, youtubeIds, canonicalIdentities)
+        val soundCloudCandidates = allowedSnapshots.mapNotNull { it.soundCloudId }.distinct()
+            .chunked(900).flatMap { trackDao.findBySoundCloudIds(it) }
+        val soundCloudIsrcs = allowedSnapshots.filter { it.soundCloudId != null }.mapNotNull { it.isrc }
+            .filter { it.matches(Regex("[A-Z]{2}[A-Z0-9]{3}[0-9]{7}")) }.distinct()
+        val isrcCandidates = soundCloudIsrcs.chunked(900).flatMap { trackDao.findByIsrcs(it) }
+        val direct = (isrcCandidates + trackDao.findExistingForBatch(spotifyUris, youtubeIds, canonicalIdentities) + soundCloudCandidates).distinctBy { it.id }
+        // Ids a merge took away (track_aliases, schema 76): a merged row's other video or Spotify
+        // id finds the row it went into, so this sync never makes the merged duplicate again. The
+        // rows they point at join the candidates; the id's own column still wins below.
+        val duplicateDao = database.duplicateDao()
+        val spotifyAliases = duplicateDao.aliases(TrackAliasEntity.KIND_SPOTIFY_URI, spotifyUris)
+        val youtubeAliases = duplicateDao.aliases(TrackAliasEntity.KIND_YOUTUBE_ID, youtubeIds)
+        val directIds = direct.mapTo(HashSet()) { it.id }
+        val aliasTargets = (spotifyAliases + youtubeAliases).map { it.trackId }.distinct().filterNot { it in directIds }
+        val candidates = direct + trackDao.getByIds(aliasTargets)
         val candidateTracks = candidates.associate { candidate ->
             candidate.id to BatchTrack(candidate, isNew = false)
         }
         val bySpotifyUri = mutableMapOf<String, BatchTrack>()
         val byYoutubeId = mutableMapOf<String, BatchTrack>()
+        val bySoundCloudId = mutableMapOf<String, BatchTrack>()
         // A canonical key can legitimately map to MULTIPLE rows — e.g. two
         // distinct YouTube uploads of "the same song" that arrive with
         // different videoIds. A single-value map here would collapse them
@@ -689,6 +777,7 @@ class DiffWorker @AssistedInject constructor(
         val byCanonical = mutableMapOf<CanonicalKey, MutableList<BatchTrack>>()
 
         fun registerBatchTrack(track: BatchTrack) {
+            track.entity.soundCloudId?.let { bySoundCloudId[it] = track }
             track.entity.spotifyUri?.takeIf(String::isNotBlank)?.let { bySpotifyUri[it] = track }
             track.entity.youtubeId?.takeIf(String::isNotBlank)?.let { byYoutubeId[it] = track }
             val canonicalKey = CanonicalKey(
@@ -702,6 +791,9 @@ class DiffWorker @AssistedInject constructor(
         }
 
         candidateTracks.values.forEach(::registerBatchTrack)
+        // After the rows' own ids, so a row that holds an id in its column always owns it.
+        for (alias in spotifyAliases) candidateTracks[alias.trackId]?.let { bySpotifyUri.putIfAbsent(alias.value, it) }
+        for (alias in youtubeAliases) candidateTracks[alias.trackId]?.let { byYoutubeId.putIfAbsent(alias.value, it) }
 
         // A canonical-title/artist match is only safe to reuse under
         // SameSongRule, the rule every path that finds a row by its words
@@ -726,6 +818,14 @@ class DiffWorker @AssistedInject constructor(
         )
 
         fun matchBatchTrack(snapshot: RemoteTrackSnapshotEntity): BatchTrack? {
+            snapshot.soundCloudId?.let { id ->
+                bySoundCloudId[id]?.let { return it }
+                // An official ISRC is an exact recording identity. Never reuse another upload id.
+                if (snapshot.isrc in soundCloudIsrcs) return candidateTracks.values.firstOrNull {
+                    it.entity.isrc == snapshot.isrc && it.entity.soundCloudId == null && it.entity.source != MusicSource.CLOUD && !it.entity.matchFlagged && !it.entity.matchDismissed
+                }
+                return null
+            }
             snapshot.spotifyUri?.takeIf(String::isNotBlank)?.let { uri ->
                 bySpotifyUri[uri]?.let { return it }
             }
@@ -745,6 +845,13 @@ class DiffWorker @AssistedInject constructor(
             batchTrack: BatchTrack,
             snapshot: RemoteTrackSnapshotEntity,
         ) {
+            if (snapshot.soundCloudId != null) {
+                val enriched = batchTrack.entity.copy(soundCloudId = snapshot.soundCloudId,
+                    soundCloudPermalink = snapshot.soundCloudPermalink, soundCloudPreview = snapshot.soundCloudPreview)
+                trackDao.update(enriched)
+                batchTrack.entity = enriched
+                bySoundCloudId[snapshot.soundCloudId] = batchTrack
+            }
             val existingTrack = batchTrack.entity
             val snapshotYtId = snapshot.youtubeId?.takeIf(String::isNotBlank)
             if (snapshotYtId != null && existingTrack.youtubeId.isNullOrBlank()) {
@@ -765,6 +872,18 @@ class DiffWorker @AssistedInject constructor(
                 trackDao.updateAlbumArtUrl(existingTrack.id, snapshotArt)
                 batchTrack.entity = batchTrack.entity.copy(albumArtUrl = snapshotArt)
             }
+
+            // Spotify's parental advisory, kept current: songs synced before the web-player
+            // parsers read it were stored as clean (2026-10-26), and only a sync can say otherwise.
+            // YouTube's badge only fills an unknown flag: it marks explicit songs and leaves the
+            // rest unmarked, and a song Spotify calls clean shouldn't flip with each YouTube sync.
+            val snapshotExplicit = snapshot.explicit?.takeIf {
+                playlistSnapshot.source != MusicSource.YOUTUBE || batchTrack.entity.explicit == null
+            }
+            if (snapshotExplicit != null && snapshotExplicit != batchTrack.entity.explicit) {
+                trackDao.updateExplicit(existingTrack.id, snapshotExplicit)
+                batchTrack.entity = batchTrack.entity.copy(explicit = snapshotExplicit)
+            }
         }
 
         val newTracks = mutableListOf<BatchTrack>()
@@ -783,6 +902,9 @@ class DiffWorker @AssistedInject constructor(
                         source = playlistSnapshot.source,
                         spotifyUri = snapshot.spotifyUri?.takeIf(String::isNotBlank),
                         youtubeId = snapshot.youtubeId?.takeIf(String::isNotBlank),
+                        soundCloudId = snapshot.soundCloudId,
+                        soundCloudPermalink = snapshot.soundCloudPermalink,
+                        soundCloudPreview = snapshot.soundCloudPreview,
                         albumArtUrl = snapshot.albumArtUrl,
                         canonicalTitle = ct,
                         canonicalArtist = ca,
@@ -848,9 +970,41 @@ class DiffWorker @AssistedInject constructor(
         // track of every rotating mix was queued (#368: "it downloads 6000+ from
         // users playlists and Spotify mixes that I don't need"). The protection
         // is now the switch — discovered mixes start off — not the type.
+        var linkedCopies = 0
+        // Copies of new songs already on the phone, by copy id: written after [crossRefsToInsert]
+        // and insert-if-absent, so they never move or revive a link that is already there.
+        val copyLinks = linkedMapOf<Long, PlaylistTrackCrossRef>()
         if (shouldEnqueueForDownload(streamingMode, localPlaylist.syncEnabled)) {
+            // A new song already on the phone as another row (cause 4 of the duplicates: a Spotify
+            // row downloaded under one video while this YouTube playlist holds another upload, so
+            // the ids keep them two rows) is not downloaded again: its copy is linked here, where
+            // the song sits, and the new row keeps its own ids for the next sync. The link is
+            // insert-if-absent ([copyLinks]): a copy already in this playlist keeps its place, and
+            // one the user took out (a removal mark written while this sync ran included) is not
+            // linked back; the song is still not downloaded twice. The shared check every download
+            // path asks (SameSongRule.isLibraryCopy), its candidates read once per playlist.
+            val copies = trackDao.libraryCopiesOf(
+                newTracks.filterNot { it.entity.soundCloudPreview }
+                    .map { it.entity.copy(id = checkNotNull(it.persistedId)) },
+            )
+            val firstPositionOf = newOccurrences.groupBy({ it.first }, { it.second.position })
+                .mapValues { (_, positions) -> positions.min() }
             for (batchTrack in newTracks) {
+                if (batchTrack.entity.soundCloudPreview) continue // A preview is never queued for download.
                 val trackId = checkNotNull(batchTrack.persistedId)
+                val copy = copies[trackId]
+                if (copy != null) {
+                    copyLinks.putIfAbsent(
+                        copy.id,
+                        PlaylistTrackCrossRef(
+                            playlistId = localPlaylist.id,
+                            trackId = copy.id,
+                            position = firstPositionOf[batchTrack] ?: 0,
+                        ),
+                    )
+                    linkedCopies++
+                    continue
+                }
                 downloadEntries.add(
                     DownloadQueueEntity(
                         trackId = trackId,
@@ -913,6 +1067,13 @@ class DiffWorker @AssistedInject constructor(
                 .mapValues { (_, rows) -> rows.sortedBy { it.id } }
         }
         for ((batchTrack, snapshot) in existingPairs) {
+            if (snapshot.soundCloudId != null) {
+                val enriched = batchTrack.entity.copy(soundCloudId = snapshot.soundCloudId,
+                    soundCloudPermalink = snapshot.soundCloudPermalink, soundCloudPreview = snapshot.soundCloudPreview)
+                trackDao.update(enriched)
+                batchTrack.entity = enriched
+                bySoundCloudId[snapshot.soundCloudId] = batchTrack
+            }
             val existingTrack = batchTrack.entity
             addCrossRefIfNotSoftDeleted(localPlaylist.id, existingTrack.id, snapshot.position, existingCrossRefs, crossRefsToInsert)
 
@@ -933,6 +1094,9 @@ class DiffWorker @AssistedInject constructor(
         if (crossRefsToInsert.isNotEmpty()) {
             playlistDao.insertAllCrossRefs(crossRefsToInsert.values.toList())
         }
+        if (copyLinks.isNotEmpty()) {
+            playlistDao.insertCrossRefsIfAbsent(copyLinks.values.toList())
+        }
         if (downloadEntries.isNotEmpty()) {
             downloadQueueDao.insertAll(downloadEntries)
         }
@@ -944,7 +1108,7 @@ class DiffWorker @AssistedInject constructor(
                 TAG,
                 "Playlist '${playlistSnapshot.playlistName}' (id=${localPlaylist.id}): " +
                     "$newTrackCount new track(s), streamingMode=$streamingMode, " +
-                    "downloadsQueued=${downloadEntries.size}",
+                    "downloadsQueued=${downloadEntries.size}, alreadyOnPhone=$linkedCopies",
             )
         }
 
@@ -1004,6 +1168,12 @@ class DiffWorker @AssistedInject constructor(
         syncMode: SyncMode,
     ) {
         playlistDao.updateLastSynced(localPlaylist.id, System.currentTimeMillis())
+        if (localPlaylist.type == PlaylistType.LIKED_SONGS && localPlaylist.source == MusicSource.SPOTIFY) {
+            val complete = !snapshotUnreliable(playlistSnapshot, trackSnapshots)
+            // Bookkeeping for like mirroring only: never the sync's failure
+            runCatching { likedSongsFetch?.fetched(complete, System.currentTimeMillis()) }
+                .onFailure { if (it is kotlin.coroutines.cancellation.CancellationException) throw it else Log.w(TAG, "couldn't note the Liked Songs fetch", it) }
+        }
         if (snapshotUnreliable(playlistSnapshot, trackSnapshots)) {
             // #343: an unreliable fetch was NOT mirrored (see processPlaylist).
             // Stamping it would make the next sync skip this playlist as

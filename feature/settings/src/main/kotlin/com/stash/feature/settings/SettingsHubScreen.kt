@@ -41,8 +41,8 @@ import com.stash.core.ui.components.bottomChromePadding
  * leading icon and a trailing chevron, and navigates to one of the six category
  * "spoke" screens (built in later tasks) via the `onOpen*` callbacks.
  *
- * Pure host: it owns no navigation itself — the caller wires every `onOpen*`,
- * [onOpenUrl] and [onStar]. It shares the existing [SettingsViewModel] so the
+ * Pure host: it owns no navigation itself — the caller wires every `onOpen*`
+ * and [onOpenUrl]. It shares the existing [SettingsViewModel] so the
  * subtitles reflect live playback/quality/account/library/appearance/version
  * state.
  */
@@ -57,10 +57,12 @@ fun SettingsHubScreen(
     onOpenUrl: (String) -> Unit,
     onOpenLosslessSources: () -> Unit,
     onOpenEqualizer: () -> Unit,
+    /** Library & Storage › Your Stash, for a search hit; null when the link is switched off in this build. */
+    onOpenYourStash: (() -> Unit)? = null,
     onOpenHomeLayout: () -> Unit,
-    onStar: () -> Unit,
     modifier: Modifier = Modifier,
     viewModel: SettingsViewModel = hiltViewModel(),
+    supportCard: SupportCardViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val streamingEnabled by viewModel.streamingEnabled.collectAsStateWithLifecycle()
@@ -78,14 +80,17 @@ fun SettingsHubScreen(
     val listenBrainz by viewModel.listenBrainzState.collectAsStateWithLifecycle()
     val cloud: com.stash.feature.settings.cloud.CloudStorageViewModel = hiltViewModel()
     val cloudAccounts by cloud.accounts.collectAsStateWithLifecycle()
+    val soundCloud: SoundCloudAccountViewModel = hiltViewModel()
+    val soundCloudSession by soundCloud.session.collectAsStateWithLifecycle()
     val otherAccounts = buildList {
+        if (soundCloudSession != null) add("SoundCloud")
         if (listenBrainz is com.stash.feature.settings.components.ListenBrainzState.Connected) add("ListenBrainz")
         cloudAccounts.map { it.account.provider.displayName }.distinct().forEach(::add)
     }
     val summaries = settingsHubSummaries(uiState, versionName, streamingEnabled, streamOnCellular, otherAccounts)
 
     var searchQuery by remember { mutableStateOf("") }
-    val searchIndex = remember(context) { settingsSearchIndex(context) }
+    val searchIndex = remember(context) { searchableIndex(settingsSearchIndex(context), yourStash = onOpenYourStash != null) }
     val pageTitles = remember(context) {
         mapOf(
             SettingsPage.PLAYBACK to context.getString(R.string.settings_playback_title),
@@ -96,6 +101,8 @@ fun SettingsHubScreen(
                 " › " + context.getString(R.string.settings_equalizer_title),
             SettingsPage.ACCOUNTS to context.getString(R.string.settings_accounts_sync_title),
             SettingsPage.LIBRARY to context.getString(R.string.settings_library_storage_title),
+            SettingsPage.YOUR_STASH to context.getString(R.string.settings_library_storage_title) +
+                " › " + context.getString(R.string.settings_your_stash_title),
             SettingsPage.APPEARANCE to context.getString(R.string.settings_appearance_title),
             SettingsPage.HOME_LAYOUT to context.getString(R.string.settings_appearance_title) +
                 " › " + context.getString(R.string.settings_home_layout_section),
@@ -112,6 +119,7 @@ fun SettingsHubScreen(
         SettingsPage.EQUALIZER -> onOpenEqualizer()
         SettingsPage.ACCOUNTS -> onOpenAccounts()
         SettingsPage.LIBRARY -> onOpenLibraryStorage()
+        SettingsPage.YOUR_STASH -> onOpenYourStash?.invoke()
         SettingsPage.APPEARANCE -> onOpenAppearance()
         SettingsPage.HOME_LAYOUT -> onOpenHomeLayout()
         SettingsPage.ABOUT -> onOpenAbout()
@@ -120,7 +128,7 @@ fun SettingsHubScreen(
         SettingsPage.PLAYBACK -> Icons.Rounded.PlayArrow
         SettingsPage.AUDIO, SettingsPage.LOSSLESS_SOURCES, SettingsPage.EQUALIZER -> Icons.Rounded.GraphicEq
         SettingsPage.ACCOUNTS -> Icons.Rounded.Person
-        SettingsPage.LIBRARY -> Icons.Rounded.FolderOpen
+        SettingsPage.LIBRARY, SettingsPage.YOUR_STASH -> Icons.Rounded.FolderOpen
         SettingsPage.APPEARANCE, SettingsPage.HOME_LAYOUT -> Icons.Rounded.Palette
         SettingsPage.ABOUT -> Icons.Rounded.Info
     }
@@ -147,7 +155,13 @@ fun SettingsHubScreen(
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         // No "Settings" title: the tab bar already says where you are.
-        SupportBanner(onOpenUrl = onOpenUrl, onStar = onStar)
+        val support by supportCard.state.collectAsStateWithLifecycle()
+        SupportBanner(
+            state = support,
+            onOpenUrl = onOpenUrl,
+            // The perk line opens the Ko-fi claim, which lives under Lossless sources.
+            onOpenPerk = onOpenLosslessSources,
+        )
         SettingsSearchField(
             value = searchQuery,
             onValueChange = { searchQuery = it },

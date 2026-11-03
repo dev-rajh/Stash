@@ -1,6 +1,7 @@
 package com.stash.core.data.sync
 
 import android.content.Context
+import android.util.Log
 import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
@@ -8,9 +9,13 @@ import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.stash.core.auth.TokenManager
+import com.stash.core.auth.model.AuthService
+import com.stash.core.data.db.dao.PlaylistDao
 import com.stash.core.model.MusicSource
 import com.stash.core.model.SyncMode
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -84,6 +89,9 @@ data class SyncPreferences(
 @Singleton
 class SyncPreferencesManager @Inject constructor(
     @ApplicationContext private val context: Context,
+    // Only for anyAccumulate(): which accounts' modes count for deleting downloads.
+    private val tokenManager: TokenManager,
+    private val playlistDao: PlaylistDao,
 ) {
     private object Keys {
         val SYNC_HOUR = intPreferencesKey("sync_hour")
@@ -94,10 +102,14 @@ class SyncPreferencesManager @Inject constructor(
         val LEGACY_SYNC_MODE = stringPreferencesKey("sync_mode")
         val SPOTIFY_SYNC_MODE = stringPreferencesKey("spotify_sync_mode")
         val YOUTUBE_SYNC_MODE = stringPreferencesKey("youtube_sync_mode")
+        val SOUNDCLOUD_SYNC_MODE = stringPreferencesKey("soundcloud_sync_mode")
         val YOUTUBE_LIKED_STUDIO_ONLY = booleanPreferencesKey("youtube_liked_studio_only")
         val SYNC_DAYS = intPreferencesKey("sync_days")
         val DISCOVER_AUTO_MIXES = booleanPreferencesKey("discover_auto_mixes")
         val AUTO_SYNC_PAUSED_AFTER_UNDO = booleanPreferencesKey("auto_sync_paused_after_undo")
+        val ARRIVAL_CHOSEN = booleanPreferencesKey("first_sync_arrival_chosen")
+        val PIN_NEW_PLAYLISTS = booleanPreferencesKey("pin_new_playlists_to_home")
+        val MIX_STACK_SEEDED = booleanPreferencesKey("mix_stack_seeded")
     }
 
     /** Reactive stream of the current [SyncPreferences]. */
@@ -164,6 +176,36 @@ class SyncPreferencesManager @Inject constructor(
     val syncDays: Flow<Int> =
         context.syncPrefsDataStore.data.map { it[Keys.SYNC_DAYS] ?: 0b1111111 }
 
+    /**
+     * Whether the first-sync sheet ("How should your music arrive?") has been
+     * answered. A new install's first Sync asks before it runs; an install that
+     * has synced before never sees the sheet, and keeps its mode and switches
+     * (the Sync tab overhaul, 2026-10-29).
+     */
+    val arrivalChosen: Flow<Boolean> =
+        context.syncPrefsDataStore.data.map { it[Keys.ARRIVAL_CHOSEN] ?: false }
+
+    /**
+     * Whether the per-mix Stack switches have been set from the old per-account mode
+     * (DiffWorker does it once: an accumulating account's stackable mixes keep stacking).
+     */
+    val mixStackSeeded: Flow<Boolean> =
+        context.syncPrefsDataStore.data.map { it[Keys.MIX_STACK_SEEDED] ?: false }
+
+    suspend fun markMixStackSeeded() {
+        context.syncPrefsDataStore.edit { it[Keys.MIX_STACK_SEEDED] = true }
+    }
+
+    /**
+     * Whether a playlist sync finds for the first time goes on Home's Your
+     * playlists rail. Turned on by "Stream everything" on the first-sync sheet,
+     * so a new user's whole account shows up on Home without picking anything.
+     * Off for everyone else: their Home stays as they arranged it. Pins only;
+     * never touches sync_enabled, which in Download mode would download (#368).
+     */
+    val pinNewPlaylists: Flow<Boolean> =
+        context.syncPrefsDataStore.data.map { it[Keys.PIN_NEW_PLAYLISTS] ?: false }
+
     private fun resolveSpotifyMode(
         prefs: androidx.datastore.preferences.core.Preferences,
     ): SyncMode {
@@ -226,14 +268,38 @@ class SyncPreferencesManager @Inject constructor(
     }
 
     /**
-     * True if EITHER source's mix mode is ACCUMULATE. The orphan-cleanup sweep
+     * True while the orphan-cleanup sweep
      * ([com.stash.core.data.repository.MusicRepository.cleanOrphanedMixTracks])
-     * consults this and deletes nothing while any source accumulates — the
-     * library is append-only. Only when BOTH sources are REFRESH does cleanup run.
+     * must delete nothing: an account that counts is on ACCUMULATE, or no account
+     * counts at all. Cleanup runs only when every account that counts is REFRESH.
+     *
+     * An account counts while it is signed in, or while its playlists are still in
+     * the library: a disconnected account's songs stay, and its mode still decides
+     * whether they may go. These are the accounts whose switch the Sync history
+     * screen shows. One never connected used to count too, with its default
+     * ACCUMULATE and no switch on screen, so a Spotify-only or YouTube-only library
+     * never deleted anything, Refresh confirmed or not (#273). SoundCloud has no
+     * switch, and the sweep never takes its songs, so it never counts.
+     *
+     * With no account counting, nobody chose Refresh, so nothing is deleted. A sign-in that
+     * can't be decrypted reads as signed out (the token store returns null, as the sync sees
+     * it too), so that account still counts while its playlists are here. If a read fails
+     * outright (the playlists query, the token store's file), nothing is deleted.
      */
-    suspend fun anyAccumulate(): Boolean =
-        spotifySyncMode.first() == SyncMode.ACCUMULATE ||
-            youtubeSyncMode.first() == SyncMode.ACCUMULATE
+    suspend fun anyAccumulate(): Boolean {
+        val counted = try {
+            SWEPT_ACCOUNTS.filter { (source, service) ->
+                tokenManager.isAuthenticated(service) || playlistDao.hasLibraryPlaylists(source)
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "Couldn't tell which accounts count; keeping every song", e)
+            return true
+        }
+        return counted.isEmpty() ||
+            counted.any { (source, _) -> syncModeFor(source).first() == SyncMode.ACCUMULATE }
+    }
 
     /** Persist the YT Music Liked Songs studio-only filter. */
     suspend fun setYoutubeLikedStudioOnly(enabled: Boolean) {
@@ -243,6 +309,19 @@ class SyncPreferencesManager @Inject constructor(
     /** Persist whether sync discovers the service's own algorithmic mixes. */
     suspend fun setDiscoverAutoMixes(enabled: Boolean) {
         context.syncPrefsDataStore.edit { it[Keys.DISCOVER_AUTO_MIXES] = enabled }
+    }
+
+    /** Record the first-sync sheet's answer: [pinNewPlaylists] for "Stream everything". */
+    suspend fun setArrivalChosen(pinNewPlaylists: Boolean) {
+        context.syncPrefsDataStore.edit {
+            it[Keys.ARRIVAL_CHOSEN] = true
+            it[Keys.PIN_NEW_PLAYLISTS] = pinNewPlaylists
+        }
+    }
+
+    /** Mark the sheet answered without changing anything: an install that already synced. */
+    suspend fun markArrivalChosen() {
+        context.syncPrefsDataStore.edit { it[Keys.ARRIVAL_CHOSEN] = true }
     }
 
     /** Persist the days-of-week bitmask. UI passes [DayOfWeekSet.bitmask]. */
@@ -256,9 +335,28 @@ class SyncPreferencesManager @Inject constructor(
      * etc.) don't flow through the sync pipeline, but a sane default
      * keeps this total.
      */
+    val soundCloudSyncMode: Flow<SyncMode> = context.syncPrefsDataStore.data.map { prefs ->
+        prefs[Keys.SOUNDCLOUD_SYNC_MODE]?.let { parseMode(it) } ?: SyncMode.ACCUMULATE
+    }
+
+    suspend fun setSoundCloudSyncMode(mode: SyncMode) {
+        context.syncPrefsDataStore.edit { it[Keys.SOUNDCLOUD_SYNC_MODE] = mode.name }
+    }
+
     fun syncModeFor(source: MusicSource): Flow<SyncMode> = when (source) {
         MusicSource.SPOTIFY -> spotifySyncMode
         MusicSource.YOUTUBE -> youtubeSyncMode
+        MusicSource.SOUNDCLOUD -> soundCloudSyncMode
         MusicSource.LOCAL, MusicSource.BOTH, MusicSource.CLOUD -> spotifySyncMode
+    }
+
+    private companion object {
+        const val TAG = "SyncPreferences"
+
+        /** The accounts with a Refresh/Accumulate switch, and the sign-in each reads. */
+        val SWEPT_ACCOUNTS = listOf(
+            MusicSource.SPOTIFY to AuthService.SPOTIFY,
+            MusicSource.YOUTUBE to AuthService.YOUTUBE_MUSIC,
+        )
     }
 }

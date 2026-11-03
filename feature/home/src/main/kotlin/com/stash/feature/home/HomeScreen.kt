@@ -110,6 +110,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.foundation.layout.aspectRatio
 import com.stash.core.ui.ambient.LocalAlbumChrome
+import com.stash.core.ui.ambient.LocalThemeAccent
+import com.stash.core.ui.ambient.albumGlow
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.contentDescription
@@ -118,7 +120,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.ui.res.stringResource
+import com.stash.feature.home.shelves.HomeShelvesViewModel
 import com.stash.core.data.mix.MixBuildState
 import com.stash.core.model.MusicSource
 import com.stash.core.model.Playlist
@@ -130,6 +135,7 @@ import com.stash.core.ui.components.CrispChipRow
 import com.stash.core.data.prefs.HomeSection
 import com.stash.core.ui.components.DiscoverHeroCard
 import com.stash.core.ui.components.GlassCard
+import com.stash.core.ui.components.HomeRailCardSize
 import com.stash.core.ui.components.SectionHeader
 import com.stash.core.ui.components.SourceIndicator
 import com.stash.data.ytmusic.model.AlbumSummary
@@ -175,7 +181,14 @@ fun HomeScreen(
     communitySection: @Composable () -> Unit = {},
     /** "Your listening", from feature/listening; renders nothing until there's a listen. */
     yourListeningSection: @Composable () -> Unit = {},
+    /** "Your record", from feature/record: the way into the record, or its invitation. */
+    yourRecordSection: @Composable () -> Unit = {},
+    /** "From your record", from feature/record: mixes only the record's years make, under its card; nothing without an import. */
+    recordMixesSection: @Composable () -> Unit = {},
+    /** A tile of "Moods & moments": the app opens its page of playlists. */
+    onOpenMood: (com.stash.data.ytmusic.model.MoodTile) -> Unit = {},
     viewModel: HomeViewModel = hiltViewModel(),
+    shelvesViewModel: HomeShelvesViewModel = hiltViewModel(),
 ) {
     // Long-pressed Stash mix whose action sheet is open (null = closed).
     var actionSheetMixId by remember { mutableStateOf<Long?>(null) }
@@ -191,6 +204,12 @@ fun HomeScreen(
     }
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val heroMinimized by viewModel.heroMinimized.collectAsStateWithLifecycle()
+    // Home's own streaming shelves (New from your artists, Moods & moments): built once a day, empty in Offline mode.
+    val shelves by shelvesViewModel.state.collectAsStateWithLifecycle()
+    LifecycleResumeEffect(shelvesViewModel) {
+        shelvesViewModel.onResume()
+        onPauseOrDispose {}
+    }
     // Master streaming-mode flag. Both the top-bar StreamingModeChip and
     // the sheet (StreamingModeSheet) render from this single source of
     // truth; the chip itself early-returns to nothing while the build-
@@ -224,9 +243,16 @@ fun HomeScreen(
         }
     }
 
+    // The album's glow at the top of Home (D9): drawn on the list's own node, before the status-bar
+    // padding, so it starts at the top of the screen and stays put while the feed scrolls under it.
+    // Read at draw time: a song change's crossfade redraws it without recomposing the feed. Off with
+    // Album colours on Neutral, as the rest of the page's accents.
+    val albumChrome = LocalAlbumChrome.current
+    val albumGlowOn = LocalThemeAccent.current.followsSong
     LazyColumn(
         modifier = modifier
             .fillMaxSize()
+            .albumGlow(albumChrome, enabled = albumGlowOn)
             .statusBarsPadding(),
         // Edge to edge under the glass mini player + tab bar: they blur the feed as it scrolls by.
         contentPadding = PaddingValues(bottom = bottomChromePadding(120.dp)),
@@ -299,7 +325,7 @@ fun HomeScreen(
                 ) {
                     androidx.compose.material3.Icon(
                         painter = androidx.compose.ui.res.painterResource(
-                            id = R.drawable.ic_discord,
+                            id = com.stash.core.ui.R.drawable.ic_brand_discord,
                         ),
                         contentDescription = "Join the Stash Discord",
                         tint = androidx.compose.ui.graphics.Color(0xFF5865F2),
@@ -364,7 +390,7 @@ fun HomeScreen(
                                         color = MaterialTheme.colorScheme.onSurface,
                                     )
                                     Text(
-                                        text = "Join on Crowdin, then request access",
+                                        text = "After getting access, contribute on Weblate",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
@@ -379,7 +405,7 @@ fun HomeScreen(
                             },
                             onClick = {
                                 showHelpMenu = false
-                                runCatching { socialUriHandler.openUri(STASH_CROWDIN_URL) }
+                                runCatching { socialUriHandler.openUri(STASH_WEBSITE_URL) }
                             },
                         )
                         DropdownMenuItem(
@@ -702,6 +728,37 @@ fun HomeScreen(
                 }
                 HomeSection.COMMUNITY -> item(key = "section_community") { communitySection() }
                 HomeSection.YOUR_LISTENING -> item(key = "section_your_listening") { yourListeningSection() }
+                HomeSection.YOUR_RECORD -> item(key = "section_your_record") { yourRecordSection() }
+                HomeSection.RECORD_MIXES -> item(key = "section_record_mixes") { recordMixesSection() }
+                HomeSection.NEW_FROM_ARTISTS -> if (shelves.newFromArtists.isNotEmpty()) {
+                    item(key = "section_new_from_artists") {
+                        // YouTube Music releases: they open on the album page, and carry no FLAC mark (Qobuz's rows do)
+                        DiscoveryAlbumRow(
+                            title = stringResource(R.string.home_new_from_artists),
+                            albums = shelves.newFromArtists,
+                            onOpen = onNavigateToAlbum,
+                            lossless = false,
+                        )
+                    }
+                }
+                HomeSection.MOODS -> if (shelves.moods.isNotEmpty()) {
+                    item(key = "section_moods") {
+                        com.stash.feature.home.shelves.MoodTilesShelf(
+                            title = stringResource(R.string.home_moods),
+                            tiles = shelves.moods,
+                            onOpen = onOpenMood,
+                        )
+                    }
+                }
+                HomeSection.BECAUSE_YOU_LIKE -> if (shelves.becauseYouLike.isNotEmpty()) {
+                    item(key = "section_because_you_like") {
+                        // Streamed songs, mostly ones you don't have: a tap plays the row from that song
+                        com.stash.feature.home.shelves.BecauseYouLikeRows(
+                            rows = shelves.becauseYouLike,
+                            onPlay = shelvesViewModel::playRow,
+                        )
+                    }
+                }
             }
         }
 
@@ -814,7 +871,7 @@ fun HomeScreen(
                     icon = Icons.Filled.RemoveCircleOutline,
                     label = "Hide from Home",
                     onClick = {
-                        viewModel.setHideFromHome(id, true)
+                        viewModel.hideFromHome(id)
                         actionSheetMixId = null
                     },
                 )
@@ -1135,10 +1192,10 @@ private data class Supporter(
 // browser. Edit when the invite rotates.
 private const val STASH_DISCORD_URL = "https://discord.gg/vcbjEby5PC"
 
-// Translation project on Crowdin. Tap → Crowdin project page.
-private const val STASH_CROWDIN_URL = "https://crowdin.com/project/stash-music-player"
+// Translation project on Weblate. Tap → Weblate project page.
+private const val STASH_WEBSITE_URL = "https://weblate.paraliyzed.net/projects/stash-music-app/"
 
-// Form to request translator access on Crowdin.
+// Form to request translator access on Weblate.
 private const val STASH_TRANSLATE_ACCESS_FORM_URL =
     "https://docs.google.com/forms/d/e/1FAIpQLSexDpqAvK82QlYYpC8J0ukwVXkzOQSjC8V10SPVbj1ug0ojow/viewform"
 
@@ -1159,6 +1216,12 @@ private val LEGACY_SUPPORTERS = listOf(
         message = "Awesome application! I hope continuous improvement and support",
     ),
 )
+
+/**
+ * Tape speed: 31 dp/s at first, 15 % quicker (owner, 2026-10-22), then 10 % quicker again
+ * (owner, 2026-11-02: "+10 %" meant speed, not size; about 39.2 dp/s).
+ */
+private val TickerSpeedPerSec = 31.dp * 1.15f * 1.1f
 
 /**
  * Tip-jar ticker — dublab-style community marquee.
@@ -1225,16 +1288,17 @@ private fun SupporterTicker(
     val epochMs = rememberSaveable { System.currentTimeMillis() }
     var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
     // Runs only while Home is in front: under the open player the tape holds still, and being
-    // wall-clock it picks up mid-flow when the player closes.
-    val tapeActive = com.stash.core.ui.components.rememberPageActive()
+    // wall-clock it picks up mid-flow when the player closes. With motion still (Remove
+    // animations, or Battery Saver) it holds too: the endless tape is a frame every refresh.
+    val tapeActive = com.stash.core.ui.components.rememberPageActive() &&
+        !com.stash.core.ui.ambient.rememberLoopsStill()
     LaunchedEffect(tapeActive) {
         if (!tapeActive) return@LaunchedEffect
         while (true) {
             withFrameMillis { nowMs = System.currentTimeMillis() }
         }
     }
-    // 15% quicker than the original 31 dp/s (owner, 2026-10-22).
-    val velocityPxPerSec = with(LocalDensity.current) { (31.dp * 1.15f).toPx() }
+    val velocityPxPerSec = with(LocalDensity.current) { TickerSpeedPerSec.toPx() }
     var tapeWidthPx by remember { mutableIntStateOf(0) }
 
     // Full-bleed strip: no card, no border, no leading icon — every pixel
@@ -1283,13 +1347,19 @@ private fun SupporterTicker(
 
 // \u2500\u2500 Qobuz discovery rows \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
-/** Horizontal carousel of Qobuz albums (New Releases). Tap \u2192 album detail. */
+/**
+ * Horizontal carousel of albums (New Releases, Top Albums, New from your artists). Tap opens the
+ * album page. Its covers are [HomeRailCardSize], the same as the mix rails around it (internal for
+ * HomeAlbumRowsSizeTest, which checks that).
+ */
 @Composable
-private fun DiscoveryAlbumRow(
+internal fun DiscoveryAlbumRow(
     title: String,
     albums: List<AlbumSummary>,
     onOpen: (AlbumSummary) -> Unit,
     topSpacing: androidx.compose.ui.unit.Dp = 16.dp,
+    /** Qobuz's catalog rows are lossless; YouTube Music's releases ("New from your artists") are not marked. */
+    lossless: Boolean = true,
 ) {
     Column {
         Spacer(Modifier.height(topSpacing))
@@ -1304,7 +1374,8 @@ private fun DiscoveryAlbumRow(
                     artist = album.artist,
                     thumbnailUrl = album.thumbnailUrl,
                     year = album.year,
-                    isLossless = true,
+                    isLossless = lossless,
+                    size = HomeRailCardSize,
                     onClick = { onOpen(album) },
                 )
             }
@@ -1315,10 +1386,11 @@ private fun DiscoveryAlbumRow(
 /**
  * Horizontal carousel of Qobuz community playlists. Each card carries the
  * curator as its subtitle and opens via a QOBUZ_PLAYLIST [AlbumSummary] so the
- * existing album-detail screen renders + plays it.
+ * existing album-detail screen renders + plays it. Its covers are [HomeRailCardSize], like the
+ * album rows (internal for HomeAlbumRowsSizeTest, which checks that).
  */
 @Composable
-private fun DiscoveryPlaylistRow(
+internal fun DiscoveryPlaylistRow(
     title: String,
     playlists: List<PlaylistSummary>,
     onOpen: (AlbumSummary) -> Unit,
@@ -1342,6 +1414,7 @@ private fun DiscoveryPlaylistRow(
                     thumbnailUrl = playlist.thumbnailUrl,
                     year = null,
                     isLossless = true,
+                    size = HomeRailCardSize,
                     onClick = { onOpen(playlist.toAlbumNav()) },
                 )
             }

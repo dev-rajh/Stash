@@ -80,6 +80,32 @@ internal fun shouldDeactivateMissingPlaylists(
     inventoryComplete: Boolean,
 ): Boolean = syncMode == SyncMode.REFRESH && inventoryComplete
 
+/** How many playlists the step message names before "and N more". */
+private const val UNREAD_NAMED_MAX = 5
+
+/**
+ * The Spotify library step's error message, or null when its inventory is whole:
+ * the listing walk's failure kept apart from the playlists whose songs couldn't
+ * be read, which are named. One "inventory incomplete" covering both, naming
+ * nothing, sent #747's hunt through two users' bundles for an empty playlist.
+ */
+internal fun spotifyInventoryProblem(listingComplete: Boolean, unreadPlaylists: List<String>): String? =
+    listOfNotNull(
+        "inventory incomplete — a page/folder fetch failed mid-walk".takeUnless { listingComplete },
+        unreadPlaylists.takeIf { it.isNotEmpty() }?.let(::unreadPlaylistsMessage),
+    ).joinToString("; ").ifEmpty { null }
+
+/** "couldn't read 1 playlist: Road trip (kept as it was)", naming up to [UNREAD_NAMED_MAX]. */
+internal fun unreadPlaylistsMessage(names: List<String>): String {
+    val more = names.size - UNREAD_NAMED_MAX
+    val named = names.take(UNREAD_NAMED_MAX).joinToString(", ") + if (more > 0) " and $more more" else ""
+    return if (names.size == 1) {
+        "couldn't read 1 playlist: $named (kept as it was)"
+    } else {
+        "couldn't read ${names.size} playlists: $named (kept as they were)"
+    }
+}
+
 private val DAILY_MIX_NAME = Regex("""Daily Mix \d+""")
 
 /**
@@ -174,6 +200,8 @@ class PlaylistFetchWorker @AssistedInject constructor(
     private val youtubeAuthHealthProbe: YoutubeAuthHealthProbe,
     private val streamingPreference: com.stash.core.data.prefs.StreamingPreference,
     private val syncUndoDao: com.stash.core.data.db.dao.SyncUndoDao,
+    private val soundCloudLikes: com.stash.core.data.sync.SoundCloudLikesFetcher? = null,
+    private val soundCloudPlaylists: com.stash.core.data.sync.SoundCloudPlaylistsFetcher? = null,
 ) : CoroutineWorker(appContext, params) {
 
     companion object {
@@ -348,7 +376,16 @@ class PlaylistFetchWorker @AssistedInject constructor(
             val isSpotifyAuthenticated = tokenManager.isAuthenticated(AuthService.SPOTIFY)
             val isYouTubeAuthenticated = tokenManager.isAuthenticated(AuthService.YOUTUBE_MUSIC)
 
-            if (!isSpotifyAuthenticated && !isYouTubeAuthenticated) {
+            val soundCloudSession = if (soundCloudLikes != null) try {
+                if (tokenManager.soundCloudSession.first()?.oauthToken != null) tokenManager.getSoundCloudToken()
+                tokenManager.soundCloudSession.first()
+            } catch (e: CancellationException) { throw e }
+            catch (_: Exception) {
+                diagnostics.add(SyncStepResult("SOUNDCLOUD", "authenticate", StepStatus.ERROR,
+                    errorMessage = "SoundCloud session could not be renewed. Reconnect SoundCloud in Accounts."))
+                null
+            } else null
+            if (!isSpotifyAuthenticated && !isYouTubeAuthenticated && soundCloudSession == null) {
                 syncHistoryDao.updateStatus(
                     id = syncId,
                     status = SyncState.FAILED,
@@ -375,7 +412,7 @@ class PlaylistFetchWorker @AssistedInject constructor(
                 youtubeProbe = youtubeAuthHealthProbe,
             )
             syncStateManager.onAuthExpiryProbed(probeResult.state)
-            if (probeResult.shortCircuit) {
+            if (probeResult.shortCircuit && soundCloudSession == null) {
                 Log.i(
                     TAG,
                     "Auth expired (spotify=${probeResult.state.spotifyExpired}, " +
@@ -408,6 +445,46 @@ class PlaylistFetchWorker @AssistedInject constructor(
             var youtubeComplete = true
             if (probeResult.fetchYoutube) {
                 youtubeComplete = fetchYouTubePlaylists(syncId, diagnostics)
+            }
+
+            if (soundCloudSession != null && soundCloudLikes != null) {
+                try {
+                    val applied = soundCloudLikes.fetch(syncId, soundCloudSession)
+                    diagnostics.add(SyncStepResult("SOUNDCLOUD", "getLikedSongs",
+                        if (applied) StepStatus.SUCCESS else StepStatus.SKIPPED))
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    diagnostics.add(SyncStepResult("SOUNDCLOUD", "getLikedSongs", StepStatus.ERROR,
+                        errorMessage = "SoundCloud likes could not be fetched; library kept unchanged"))
+                }
+            }
+            if (soundCloudSession != null && soundCloudPlaylists != null) {
+                val steps: List<Pair<String, suspend () -> com.stash.core.data.sync.SoundCloudPlaylistFetchResult>> = listOf(
+                    "getPlaylists" to { soundCloudPlaylists.fetchPlaylists(syncId, soundCloudSession) },
+                    "getPersonalMixes" to {
+                        if (syncPreferencesManager.discoverAutoMixes.first()) soundCloudPlaylists.fetchMixes(syncId, soundCloudSession)
+                        else com.stash.core.data.sync.SoundCloudPlaylistFetchResult(skipped = true)
+                    },
+                )
+                for ((name, fetch) in steps) {
+                    try {
+                        val fetched = fetch()
+                        if (fetched.published > 0 || fetched.failed == 0) {
+                            diagnostics.add(SyncStepResult("SOUNDCLOUD", name, when {
+                                fetched.skipped -> StepStatus.SKIPPED
+                                fetched.published == 0 -> StepStatus.EMPTY
+                                else -> StepStatus.SUCCESS
+                            }, itemCount = fetched.published))
+                        }
+                        if (fetched.failed > 0) diagnostics.add(SyncStepResult("SOUNDCLOUD", "${name}Details", StepStatus.ERROR,
+                            errorMessage = "${fetched.failed} SoundCloud lists could not be fetched; their existing contents were kept"))
+                    } catch (e: CancellationException) { throw e }
+                    catch (_: Exception) {
+                        diagnostics.add(SyncStepResult("SOUNDCLOUD", name, StepStatus.ERROR,
+                            errorMessage = "SoundCloud lists could not be fetched; existing lists kept unchanged"))
+                    }
+                }
             }
 
             // Persist diagnostics.
@@ -521,7 +598,7 @@ class PlaylistFetchWorker @AssistedInject constructor(
                     if (extraYearly.isNotEmpty()) {
                         Log.d(TAG, "fetchSpotifyPlaylists: +${extraYearly.size} yearly recap(s)")
                         syncLog.success(
-                            "Your recaps — " + extraYearly.joinToString(", ") { it.name },
+                            "More mixes — " + extraYearly.joinToString(", ") { it.name },
                         )
                     }
                     val dailyMixes = result.data + extraYearly
@@ -545,7 +622,17 @@ class PlaylistFetchWorker @AssistedInject constructor(
                             // Track fetching uses client_credentials (Prong 1) -- reliable
                             var fetchFailed = false
                             val fetched = when (val tracksResult = spotifyApiClient.getPlaylistTracks(mix.id)) {
-                                is SyncResult.Success -> tracksResult.data
+                                // A mix with no songs isn't a real answer, and nothing here
+                                // could catch a wrong one: the home feed rarely gives a mix a
+                                // count, so the diff's listing check sees 0 and would mirror
+                                // the mix empty. Kept as it was instead.
+                                is SyncResult.Success -> if (tracksResult.data.tracks.isEmpty()) {
+                                    fetchFailed = true
+                                    Log.w(TAG, "fetchSpotifyPlaylists: no songs read for mix '${mix.name}', kept as it was")
+                                    null
+                                } else {
+                                    tracksResult.data
+                                }
                                 is SyncResult.Empty -> {
                                     Log.d(TAG, "fetchSpotifyPlaylists: no tracks for '${mix.name}': ${tracksResult.reason}")
                                     null
@@ -766,7 +853,13 @@ class PlaylistFetchWorker @AssistedInject constructor(
 
         // Fetch user-created/saved playlists from the Spotify library.
         var userPlaylistCount = 0
-        var inventoryComplete = true
+        // Whether the library walk listed every playlist: every page and folder read.
+        var listingComplete = true
+        // Listed playlists whose songs this run couldn't read, id to name. Each is
+        // kept as it was and read again next sync, and named in the step, the live
+        // log and the History row: "inventory incomplete" on every sync, naming
+        // nothing, was all #747's reporters had.
+        val unreadPlaylists = linkedMapOf<String, String>()
         try {
             // v0.9.21: paginate libraryV3 instead of a single 50-item fetch.
             // The previous single-call path silently capped users at ≤50
@@ -819,18 +912,18 @@ class PlaylistFetchWorker @AssistedInject constructor(
                 return false
             }
 
-            inventoryComplete = pageThrough(folderUri = null, depth = 0)
+            listingComplete = pageThrough(folderUri = null, depth = 0)
             while (folderQueue.isNotEmpty() && pagesFetched < pageCap) {
                 val (uri, depth) = folderQueue.removeFirst()
                 if (depth > maxFolderDepth) {
-                    inventoryComplete = false
+                    listingComplete = false
                     Log.w(TAG, "fetchSpotifyPlaylists: folder '$uri' beyond depth $maxFolderDepth, skipping")
                     continue
                 }
                 foldersWalked++
-                if (!pageThrough(folderUri = uri, depth = depth)) inventoryComplete = false
+                if (!pageThrough(folderUri = uri, depth = depth)) listingComplete = false
             }
-            if (folderQueue.isNotEmpty()) inventoryComplete = false
+            if (folderQueue.isNotEmpty()) listingComplete = false
 
             Log.i(
                 TAG,
@@ -859,6 +952,13 @@ class PlaylistFetchWorker @AssistedInject constructor(
             val appVersion = appVersionCode(applicationContext)
             val skipCheckedAtMs = System.currentTimeMillis()
             var skippedUnchanged = 0
+
+            // Once per playlist, however many ways its read failed.
+            fun markUnread(id: String, name: String) {
+                if (unreadPlaylists.put(id, name) == null) {
+                    syncLog.warn("$name — couldn't read its songs (kept as it was)")
+                }
+            }
 
             for (playlist in customPlaylists) {
                 try {
@@ -920,7 +1020,7 @@ class PlaylistFetchWorker @AssistedInject constructor(
                             is SyncResult.Empty -> emptyList()
                             is SyncResult.Error -> {
                                 fetchFailed = true
-                                inventoryComplete = false
+                                markUnread(playlist.id, playlist.name)
                                 Log.w(TAG, "fetchSpotifyPlaylists: '${playlist.name}' — error: ${tracksResult.message}")
                                 emptyList()
                             }
@@ -928,7 +1028,7 @@ class PlaylistFetchWorker @AssistedInject constructor(
                     } catch (e: Exception) {
                         if (e is CancellationException) throw e
                         fetchFailed = true
-                        inventoryComplete = false
+                        markUnread(playlist.id, playlist.name)
                         Log.w(TAG, "fetchSpotifyPlaylists: failed to fetch tracks for '${playlist.name}'", e)
                         emptyList()
                     }
@@ -983,9 +1083,8 @@ class PlaylistFetchWorker @AssistedInject constructor(
                     }
                 } catch (e: Exception) {
                     if (e is CancellationException) throw e
-                    inventoryComplete = false
+                    markUnread(playlist.id, playlist.name)
                     Log.w(TAG, "fetchSpotifyPlaylists: snapshot failed for '${playlist.name}'", e)
-                    syncLog.warn("${playlist.name} — couldn't fetch tracks (kept as-is)")
                 }
                 reportPlaylistFetched()
             }
@@ -997,6 +1096,8 @@ class PlaylistFetchWorker @AssistedInject constructor(
                 )
             }
 
+            // Hiding a playlist as gone takes the whole inventory: every page listed, every playlist read.
+            val inventoryComplete = listingComplete && unreadPlaylists.isEmpty()
             if (spotifySyncMode != null && shouldDeactivateMissingPlaylists(spotifySyncMode, inventoryComplete)) {
                 // The first change this sync makes to the library: "Undo last sync"
                 // must restore from before it, or the playlists hidden here never
@@ -1019,9 +1120,11 @@ class PlaylistFetchWorker @AssistedInject constructor(
                     "getUserPlaylists",
                     if (inventoryComplete) StepStatus.SUCCESS else StepStatus.ERROR,
                     userPlaylistCount,
-                    errorMessage = if (inventoryComplete) null else "inventory incomplete — a page/folder/track fetch failed mid-walk",
+                    errorMessage = spotifyInventoryProblem(listingComplete, unreadPlaylists.values.toList()),
                     // A shared diagnostics bundle shows how many weren't re-read.
                     note = if (skippedUnchanged > 0) "$skippedUnchanged unchanged since the last sync, not re-read" else null,
+                    unreadPlaylists = unreadPlaylists.values.take(SyncStepResult.UNREAD_NAMES_STORED),
+                    unreadPlaylistCount = unreadPlaylists.size,
                 )
             )
         } catch (e: SpotifyApiException) {
@@ -1029,7 +1132,13 @@ class PlaylistFetchWorker @AssistedInject constructor(
         } catch (e: Exception) {
             if (e is CancellationException) throw e
             Log.e(TAG, "fetchSpotifyPlaylists: user playlists fetch failed", e)
-            diagnostics.add(SyncStepResult("SPOTIFY", "getUserPlaylists", StepStatus.ERROR, errorMessage = e.message))
+            diagnostics.add(
+                SyncStepResult(
+                    "SPOTIFY", "getUserPlaylists", StepStatus.ERROR, errorMessage = e.message,
+                    unreadPlaylists = unreadPlaylists.values.take(SyncStepResult.UNREAD_NAMES_STORED),
+                    unreadPlaylistCount = unreadPlaylists.size,
+                ),
+            )
         }
 
         Log.d(TAG, "fetchSpotifyPlaylists: completed -- $dailyMixCount daily mixes, $likedSongCount liked songs, $userPlaylistCount user playlists")
@@ -1206,6 +1315,8 @@ class PlaylistFetchWorker @AssistedInject constructor(
                             youtubeId = track.videoId,
                             albumArtUrl = com.stash.core.common.ArtUrlUpgrader.upgrade(track.thumbnailUrl),
                             position = position,
+                            // YouTube's explicit badge: true when the row has it, else unknown.
+                            explicit = track.explicit,
                         )
                     }
                     if (trackSnapshots.isNotEmpty()) {
@@ -1312,6 +1423,8 @@ class PlaylistFetchWorker @AssistedInject constructor(
                             youtubeId = track.videoId,
                             albumArtUrl = com.stash.core.common.ArtUrlUpgrader.upgrade(track.thumbnailUrl),
                             position = position,
+                            // YouTube's explicit badge: true when the row has it, else unknown.
+                            explicit = track.explicit,
                         )
                     }
                     if (trackSnapshots.isNotEmpty()) {
@@ -1450,6 +1563,8 @@ class PlaylistFetchWorker @AssistedInject constructor(
                         track.thumbnailUrl ?: detail.thumbnailUrl,
                     ),
                     position = position,
+                    // YouTube's explicit badge on the album's tracklist row, else unknown.
+                    explicit = track.explicit,
                 )
             }
             if (trackSnapshots.isNotEmpty()) {
@@ -1501,6 +1616,8 @@ class PlaylistFetchWorker @AssistedInject constructor(
                             youtubeId = track.videoId,
                             albumArtUrl = com.stash.core.common.ArtUrlUpgrader.upgrade(track.thumbnailUrl),
                             position = position,
+                            // YouTube's explicit badge: true when the row has it, else unknown.
+                            explicit = track.explicit,
                         )
                     }
                     if (trackSnapshots.isNotEmpty()) {

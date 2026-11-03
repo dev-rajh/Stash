@@ -17,6 +17,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.stash.core.ui.components.OnlineOfflinePicker
+import com.stash.core.ui.components.sheetBarsFollow
 import com.stash.core.ui.theme.StashTheme
 
 /**
@@ -48,6 +49,7 @@ fun StreamingModeSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
         containerColor = extendedColors.elevatedSurface,
+        properties = sheetBarsFollow(extendedColors.elevatedSurface),
         modifier = modifier,
     ) {
         Column(
@@ -58,14 +60,17 @@ fun StreamingModeSheet(
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Text(
-                text = "Download",
+                text = "Online or offline",
                 style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
                 color = MaterialTheme.colorScheme.onSurface,
                 textAlign = TextAlign.Center,
             )
             Spacer(Modifier.height(4.dp))
+            // What Offline really means: playback stays on the phone, but Sync keeps
+            // downloading switched-on playlists and mixes, so it isn't airplane mode.
             Text(
-                text = "Should Sync save your switched-on playlists and mixes to this phone? Music plays either way.",
+                text = "Online: plays everything and streams what isn't downloaded. " +
+                    "Offline: plays only your downloads. Sync and downloads still use the network.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center,

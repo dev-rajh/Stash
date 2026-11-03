@@ -5,8 +5,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Radio
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -15,11 +13,14 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.unit.dp
 import com.stash.feature.settings.LastFmAuthState
 import com.stash.feature.settings.R
+import com.stash.core.ui.R as UiR
 
 /** Last.fm's brand red. */
 private val LastFmRed = Color(0xFFD51007)
@@ -50,6 +51,8 @@ fun LastFmAccountCard(
     loveEnabled: Boolean,
     onLoveToggle: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
+    loveStatus: com.stash.core.data.social.LikeMirrorStatus? = null,
+    onLoveRetry: () -> Unit = {},
 ) {
     if (state == LastFmAuthState.NotConfigured) return
     val (statusText, tone) = when (state) {
@@ -62,7 +65,7 @@ fun LastFmAccountCard(
     }
     AccountCard(
         serviceName = "Last.fm",
-        icon = Icons.Rounded.Radio,
+        icon = ImageVector.vectorResource(UiR.drawable.ic_brand_lastfm),
         accentColor = LastFmRed,
         statusText = statusText,
         statusTone = tone,
@@ -73,6 +76,8 @@ fun LastFmAccountCard(
                     title = stringResource(R.string.settings_like_mirror_lastfm_title),
                     checked = loveEnabled,
                     onToggle = onLoveToggle,
+                    status = loveStatus,
+                    onRetry = onLoveRetry,
                 )
                 SettingsToggleRow(
                     title = stringResource(R.string.settings_lastfm_first_artist_only_title),
@@ -123,9 +128,11 @@ internal fun ScrobbleQueueRow(
             .padding(start = SettingsRowPadH, end = 4.dp, top = 4.dp, bottom = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        // A result message in weight as well as colour (the idle accent is near-white).
         Text(
             text = message ?: pluralStringResource(R.plurals.settings_scrobbles_waiting, pending, pending),
             style = MaterialTheme.typography.bodyMedium,
+            fontWeight = if (message != null) androidx.compose.ui.text.font.FontWeight.Medium else null,
             color = if (message != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
             modifier = Modifier.weight(1f),
         )

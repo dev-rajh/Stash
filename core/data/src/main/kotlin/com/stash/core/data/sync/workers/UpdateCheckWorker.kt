@@ -19,9 +19,15 @@ import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
+import com.stash.core.data.R
 import com.stash.core.data.sync.SyncNotificationManager
 import com.stash.core.data.sync.enqueueUniquePeriodicWorkReviving
+import com.stash.core.data.update.AppUpdater
+import com.stash.core.data.update.AppUpdates
+import com.stash.core.data.update.ReleaseNotes
+import java.io.File
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.OkHttpClient
@@ -81,6 +87,13 @@ class UpdateCheckWorker(
          * leave the observer waiting on work that never completes.
          */
         const val KEY_MANUAL = "manual"
+
+        /** On the launch intent from the update notification: open the update sheet. */
+        const val EXTRA_OPEN_UPDATE = "com.stash.open_update"
+        private const val NOTIFICATION_REQUEST_OPEN_UPDATE = 9003
+
+        /** A debug build's test release, in its files dir (see [doWork]). */
+        private const val TEST_RELEASE_FILE = "update_test.json"
 
         private const val PREFS_NAME = "update_check_prefs"
         private const val KEY_LAST_NOTIFIED_VERSION = "last_notified_version"
@@ -164,7 +177,7 @@ class UpdateCheckWorker(
          *
          * @return `true` if [remote] is strictly newer than [local].
          */
-        internal fun isNewerVersion(remote: String, local: String): Boolean {
+        fun isNewerVersion(remote: String, local: String): Boolean {
             val clean = { v: String ->
                 // Case-insensitive: an uppercase "V" used to survive the strip,
                 // so "V1.0.0" parsed as [0,0,0] and every remote tag looked
@@ -199,33 +212,52 @@ class UpdateCheckWorker(
             } else {
                 Result.success()
             }
-            val request = Request.Builder()
-                .url(RELEASES_URL)
-                .header("User-Agent", "Stash-Android/$installedVersion")
-                .header("Accept", "application/vnd.github.v3+json")
-                .build()
+            // A debug build reads a test release from its own files when one is there
+            // (`files/update_test.json`, put there with `adb shell run-as`), so the
+            // whole update can be tried without publishing a release.
+            val debug = AppUpdater.isDebuggable(applicationContext)
+            val testRelease = File(applicationContext.filesDir, TEST_RELEASE_FILE).takeIf { debug && it.exists() }
+            val body = if (testRelease != null) {
+                testRelease.readText()
+            } else {
+                val request = Request.Builder()
+                    .url(RELEASES_URL)
+                    .header("User-Agent", "Stash-Android/$installedVersion")
+                    .header("Accept", "application/vnd.github.v3+json")
+                    .build()
 
-            // use{}: a non-2xx response used to return without closing, leaking
-            // its connection.
-            val (code, responseBody) = httpClient.newCall(request).execute().use {
-                it.code to (if (it.isSuccessful) it.body?.string() else null)
+                // use{}: a non-2xx response used to return without closing, leaking
+                // its connection.
+                val (code, responseBody) = httpClient.newCall(request).execute().use {
+                    it.code to (if (it.isSuccessful) it.body?.string() else null)
+                }
+                if (code !in 200..299) {
+                    Log.w(TAG, "GitHub API returned $code")
+                    return giveUpOrRetry(manual)
+                }
+                responseBody ?: return giveUpOrRetry(manual)
             }
-            if (code !in 200..299) {
-                Log.w(TAG, "GitHub API returned $code")
-                return giveUpOrRetry(manual)
-            }
-
-            val body = responseBody ?: return giveUpOrRetry(manual)
             val root = json.parseToJsonElement(body).jsonObject
-            val tagName = root["tag_name"]?.jsonPrimitive?.content
+            // Trimmed as the stored release's tag is (AppUpdates.parseRelease), so Skip and "already notified" compare alike.
+            val tagName = root["tag_name"]?.jsonPrimitive?.content?.trim()?.takeIf { it.isNotEmpty() }
                 ?: return giveUpOrRetry(manual)
-            val releaseName = root["name"]?.jsonPrimitive?.content ?: tagName
 
             val outcome = outcomeFor(isNewerVersion(tagName, installedVersion))
             val outcomeData = workDataOf(KEY_OUTCOME to outcome, KEY_LATEST_TAG to tagName)
 
             if (outcome == OUTCOME_UP_TO_DATE) {
                 Log.d(TAG, "Already on latest ($installedVersion), remote is $tagName")
+                AppUpdater.store(applicationContext, null)
+                return Result.success(outcomeData)
+            }
+            // The release with its APK, for the update sheet (null when it has no APK:
+            // the notification then opens the release page as before).
+            val update = AppUpdates.parseRelease(body, allowFile = testRelease != null)
+            AppUpdater.store(applicationContext, update)
+
+            // "Skip this version": no notification for it (Settings › Check for updates still finds it).
+            if (AppUpdater.isSkipped(applicationContext, tagName)) {
+                Log.d(TAG, "$tagName was skipped, no notification")
                 return Result.success(outcomeData)
             }
 
@@ -240,7 +272,8 @@ class UpdateCheckWorker(
                 return Result.success(outcomeData)
             }
 
-            val notified = showUpdateNotification(tagName, releaseName)
+            val headline = ReleaseNotes.parse(root["body"]?.jsonPrimitive?.contentOrNull.orEmpty()).headline
+            val notified = showUpdateNotification(tagName, headline, inApp = update != null)
 
             // Only persist if the notification actually surfaced. If the OS
             // suppressed it (permission denied, channel muted, app in
@@ -293,18 +326,36 @@ class UpdateCheckWorker(
     }
 
     /**
-     * Posts a notification informing the user that a newer release is available.
-     * Tapping the notification opens the GitHub releases page in the browser.
+     * Posts a notification informing the user that a newer release is available: "Stash 0.9.123 is ready" over the
+     * release's first line ([headline]). Tapping it opens the update sheet ([inApp]: the release has an APK), or else
+     * the GitHub releases page in the browser.
      *
      * @return `true` if the notification was accepted by the OS, `false` if
      *   it was suppressed (notifications disabled globally, channel muted,
      *   or POST_NOTIFICATIONS permission denied on Android 13+).
      */
-    private fun showUpdateNotification(tag: String, releaseName: String): Boolean {
+    private fun showUpdateNotification(tag: String, headline: String, inApp: Boolean): Boolean {
         val managerCompat = NotificationManagerCompat.from(applicationContext)
         if (!managerCompat.areNotificationsEnabled()) {
             Log.w(TAG, "Notifications disabled by user; skipping")
             return false
+        }
+        // The version from the tag, never the release's name: that is "Stash v0.9.123", which read "Version Stash v0.9.123".
+        val title = applicationContext.getString(R.string.update_notification_title, tag.removePrefix("v").removePrefix("V"))
+        if (inApp) {
+            // The update sheet, in the app: one tap to update from there.
+            val open = applicationContext.packageManager.getLaunchIntentForPackage(applicationContext.packageName)
+                ?.putExtra(EXTRA_OPEN_UPDATE, true)
+                ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            if (open != null) {
+                val pending = PendingIntent.getActivity(
+                    applicationContext,
+                    NOTIFICATION_REQUEST_OPEN_UPDATE,
+                    open,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+                )
+                return post(managerCompat, title, headline, applicationContext.getString(R.string.update_notification_tap_to_see), pending)
+            }
         }
 
         val packageManager = applicationContext.packageManager
@@ -356,13 +407,28 @@ class UpdateCheckWorker(
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
 
+        return post(managerCompat, title, headline, applicationContext.getString(R.string.update_notification_tap_to_download), pendingIntent)
+    }
+
+    /**
+     * The notification: [title], then the release's first line ([headline]) and what a tap does ([tap]). Collapsed it shows
+     * the headline (or the tap line when there is none); expanded, both in full.
+     */
+    private fun post(
+        managerCompat: NotificationManagerCompat,
+        title: String,
+        headline: String,
+        tap: String,
+        pendingIntent: PendingIntent,
+    ): Boolean {
         val notification = NotificationCompat.Builder(
             applicationContext,
             SyncNotificationManager.CHANNEL_UPDATE,
         )
-            .setContentTitle("Stash Update Available")
-            .setContentText("Version $releaseName is ready. Tap to download.")
-            .setSmallIcon(android.R.drawable.stat_sys_download_done)
+            .setContentTitle(title)
+            .setContentText(headline.ifEmpty { tap })
+            .setStyle(NotificationCompat.BigTextStyle().bigText(if (headline.isEmpty()) tap else "$headline\n$tap"))
+            .setSmallIcon(R.drawable.ic_stat_stash)
             .setAutoCancel(true)
             .setContentIntent(pendingIntent)
             .build()

@@ -59,6 +59,8 @@ data class StreamUrl(
      * progressive byte-pipe [LazyResolvingDataSource] refuses it.
      */
     val isDash: Boolean = false,
+    val isHls: Boolean = false,
+    val isPreview: Boolean = false,
 )
 
 /**
@@ -107,6 +109,7 @@ class KennyyStreamResolver @Inject constructor(
             album = track.album.takeIf { it.isNotBlank() },
             isrc = track.isrc?.takeIf { it.isNotBlank() },
             durationMs = track.durationMs,
+            explicit = track.explicit,
         )
         // Use the immediate (rate-limiter-bypassing) path: streaming-tap
         // is user-initiated and must not queue behind background

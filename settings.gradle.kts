@@ -47,3 +47,6 @@ include(":feature:settings")
 include(":feature:search")
 include(":feature:community")
 include(":feature:listening")
+include(":feature:record")
+
+include(":data:soundcloud")

@@ -47,9 +47,12 @@ class LibraryReconciliationInProgressTest {
         val queue = db.downloadQueueDao()
         queue.insert(DownloadQueueEntity(trackId = downloading, status = DownloadStatus.IN_PROGRESS))
         queue.insert(DownloadQueueEntity(trackId = leftBySync, syncId = syncId, status = DownloadStatus.IN_PROGRESS))
-        val tokens = mockk<TokenManager> { coEvery { isAuthenticated(any()) } returns false }
+        val tokens = mockk<TokenManager> {
+            coEvery { isAuthenticated(any()) } returns false
+            coEvery { hasSoundCloudConnection() } returns false
+        }
 
-        LibraryReconciliationUseCase(queue, db.trackDao(), tokens).reconcile(syncId = syncId)
+        LibraryReconciliationUseCase(queue, db.trackDao(), tokens, db.playlistDao()).reconcile(syncId = syncId)
 
         assertEquals(DownloadStatus.IN_PROGRESS, queue.getByTrackId(downloading)!!.status)
         assertEquals(DownloadStatus.PENDING, queue.getByTrackId(leftBySync)!!.status)

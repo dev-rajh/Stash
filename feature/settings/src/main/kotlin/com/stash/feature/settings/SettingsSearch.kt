@@ -3,7 +3,7 @@ package com.stash.feature.settings
 import android.content.Context
 
 /** Where a search result lives; the hub opens that page. */
-enum class SettingsPage { PLAYBACK, AUDIO, LOSSLESS_SOURCES, EQUALIZER, ACCOUNTS, LIBRARY, APPEARANCE, HOME_LAYOUT, ABOUT }
+enum class SettingsPage { PLAYBACK, AUDIO, LOSSLESS_SOURCES, EQUALIZER, ACCOUNTS, LIBRARY, YOUR_STASH, APPEARANCE, HOME_LAYOUT, ABOUT }
 
 /**
  * One searchable setting: its name as the screen shows it, the page it is on,
@@ -44,6 +44,13 @@ fun searchSettings(
         .map { it.third }
 }
 
+/**
+ * The index the hub searches: Your Stash's entries only when the app can open it ([yourStash]: the link is switched on in
+ * this build), so a result never leads nowhere.
+ */
+internal fun searchableIndex(index: List<SettingsSearchEntry>, yourStash: Boolean): List<SettingsSearchEntry> =
+    if (yourStash) index else index.filter { it.page != SettingsPage.YOUR_STASH }
+
 private fun normalize(s: String): String =
     s.lowercase().replace(Regex("[^a-z0-9]+"), " ").trim()
 
@@ -60,21 +67,25 @@ private fun words(s: String): List<String> {
  * Every setting the hub can find, in screen order. Names come from the same
  * strings the screens use where there is one, so a renamed row stays findable.
  */
-internal fun settingsSearchIndex(context: Context): List<SettingsSearchEntry> {
-    fun s(id: Int) = context.getString(id)
+internal fun settingsSearchIndex(context: Context): List<SettingsSearchEntry> = settingsSearchIndex(context::getString)
+
+/** [settingsSearchIndex] with the string lookup handed in ([s]: a string resource id to its text), for the unit test. */
+internal fun settingsSearchIndex(s: (Int) -> String): List<SettingsSearchEntry> {
     return listOf(
         // Playback
         SettingsSearchEntry(s(R.string.settings_stream_on_cellular_title), SettingsPage.PLAYBACK, listOf("mobile data", "5g", "lte")),
-        SettingsSearchEntry("Stream or download", SettingsPage.PLAYBACK, listOf("stream only", "offline", "mode")),
+        // The mode's names before 2026-11-01 stay findable: "stream only", "download mode".
+        SettingsSearchEntry(s(R.string.settings_search_online_or_offline), SettingsPage.PLAYBACK, listOf("stream only", "download mode", "mode")),
         SettingsSearchEntry(s(R.string.settings_autoplay_radio_title), SettingsPage.PLAYBACK, listOf("endless", "keep playing", "continue")),
         SettingsSearchEntry(s(R.string.settings_crossfade_title), SettingsPage.PLAYBACK, listOf("fade", "gapless", "transition")),
-        SettingsSearchEntry("Lyrics", SettingsPage.PLAYBACK, listOf("lrc", "synced", "karaoke", "apple music")),
+        SettingsSearchEntry(s(R.string.settings_lyrics_section), SettingsPage.PLAYBACK, listOf("lrc", "synced", "karaoke", "apple music")),
         SettingsSearchEntry(s(R.string.settings_stream_via_youtube_title), SettingsPage.PLAYBACK, listOf("fallback")),
+        SettingsSearchEntry(s(R.string.settings_search_battery_saver), SettingsPage.PLAYBACK, listOf("power saving", "animations", "prefetch")),
         // Audio & Quality
         SettingsSearchEntry(s(R.string.settings_lossless_title), SettingsPage.AUDIO, listOf("flac", "hifi", "hi res", "quality")),
         SettingsSearchEntry(s(R.string.settings_streaming_on_wifi_title), SettingsPage.AUDIO, listOf("quality", "bitrate")),
         SettingsSearchEntry(s(R.string.settings_streaming_on_cellular_title), SettingsPage.AUDIO, listOf("quality", "mobile data")),
-        SettingsSearchEntry(s(R.string.settings_save_data_title), SettingsPage.AUDIO, listOf("data saver", "mobile data", "low quality")),
+        SettingsSearchEntry(s(R.string.settings_save_data_title), SettingsPage.AUDIO, listOf("save data", "mobile data", "metered", "low quality", "cellular")),
         SettingsSearchEntry(s(R.string.settings_prefer_tidal_aac_streaming_title), SettingsPage.AUDIO),
         SettingsSearchEntry(s(R.string.settings_prefer_cloud_copies_title), SettingsPage.AUDIO, listOf("dropbox", "onedrive", "google drive", "allowance", "own files")),
         SettingsSearchEntry(s(R.string.settings_download_quality_title), SettingsPage.AUDIO, listOf("format", "flac", "aac", "opus", "mp3")),
@@ -96,39 +107,51 @@ internal fun settingsSearchIndex(context: Context): List<SettingsSearchEntry> {
         SettingsSearchEntry("Discord", SettingsPage.ACCOUNTS, listOf("rich presence", "status")),
         SettingsSearchEntry("Last.fm", SettingsPage.ACCOUNTS, listOf("scrobble", "love")),
         SettingsSearchEntry("ListenBrainz", SettingsPage.ACCOUNTS, listOf("scrobble", "musicbrainz")),
-        SettingsSearchEntry("Sync your likes", SettingsPage.ACCOUNTS, listOf("heart", "liked songs", "mirror")),
+        SettingsSearchEntry(s(R.string.settings_search_sync_your_likes), SettingsPage.ACCOUNTS, listOf("heart", "liked songs", "mirror")),
         SettingsSearchEntry(s(R.string.settings_yt_sync_title), SettingsPage.ACCOUNTS, listOf("watch history", "recommendations")),
-        SettingsSearchEntry("Cloud storage", SettingsPage.ACCOUNTS, listOf("dropbox", "onedrive", "google drive", "folder")),
-        SettingsSearchEntry("Back up my downloads to Google Drive", SettingsPage.ACCOUNTS, listOf("backup", "drive")),
+        SettingsSearchEntry(s(R.string.settings_cloud_section_title), SettingsPage.ACCOUNTS, listOf("dropbox", "onedrive", "google drive", "folder")),
+        SettingsSearchEntry(s(R.string.settings_cloud_gdrive_backup_title), SettingsPage.ACCOUNTS, listOf("backup", "drive")),
         // Library & Storage
-        SettingsSearchEntry("Download location", SettingsPage.LIBRARY, listOf("storage", "sd card", "folder", "external", "usb")),
-        SettingsSearchEntry("Folder structure", SettingsPage.LIBRARY, listOf("artist", "album", "organize")),
-        SettingsSearchEntry("Move library", SettingsPage.LIBRARY, listOf("sd card", "external")),
-        SettingsSearchEntry("Reorganize existing tracks", SettingsPage.LIBRARY, listOf("organize", "folders")),
-        SettingsSearchEntry("Backup", SettingsPage.LIBRARY, listOf("restore", "export", "import")),
-        SettingsSearchEntry("Run recommendations when", SettingsPage.LIBRARY, listOf("wifi", "charging", "any network", "downloads")),
+        SettingsSearchEntry(s(R.string.settings_storage_download_location_label), SettingsPage.LIBRARY, listOf("storage", "sd card", "folder", "external", "usb")),
+        SettingsSearchEntry(s(R.string.settings_storage_folder_structure_label), SettingsPage.LIBRARY, listOf("artist", "album", "organize")),
+        SettingsSearchEntry(s(R.string.settings_storage_move_library_title), SettingsPage.LIBRARY, listOf("sd card", "external", "move library")),
+        SettingsSearchEntry(s(R.string.settings_storage_reorganize_title), SettingsPage.LIBRARY, listOf("organize", "folders")),
+        SettingsSearchEntry(s(R.string.settings_storage_backup_title), SettingsPage.LIBRARY, listOf("restore", "export", "import")),
+        SettingsSearchEntry(s(R.string.settings_download_recommendations_title), SettingsPage.LIBRARY, listOf("run recommendations when", "wifi", "charging", "any network", "downloads")),
         SettingsSearchEntry(s(R.string.settings_stash_mixes_title), SettingsPage.LIBRARY, listOf("daily discover", "deep cuts", "first listen")),
         SettingsSearchEntry(s(R.string.settings_qobuz_discovery_title), SettingsPage.LIBRARY, listOf("new releases", "qobuz playlists", "top albums")),
         SettingsSearchEntry(s(R.string.settings_library_health_title), SettingsPage.LIBRARY, listOf("duplicates", "missing", "flac upgrade")),
         SettingsSearchEntry(s(R.string.settings_lyrics_recheck_title), SettingsPage.PLAYBACK, listOf("lyrics", "synced")),
         SettingsSearchEntry(s(R.string.settings_listening_history_title), SettingsPage.LIBRARY, listOf("plays", "stats", "import", "recap")),
-        SettingsSearchEntry(s(R.string.settings_web_link_nav_title), SettingsPage.LIBRARY, listOf("web player", "browser", "qr", "pair", "mirror", "computer")),
-        SettingsSearchEntry("Cloud folders", SettingsPage.LIBRARY, listOf("rescan", "dropbox", "onedrive")),
-        SettingsSearchEntry("Storage used", SettingsPage.LIBRARY, listOf("space", "size")),
+        // Your Stash (Library & Storage › Your Stash): the link's page. Its Cloud and Backups rows only open Accounts & Sync
+        // and Library & Storage, which are indexed above and below, so they aren't listed twice.
+        SettingsSearchEntry(s(R.string.settings_your_stash_title), SettingsPage.YOUR_STASH, listOf("account", "profile", "devices", "web player", "browser", "computer", "sync", "encrypted", "privacy")),
+        SettingsSearchEntry(s(R.string.settings_web_link_nav_title), SettingsPage.YOUR_STASH, listOf("link a browser", "web player", "browser", "qr", "scan", "pair", "computer")),
+        SettingsSearchEntry(s(R.string.settings_your_stash_section_devices), SettingsPage.YOUR_STASH, listOf("linked devices", "rename", "remove", "last used", "this phone")),
+        SettingsSearchEntry(s(R.string.settings_web_link_handoff_title), SettingsPage.YOUR_STASH, listOf("handoff", "continue", "web player")),
+        SettingsSearchEntry(s(R.string.settings_mirror_section_title), SettingsPage.YOUR_STASH, listOf("mirror", "web player", "likes", "playlists")),
+        SettingsSearchEntry(s(R.string.settings_web_link_send_library_title), SettingsPage.YOUR_STASH, listOf("web player", "export")),
+        SettingsSearchEntry(s(R.string.settings_your_stash_section_supporter), SettingsPage.YOUR_STASH, listOf("ko fi", "kofi", "unlock", "donate")),
+        SettingsSearchEntry(s(R.string.settings_your_stash_section_coming), SettingsPage.YOUR_STASH, listOf("passkey", "recovery", "nightly backup", "new phone", "restore")),
+        SettingsSearchEntry(s(R.string.settings_web_link_action_unlink_everything), SettingsPage.YOUR_STASH, listOf("unlink", "disconnect", "web player")),
+        SettingsSearchEntry(s(R.string.settings_cloud_folders_section_title), SettingsPage.LIBRARY, listOf("rescan", "dropbox", "onedrive")),
+        SettingsSearchEntry(s(R.string.settings_storage_used_label), SettingsPage.LIBRARY, listOf("space", "size")),
         // Appearance
-        SettingsSearchEntry("Theme", SettingsPage.APPEARANCE, listOf("dark mode", "light mode", "night", "system")),
+        SettingsSearchEntry(s(R.string.settings_theme_section), SettingsPage.APPEARANCE, listOf("dark mode", "light mode", "night", "system")),
         SettingsSearchEntry(s(R.string.settings_amoled_title), SettingsPage.APPEARANCE, listOf("oled", "black", "dark")),
+        SettingsSearchEntry(s(R.string.settings_album_colours_title), SettingsPage.APPEARANCE, listOf("colour", "color", "accent", "neutral", "dynamic", "album")),
         SettingsSearchEntry(s(R.string.settings_ui_scale_title), SettingsPage.APPEARANCE, listOf("display size", "text size", "font", "zoom", "bigger", "smaller")),
         SettingsSearchEntry(s(R.string.settings_ambient_motion_title), SettingsPage.APPEARANCE, listOf("now playing", "animation", "background", "battery", "ambient style")),
-        SettingsSearchEntry("Home layout", SettingsPage.HOME_LAYOUT, listOf("sections", "order", "made for you", "radios", "community", "moods", "decades", "your listening")),
+        SettingsSearchEntry(s(R.string.settings_home_layout_section), SettingsPage.HOME_LAYOUT, listOf("sections", "order", "made for you", "radios", "community", "moods", "decades", "your listening")),
         SettingsSearchEntry(s(R.string.settings_home_show_liked_title), SettingsPage.HOME_LAYOUT),
         SettingsSearchEntry(s(R.string.settings_mix_rotation_title), SettingsPage.HOME_LAYOUT, listOf("rotate", "rotation", "shuffle", "made for you", "mood", "decades", "mixes")),
         SettingsSearchEntry(s(R.string.settings_unplayed_mixes_first_title), SettingsPage.HOME_LAYOUT, listOf("discover", "new", "rotation")),
-        SettingsSearchEntry("Open Stash on", SettingsPage.APPEARANCE, listOf("start tab", "launch", "startup")),
+        SettingsSearchEntry(s(R.string.settings_open_stash_on_section), SettingsPage.APPEARANCE, listOf("start tab", "launch", "startup")),
         // About & Help
-        SettingsSearchEntry("Check for updates", SettingsPage.ABOUT, listOf("update", "version", "new version")),
-        SettingsSearchEntry("Share diagnostics", SettingsPage.ABOUT, listOf("logs", "bug", "report", "problem")),
-        SettingsSearchEntry("Share crash report", SettingsPage.ABOUT, listOf("crash", "bug")),
-        SettingsSearchEntry("License", SettingsPage.ABOUT, listOf("open source")),
+        SettingsSearchEntry(s(R.string.settings_check_updates), SettingsPage.ABOUT, listOf("update", "version", "new version")),
+        SettingsSearchEntry(s(R.string.settings_share_diagnostics_bundle), SettingsPage.ABOUT, listOf("logs", "bug", "report", "problem")),
+        SettingsSearchEntry(s(R.string.settings_share_latest_crash), SettingsPage.ABOUT, listOf("crash", "bug")),
+        SettingsSearchEntry(s(R.string.settings_license_label), SettingsPage.ABOUT, listOf("open source")),
+        SettingsSearchEntry(s(R.string.settings_about_star), SettingsPage.ABOUT, listOf("star", "github", "source code", "repository")),
     )
 }

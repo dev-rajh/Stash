@@ -3,12 +3,14 @@ package com.stash.feature.nowplaying
 import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.stash.core.common.songArtist
 import com.stash.core.data.lossless.LosslessUpgrader
 import com.stash.core.data.prefs.NowPlayingAction
 import com.stash.core.data.prefs.NowPlayingPreference
 import com.stash.core.data.prefs.LyricsSourcePreference
 import com.stash.data.lyrics.TtmlUpgradeResult
 import com.stash.data.lyrics.TtmlUpgradeSources
+import com.stash.core.data.repository.DownloadRequestResult
 import com.stash.core.data.repository.MusicRepository
 import com.stash.core.media.PlayerRepository
 import com.stash.core.media.SleepTimerController
@@ -64,7 +66,6 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.mapLatest
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.stateIn
@@ -120,7 +121,9 @@ class NowPlayingViewModel @Inject constructor(
     // The album back covers the art flips to. Hilt binds the Cover Art Archive lookup; tests leave
     // the default, which knows none.
     private val backCovers: AlbumBackCovers = AlbumBackCovers.None,
-    private val trackAlbums: com.stash.core.data.lastfm.TrackAlbums = com.stash.core.data.lastfm.TrackAlbums.None,
+    // Data saver: the back cover / inside pages / Discogs look-up waits for Wi-Fi. Tests leave the
+    // default, which never applies.
+    private val dataSaver: com.stash.core.data.prefs.DataSaver = com.stash.core.data.prefs.DataSaver.Off,
 ) : ViewModel() {
 
     /**
@@ -417,9 +420,11 @@ class NowPlayingViewModel @Inject constructor(
     /**
      * Tap on the Now Playing track block. Resolves the playing artist's NAME
      * to a YT browseId and emits an [ArtistNavTarget] carrying the current
-     * album as `focusAlbum`. Prefers the clean `albumArtist`, falling back to
-     * `artist`. No-op when nothing is playing or a resolve is already in
-     * flight (double-tap guard). Resolve miss/failure → snackbar, no nav.
+     * album as `focusAlbum`. Prefers the clean `albumArtist` when the song's
+     * credit names it, else `artist` ([songArtist]: a compilation's "Various
+     * Artists" isn't the song's artist). No-op when nothing is playing or a
+     * resolve is already in flight (double-tap guard). Resolve miss/failure →
+     * snackbar, no nav.
      */
     /** Live label of the active radio station (null when no station). */
     val radioSeedLabel: StateFlow<String?> = playerRepository.radioSeedLabel
@@ -453,12 +458,12 @@ class NowPlayingViewModel @Inject constructor(
         }
     }
 
-    /** User-facing hint for a non-Started radio result; null for Started. */
-    private fun radioFailureMessage(result: RadioStartResult): String? = when (result) {
-        RadioStartResult.Started -> null
-        RadioStartResult.PlayerNotReady -> "Player is still starting — try again."
-        RadioStartResult.NoStation -> "Couldn't find similar tracks for this song."
-    }
+    /**
+     * User-facing hint for a non-Started radio result; null for Started. The same lines the Library's
+     * Start radio shows ([com.stash.core.media.RadioStarter.failureMessage]): one set of strings.
+     */
+    private fun radioFailureMessage(result: RadioStartResult): String? =
+        com.stash.core.media.RadioStarter.failureMessage(result)?.let { appContext.getString(it) }
 
     /** Stop the active radio station. */
     fun stopRadio() = playerRepository.stopRadio()
@@ -493,7 +498,7 @@ class NowPlayingViewModel @Inject constructor(
     fun onTrackInfoTapped() {
         val track = _uiState.value.currentTrack ?: return
         if (_resolvingArtist.value) return
-        val name = track.albumArtist.ifBlank { track.artist }
+        val name = songArtist(track.artist, track.albumArtist)
         if (name.isBlank()) {
             _userMessages.tryEmit("Couldn't find this artist")
             return
@@ -730,7 +735,6 @@ class NowPlayingViewModel @Inject constructor(
      * Room's answer, as [lyricsTargets] does: the player's own track comes first without the ISRC
      * the library row holds, which finds the album more surely than its title.
      */
-    @OptIn(ExperimentalCoroutinesApi::class)
     private val backCoverAlbums: Flow<BackCoverAlbum?> = uiState
         .filter { s -> s.currentTrack == null || s.currentTrackStored != null }
         .map { s -> s.currentTrack }
@@ -738,8 +742,9 @@ class NowPlayingViewModel @Inject constructor(
             a?.id == b?.id && a?.title == b?.title && a?.artist == b?.artist &&
                 a?.album == b?.album && a?.albumArtist == b?.albumArtist && a?.isrc == b?.isrc
         }
-        // A song with no album of its own (a Last.fm playlist's, a mix's) gets Last.fm's.
-        .mapLatest { track -> track?.let { BackCoverAlbum.of(it) ?: BackCoverAlbum.of(trackAlbums.withAlbum(it)) } }
+        // A song with no album of its own (a Last.fm playlist's, a mix's) has no back cover: the
+        // album Last.fm would name is its most scrobbled release, often a compilation.
+        .map { track -> track?.let { BackCoverAlbum.of(it) } }
         .distinctUntilChanged { old, new -> old?.key == new?.key }
 
     /**
@@ -764,7 +769,8 @@ class NowPlayingViewModel @Inject constructor(
      * Looks the playing album's back cover and inside pages up, and fetches the back's image, while
      * the app is in the foreground, after the lyrics prefetch's [PREFETCH_DWELL_MS]: so the flip is
      * ready by the time Now Playing opens, a skip through a queue looks nothing up, and nothing runs
-     * with the screen off. Once per album: the answer is stored, the image disk-cached, and a skip
+     * with the screen off, nor on mobile data under Data saver. Once per album: the answer is
+     * stored, the image disk-cached, and a skip
      * to another album cancels the walk (a cancellation is not a failure, so the album isn't held
      * back). The back is stored as soon as it is found, before the walk for the inside ends, so its
      * image is fetched then.
@@ -775,7 +781,12 @@ class NowPlayingViewModel @Inject constructor(
                 .distinctUntilChanged { old, new -> old.first?.key == new.first?.key && old.second == new.second }
                 .collectLatest { (album, foreground) ->
                     if (!foreground || album == null) return@collectLatest
+                    // Data saver on mobile data: the Cover Art Archive and Discogs scans (1200px,
+                    // and the inside pages "Cycle album art" turns through) wait for Wi-Fi. The
+                    // next album, or the app coming back to the foreground, asks again, so an
+                    // album that starts on Wi-Fi gets its flip as before.
                     delay(PREFETCH_DWELL_MS)
+                    if (dataSaver.appliesNow()) return@collectLatest
                     coroutineScope {
                         val fetchBack = launch {
                             fetchBackImage(backCovers.observe(album).mapNotNull { it?.back }.first())
@@ -804,7 +815,7 @@ class NowPlayingViewModel @Inject constructor(
     private suspend fun lookAhead(current: BackCoverAlbum) {
         val s = uiState.value
         val next = s.queue.getOrNull(s.currentIndex + 1) ?: return
-        val album = BackCoverAlbum.of(next) ?: BackCoverAlbum.of(trackAlbums.withAlbum(next)) ?: return
+        val album = BackCoverAlbum.of(next) ?: return
         if (album.key == current.key) return
         backCovers.resolve(album)?.back?.let(::fetchBackImage)
     }
@@ -1308,15 +1319,23 @@ class NowPlayingViewModel @Inject constructor(
     // ------------------------------------------------------------------
 
     /**
-     * Flag the currently-playing track as the wrong song. Surfaces it in
-     * the Failed Matches screen so the user can pick a replacement. No-op
-     * when nothing is playing. Emits a snackbar message so the user knows
-     * where to go next.
+     * One-shot: open Failed Matches on this song id, "find it yourself" searching for it. Emitted
+     * by [flagCurrentTrackAsWrongMatch] once the flag is saved (the id of a stream only exists after
+     * its persist). `extraBufferCapacity = 1` as for [artistNavEvents].
+     */
+    private val _matchFixEvents = MutableSharedFlow<Long>(extraBufferCapacity = 1)
+    val matchFixEvents: SharedFlow<Long> = _matchFixEvents.asSharedFlow()
+
+    /**
+     * Flag the currently-playing track as the wrong song, then go straight to the fix: Failed
+     * Matches opens on it with "find it yourself" searching ([matchFixEvents]). It used to stop at
+     * a toast pointing to Sync → Failed Matches, where the song then had to be found by hand. No-op
+     * when nothing is playing, and for a cloud or SoundCloud song (the user's own file, no match).
      */
     fun flagCurrentTrackAsWrongMatch() {
         val track = _uiState.value.currentTrack ?: return
         // A cloud song is the user's own file, not a match: nothing to flag or swap.
-        if (track.source == com.stash.core.model.MusicSource.CLOUD) return
+        if (track.source == com.stash.core.model.MusicSource.CLOUD || track.source == com.stash.core.model.MusicSource.SOUNDCLOUD || track.soundCloudId != null) return
         launchUserAction {
             // Persisted first: flagging a stream's transient id flagged no row, yet said "Flagged".
             val trackId = persistOrNull(track) ?: run {
@@ -1324,7 +1343,7 @@ class NowPlayingViewModel @Inject constructor(
                 return@launchUserAction
             }
             musicRepository.setMatchFlagged(trackId, true)
-            _userMessages.tryEmit("Flagged. Find it in Sync \u2192 Failed Matches to pick a replacement.")
+            _matchFixEvents.emit(trackId)
         }
     }
 
@@ -1406,11 +1425,19 @@ class NowPlayingViewModel @Inject constructor(
                     _userMessages.tryEmit("Couldn't queue download.")
                     return@launchUserAction
                 }
-                val queued = musicRepository.queueDownload(realId)
-                if (!queued) {
-                    _downloadingKeys.update { it - key }
-                    _userMessages.tryEmit("Couldn't queue download.")
-                    return@launchUserAction
+                when (musicRepository.requestDownload(realId)) {
+                    DownloadRequestResult.QUEUED -> Unit
+                    // Another row of this song already holds its audio: nothing downloads twice.
+                    DownloadRequestResult.ALREADY_ON_PHONE -> {
+                        _downloadingKeys.update { it - key }
+                        _userMessages.tryEmit("Already on your phone.")
+                        return@launchUserAction
+                    }
+                    DownloadRequestResult.NOT_QUEUED -> {
+                        _downloadingKeys.update { it - key }
+                        _userMessages.tryEmit("Couldn't queue download.")
+                        return@launchUserAction
+                    }
                 }
                 _userMessages.tryEmit("Downloading…")
                 // Watchdog: drop the spinner once the song lands on disk, or as
@@ -1449,7 +1476,7 @@ class NowPlayingViewModel @Inject constructor(
         val track = _uiState.value.currentTrack ?: return
         if (track.isFlac) return
         // A cloud song (Dropbox / OneDrive) is the user's own file: never replaced by an online match.
-        if (track.source == com.stash.core.model.MusicSource.CLOUD) return
+        if (track.source == com.stash.core.model.MusicSource.CLOUD || track.source == com.stash.core.model.MusicSource.SOUNDCLOUD || track.soundCloudId != null) return
         // An All Songs file is the user's own file: never replaced by an online match.
         if (track.isScannedSong) return
         launchUserAction {

@@ -4,15 +4,19 @@ import android.util.Log
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.stash.core.data.album.SavedAlbums
 import com.stash.core.data.cache.AlbumCache
 import com.stash.core.data.discography.QobuzAlbumUnavailableException
+import com.stash.core.data.link.LinkImporter
 import com.stash.core.data.repository.MusicRepository
 import com.stash.core.media.PlayerRepository
 import com.stash.core.media.actions.TrackActionsDelegate
 import com.stash.core.media.preview.LosslessUrlPrefetcher
 import com.stash.core.model.Playlist
+import com.stash.core.model.SCANNED_UNKNOWN_ARTIST
 import com.stash.core.model.Track
 import com.stash.core.model.TrackItem
+import com.stash.data.ytmusic.model.TrackSummary
 import com.stash.data.download.lossless.qobuz.QobuzCandidateMatcher
 import com.stash.data.ytmusic.YTMusicApiClient
 import com.stash.data.ytmusic.model.AlbumDetail
@@ -21,6 +25,7 @@ import com.stash.data.ytmusic.model.AlbumSource
 import com.stash.data.ytmusic.model.AlbumSummary
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -32,6 +37,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
@@ -158,15 +164,30 @@ class AlbumDiscoveryViewModel @Inject constructor(
     val userPlaylists: StateFlow<List<Playlist>> =
         delegate.userPlaylists.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
+    /** The page as the saved-album check reads it: its title, artist and tracklist. */
+    private val pageIdentity = _uiState
+        .map { Triple(it.hero.title, it.hero.artist, it.tracks.map { t -> t.title }) }
+        .distinctUntilChanged()
+
     /**
-     * #304: true once this album sits in the library as a saved playlist, under the
-     * album on screen or, after a #481 switch, under the Qobuz album it replaced
-     * (saved in a country Qobuz sells in, or over a VPN), so Save doesn't file it twice.
+     * #304: true once this album is in the library, so Save doesn't file it twice:
+     *  - a playlist page (YouTube Music's, or Qobuz's): saved under its key ([userPlaylists]);
+     *  - an album page: saved on any service or in Stash ([SavedAlbums.findSaved]), under the
+     *    album on screen, under the Qobuz album a #481 switch replaced (saved in a country Qobuz
+     *    sells in, or over a VPN), synced from YouTube Music (`MPREb_…`), or the same title,
+     *    artist and songs saved from another service (owner, 2026-11-02).
      */
     val isSaved: StateFlow<Boolean> =
-        combine(userPlaylists, album) { lists, ref ->
-            lists.any { it.sourceId == ref.savedSourceId || it.sourceId == navAlbum.savedSourceId }
-        }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+        combine(userPlaylists, musicRepository.observeSavedAlbums(), album, pageIdentity) { lists, saved, ref, page ->
+            val keys = listOf(ref.savedSourceId, navAlbum.savedSourceId)
+            // A playlist page (YouTube Music's, or a Qobuz one) is saved as a playlist: its key only.
+            val playlistPage = ref.source == AlbumSource.YOUTUBE_PLAYLIST || ref.source == AlbumSource.QOBUZ_PLAYLIST
+            lists.any { it.sourceId in keys } ||
+                (!playlistPage && SavedAlbums.findSaved(saved, keys, title = page.first, artist = page.second, songTitles = page.third) != null)
+        }
+            // Folding every saved album's name and the page's songs is no work for the main thread.
+            .flowOn(Dispatchers.Default)
+            .stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
     /** youtubeId of the currently-playing track, for the SongRow now-playing indicator. */
     val currentPlayingYoutubeId: StateFlow<String?> =
@@ -250,7 +271,16 @@ class AlbumDiscoveryViewModel @Inject constructor(
     }
 
     /** Whether download affordances should show — false for Qobuz albums (no videoId). */
-    val downloadSupported: Boolean get() = albumSource == AlbumSource.YOUTUBE
+    val downloadSupported: Boolean get() = albumSource == AlbumSource.YOUTUBE || isPlaylist
+
+    /**
+     * A YouTube Music playlist (Home's Moods & moments): videoId rows like an album, each song with its own artist
+     * and album. The screen words its errors for a playlist on it.
+     */
+    val isPlaylist: Boolean get() = albumSource == AlbumSource.YOUTUBE_PLAYLIST
+
+    /** What the screen's messages call the page: a playlist, or an album. */
+    private val pageNoun: String get() = if (isPlaylist) "playlist" else "album"
 
     /**
      * True for a native Qobuz album OR a Qobuz playlist. Their tracks carry no
@@ -274,22 +304,29 @@ class AlbumDiscoveryViewModel @Inject constructor(
      */
     fun onDownloadAllConfirmed() {
         val queue = _uiState.value.downloadConfirmQueue
-        val albumTitle = _uiState.value.hero.title
-        val albumArtist = _uiState.value.hero.artist
         _uiState.update { it.copy(showDownloadConfirm = false, downloadConfirmQueue = emptyList()) }
-        queue.forEach { track ->
-            delegate.downloadTrack(
-                TrackItem(
-                    videoId = track.videoId,
-                    title = track.title,
-                    artist = track.artist,
-                    durationSeconds = track.durationSeconds,
-                    thumbnailUrl = track.thumbnailUrl,
-                    album = albumTitle,
-                    albumArtist = albumArtist,
-                ),
-            )
-        }
+        // "Download all" keeps the album too (owner, 2026-11-02), so a downloaded album is in
+        // Library › Albums, whole and in order, not loose songs. Quietly: the downloads speak.
+        // Run beside the downloads: a song both write is one row (found by its video id).
+        if (!isPlaylist) viewModelScope.launch { saveAlbumNow(announce = false) }
+        queue.forEach { track -> delegate.downloadTrack(trackItemFor(track)) }
+    }
+
+    /**
+     * [track] as a row's actions (download, play next, add to a playlist) take it: from an album, with the album's
+     * title and artist; from a YouTube Music playlist, with the song's own album, never the playlist's name.
+     */
+    fun trackItemFor(track: TrackSummary): TrackItem {
+        val hero = _uiState.value.hero
+        return TrackItem(
+            videoId = track.videoId,
+            title = track.title,
+            artist = if (isPlaylist) playlistSongArtist(track) else track.artist,
+            durationSeconds = track.durationSeconds,
+            thumbnailUrl = track.thumbnailUrl,
+            album = if (isPlaylist) track.album else hero.title,
+            albumArtist = if (isPlaylist) null else hero.artist,
+        )
     }
 
     /**
@@ -345,13 +382,25 @@ class AlbumDiscoveryViewModel @Inject constructor(
      * reused, never duplicated. Downloading stays a separate, explicit step.
      */
     fun saveAlbum() {
-        viewModelScope.launch {
-            if (isSaved.value) {
-                _userMessages.emit("Already in your library")
-                return@launch
-            }
-            val tracks = synthesizeDomainTracks()
-            if (tracks.isEmpty()) return@launch
+        viewModelScope.launch { saveAlbumNow(announce = true) }
+    }
+
+    /** A save in flight: Save and Download all tapped together file the album once. */
+    private var saving = false
+
+    /**
+     * [saveAlbum]'s work. The tracks go in in the page's order, which is the album's own (the
+     * album page's tracklist as YouTube Music or Qobuz lists it), so the saved album keeps it.
+     */
+    private suspend fun saveAlbumNow(announce: Boolean) {
+        if (isSaved.value || saving) {
+            if (announce) _userMessages.emit("Already in your library")
+            return
+        }
+        val tracks = synthesizeDomainTracks()
+        if (tracks.isEmpty()) return
+        saving = true
+        try {
             val ids = tracks.map { musicRepository.ensureTrackPersisted(it.copy(id = 0L)) }
             val hero = _uiState.value.hero
             // #479: once the playlist exists it must get its tracks, or isSaved blocks a re-save.
@@ -363,8 +412,16 @@ class AlbumDiscoveryViewModel @Inject constructor(
                 )
                 musicRepository.addTracksToPlaylist(ids, playlistId)
             }
-            _userMessages.emit("Saved to your library")
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "save album $browseId failed", e)
+            if (announce) _userMessages.emit("Couldn't save this $pageNoun. Try again.")
+            return
+        } finally {
+            saving = false
         }
+        if (announce) _userMessages.emit("Saved to your library")
     }
 
     fun addAlbumToQueue() {
@@ -375,9 +432,9 @@ class AlbumDiscoveryViewModel @Inject constructor(
             if (added && delegate.inListenTogether) return@launch // the session confirms it
             _userMessages.emit(
                 if (added) {
-                    "Added album to queue"
+                    "Added $pageNoun to queue"
                 } else {
-                    "Couldn't add album to queue"
+                    "Couldn't add $pageNoun to queue"
                 },
             )
         }
@@ -422,12 +479,14 @@ class AlbumDiscoveryViewModel @Inject constructor(
         val albumArtist = state.hero.artist
         val albumArt = state.hero.thumbnailUrl
         val qobuz = isNativeAlbum
+        val playlist = isPlaylist
         return tracks.map { t ->
             Track(
                 id = if (qobuz) 0L else t.videoId.hashCode().toLong(),
                 title = t.title,
-                artist = t.artist.ifBlank { albumArtist },
-                album = albumTitle,
+                // A playlist's "artist" is its maker ("YouTube Music"), never a song's
+                artist = if (playlist) playlistSongArtist(t) else t.artist.ifBlank { albumArtist },
+                album = if (playlist) t.album.orEmpty() else albumTitle,
                 durationMs = (t.durationSeconds * 1000L).toLong(),
                 albumArtUrl = t.thumbnailUrl ?: albumArt,
                 youtubeId = if (qobuz) null else t.videoId,
@@ -451,7 +510,8 @@ class AlbumDiscoveryViewModel @Inject constructor(
                 it.copy(
                     hero = AlbumHeroState(
                         title = detail.title,
-                        artist = detail.artist,
+                        // A playlist whose header names no maker keeps the card's line ("YouTube Music")
+                        artist = detail.artist.ifBlank { it.hero.artist },
                         thumbnailUrl = detail.thumbnailUrl ?: it.hero.thumbnailUrl,
                         year = detail.year ?: it.hero.year,
                         trackCount = detail.tracks.size,
@@ -468,12 +528,15 @@ class AlbumDiscoveryViewModel @Inject constructor(
             // against empty ids — at best wasted work, at worst mis-keying the
             // album backfill against other blank-youtubeId library rows. So the
             // videoId-keyed side-effects run for YouTube albums only.
-            if (albumSource == AlbumSource.YOUTUBE) {
+            if (albumSource == AlbumSource.YOUTUBE || isPlaylist) {
                 if (!prefetchKicked && detail.tracks.isNotEmpty()) {
                     prefetchKicked = true
                     prefetcher.prefetch(detail.tracks.take(6).map { it.videoId })
                 }
                 delegate.refreshDownloadedIds(detail.tracks.map { it.videoId })
+            }
+            // A playlist's name is no song's album: only an album page fills in its songs' album
+            if (albumSource == AlbumSource.YOUTUBE) {
 
                 // Backfill the `album` column on any of this album's tracks
                 // that are already in the local library with an empty album.
@@ -514,7 +577,7 @@ class AlbumDiscoveryViewModel @Inject constructor(
             Log.e(TAG, "album fetch failed for $browseId", t)
             // Plain words: the exception's text can be Qobuz's raw JSON reply (#481).
             _uiState.update { it.copy(status = AlbumDiscoveryStatus.Error(LOAD_FAILED)) }
-            _userMessages.emit("Couldn't load album — tap Retry.")
+            _userMessages.emit("Couldn't load $pageNoun — tap Retry.")
         }
     }
 
@@ -561,12 +624,24 @@ class AlbumDiscoveryViewModel @Inject constructor(
 
     /** Which album the screen shows: a catalog id and the catalog it belongs to. */
     private data class AlbumRef(val id: String, val source: AlbumSource) {
-        /** The library playlist that stands for this album: one per source + browse id. */
-        val savedSourceId: String get() = "album:${source.name.lowercase()}:$id"
+        /**
+         * The library playlist that stands for this album: one per source + browse id. A YouTube Music playlist
+         * is filed under the key a pasted link of it uses, so the two never make two copies.
+         */
+        val savedSourceId: String get() = when (source) {
+            AlbumSource.YOUTUBE_PLAYLIST -> LinkImporter.youTubePlaylistSourceId(id)
+            else -> "album:${source.name.lowercase()}:$id"
+        }
     }
 
     companion object {
         private const val TAG = "AlbumDiscoveryVM"
+
+        /**
+         * A playlist song's artist, as it goes to the queue, the history and a download: its own, or the app's
+         * "Unknown Artist" for a song YouTube names no artist for. Never the playlist's maker, never blank.
+         */
+        internal fun playlistSongArtist(track: TrackSummary): String = track.artist.ifBlank { SCANNED_UNKNOWN_ARTIST }
 
         /** A failure Retry can fix. Plain words, whatever the exception said. */
         internal const val LOAD_FAILED = "Check your connection and try again."
@@ -665,16 +740,17 @@ private fun firstCredited(artist: String): String = COLLAB_SEPARATOR.split(artis
 private fun matchKey(s: String): String = QobuzCandidateMatcher.normalize(foldForMatch(s))
 
 /** An album title as a match key, and whether an edition was set aside to get it. */
-private class TitleKey(val key: String, val dropsEdition: Boolean)
+internal class TitleKey(val key: String, val dropsEdition: Boolean)
 
 /**
  * An album title as a match key. [QobuzCandidateMatcher.normalize] drops every bracket
  * and everything after a "feat.", so "Loveless (Live)" and "Loveless feat. X (Live)"
  * would both equal "Loveless". Here a featured credit is cut only up to the next
  * bracket or " - " ([CREDIT]), and a bracketed or " - " part only drops out when it
- * names an edition ([isEdition]); its words stay in the key otherwise.
+ * names an edition ([isEdition]); its words stay in the key otherwise. The artist
+ * page's Latest releases row ([latestReleases]) tells a copy from a new release by it.
  */
-private fun albumTitleKey(title: String): TitleKey {
+internal fun albumTitleKey(title: String): TitleKey {
     var dropsEdition = false
     val creditsCut = CREDIT.replace(foldForMatch(title), " ")
     val bracketsSettled = BRACKETED.replace(creditsCut) { group ->
@@ -703,8 +779,11 @@ private fun isEdition(part: String): Boolean {
     return words.isNotEmpty() && words.all { it in EDITION_WORDS || NUMBERING.matches(it) }
 }
 
-/** Within a year of each other, or unknown on either side. Qobuz may send "1991-11-04". */
-private fun yearsAgree(candidate: String?, wanted: String?): Boolean {
+/**
+ * Within a year of each other, or unknown on either side. Qobuz may send "1991-11-04".
+ * The artist page's Latest releases row ([latestReleases]) dates a copy by it too.
+ */
+internal fun yearsAgree(candidate: String?, wanted: String?): Boolean {
     val a = candidate?.let { YEAR.find(it) }?.value?.toInt() ?: return true
     val b = wanted?.let { YEAR.find(it) }?.value?.toInt() ?: return true
     return abs(a - b) <= 1

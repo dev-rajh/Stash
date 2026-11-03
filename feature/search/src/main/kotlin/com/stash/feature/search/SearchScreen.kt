@@ -1,5 +1,8 @@
 package com.stash.feature.search
 
+import androidx.compose.material3.Surface
+import androidx.compose.material.icons.filled.Link
+import com.stash.core.data.link.MusicLinks
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -107,6 +110,8 @@ import com.stash.core.ui.components.bottomChromePadding
 fun SearchScreen(
     onNavigateToArtist: (artistId: String, name: String, avatarUrl: String?) -> Unit,
     onNavigateToAlbum: (album: AlbumSummary) -> Unit,
+    /** A Spotify / YouTube link typed or pasted into the field: its preview, to add it to the library. */
+    onOpenLink: (String) -> Unit = {},
     viewModel: SearchViewModel = hiltViewModel(),
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
@@ -146,6 +151,13 @@ fun SearchScreen(
                 onClear = { viewModel.onQueryChanged("") },
                 onSearch = viewModel::onSearchCommitted,
             )
+
+            // A pasted link isn't a search: offer what it points to instead of results for its words.
+            val link = remember(state.query) { MusicLinks.findUrl(state.query) }
+            if (link != null) {
+                OpenLinkCard(onClick = { onOpenLink(link) })
+                return@Column
+            }
 
             when (val status = state.status) {
                 SearchStatus.Idle -> RecentSearches(
@@ -206,6 +218,30 @@ fun SearchScreen(
     }
 }
 
+/** In place of results when the field holds a Spotify or YouTube link: opens its preview. */
+@Composable
+private fun OpenLinkCard(onClick: () -> Unit) {
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(16.dp),
+        color = StashTheme.extendedColors.glassBackground,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(16.dp)) {
+            Icon(Icons.Default.Link, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+            Spacer(Modifier.width(16.dp))
+            Column(Modifier.weight(1f)) {
+                Text("Open this link", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurface)
+                Text(
+                    "Add the playlist, album or song to your library",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Search bar
 // ---------------------------------------------------------------------------
@@ -220,11 +256,11 @@ private fun SearchBar(
     val focusRequester = remember { FocusRequester() }
     val keyboardController = LocalSoftwareKeyboardController.current
 
-    // Command-hero field: a soft plum tonal pill — the loud violet outline is
+    // Command-hero field: a soft neutral tonal pill (plum until D9), the magnifier in the theme's
+    // accent (the playing album's colour); the loud violet outline is
     // retired; focus is signaled by the cursor + keyboard, not a border.
     val dark = MaterialTheme.colorScheme.background.luminance() < 0.5f
-    val plum = if (dark) Color(0xFF7E6A90) else Color(0xFF6E5A7E)
-    val tonal = plum.copy(alpha = if (dark) 0.22f else 0.10f)
+    val tonal = MaterialTheme.colorScheme.onSurface.copy(alpha = if (dark) 0.08f else 0.05f)
     OutlinedTextField(
         value = query,
         onValueChange = onQueryChanged,
@@ -242,7 +278,7 @@ private fun SearchBar(
             Icon(
                 imageVector = Icons.Default.Search,
                 contentDescription = "Search",
-                tint = plum,
+                tint = MaterialTheme.colorScheme.primary,
             )
         },
         trailingIcon = {

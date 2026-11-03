@@ -17,6 +17,9 @@ dependencies {
     implementation(project(":core:auth"))
     implementation(project(":core:media"))
     implementation(project(":data:download"))
+    // Failed Matches' "find it yourself" (#19) runs the Search tab's own
+    // YouTube Music search (YTMusicApiClient.searchAll).
+    implementation(project(":data:ytmusic"))
     implementation(libs.compose.material.icons.extended)
     implementation(libs.coil.compose)
     implementation(libs.coil.network.okhttp)
@@ -30,4 +33,6 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.1")
     testImplementation(libs.mockk)
+    // SyncedAgoTest reads Android's own "3 minutes ago" words (DateUtils) under Robolectric.
+    testImplementation(libs.robolectric)
 }

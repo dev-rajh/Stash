@@ -5,6 +5,9 @@ import kotlin.math.absoluteValue
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material.icons.filled.AudioFile
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
@@ -49,6 +52,7 @@ import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.DownloadDone
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.HighQuality
@@ -139,6 +143,8 @@ import com.stash.core.ui.selection.SelectionState
 import com.stash.core.ui.theme.StashTheme
 import com.stash.core.common.extensions.pluralize
 import com.stash.core.ui.components.bottomChromePadding
+import androidx.compose.material.icons.automirrored.filled.QueueMusic
+import androidx.compose.ui.res.stringResource
 import com.stash.feature.library.allsongs.AllSongsViewModel
 import com.stash.feature.library.allsongs.OnThisDeviceSelectionBar
 import com.stash.feature.library.allsongs.OnThisDeviceTab
@@ -159,7 +165,6 @@ fun LibraryScreen(
     modifier: Modifier = Modifier,
     onNavigateToPlaylist: (Long) -> Unit = {},
     onNavigateToArtist: (String) -> Unit = {},
-    onNavigateToAlbum: (albumId: String, name: String, artUrl: String?, artistName: String) -> Unit = { _, _, _, _ -> },
     onNavigateToRemoteAlbum: (albumId: String, name: String, artUrl: String?, artistName: String) -> Unit = { _, _, _, _ -> },
     onSelectionModeChanged: (Boolean) -> Unit = {},
     // An empty library's ways in (see LibraryEmptyState): the Sync tab, the Search tab, and
@@ -167,6 +172,10 @@ fun LibraryScreen(
     onNavigateToSync: () -> Unit = {},
     onNavigateToSearch: () -> Unit = {},
     onNavigateToAccounts: () -> Unit = {},
+    /** "+" › Add from a link: the pasted Spotify / YouTube link's preview. */
+    onOpenLink: (String) -> Unit = {},
+    /** "+" › Import a playlist file: the picked document's address, for the same preview a link opens. */
+    onOpenPlaylistFile: (String) -> Unit = {},
     viewModel: LibraryViewModel = hiltViewModel(),
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
@@ -272,6 +281,7 @@ fun LibraryScreen(
             onTrackClick = { track -> viewModel.playTrack(track, state.tracks) },
             onPlayNext = viewModel::playNext,
             onAddToQueue = viewModel::addToQueue,
+            onStartRadio = viewModel::startRadio,
             onDeleteTrack = viewModel::deleteTrack,
             onPlayPlaylist = { playlist -> onNavigateToPlaylist(playlist.id) },
             onAddPlaylistToQueue = viewModel::addPlaylistToQueue,
@@ -291,9 +301,9 @@ fun LibraryScreen(
             onDeleteArtist = viewModel::deleteArtist,
             onPlayAlbum = viewModel::playAlbum,
             onAddAlbumToQueue = viewModel::addAlbumToQueue,
-            onOpenAlbum = { album ->
-                onNavigateToAlbum(album.name, album.name, album.artUrl, album.artist)
-            },
+            onRemoveAlbum = viewModel::removeAlbum,
+            // A saved album opens its own page: every song, in album order.
+            onOpenAlbum = { album -> onNavigateToPlaylist(album.playlistId) },
             onStartImport = viewModel::startLocalImport,
             onCancelImport = viewModel::cancelLocalImport,
             onDismissImport = viewModel::dismissLocalImport,
@@ -315,6 +325,8 @@ fun LibraryScreen(
             onOpenSync = onNavigateToSync,
             onOpenSearch = onNavigateToSearch,
             onOpenAccounts = onNavigateToAccounts,
+            onOpenLink = onOpenLink,
+            onOpenPlaylistFile = onOpenPlaylistFile,
             deviceContent = {
                 OnThisDeviceTab(
                     viewModel = deviceViewModel,
@@ -571,6 +583,8 @@ fun LibraryScreen(
 @Composable
 private fun LibraryContent(
     state: LibraryUiState,
+    onOpenLink: (String) -> Unit = {},
+    onOpenPlaylistFile: (String) -> Unit = {},
     /** Field-facing query — updates this frame; see LibraryViewModel.searchQuery. */
     searchQuery: String,
     importState: com.stash.data.download.files.LocalImportState,
@@ -582,11 +596,12 @@ private fun LibraryContent(
     onSearchQueryChanged: (String) -> Unit,
     onSortOrderChanged: (SortOrder) -> Unit,
     onSourceFilterChanged: (SourceFilter) -> Unit,
-    /** Artists and Albums' "In your library" choice (Stream only). */
+    /** Artists' "In your library" choice (Stream only). */
     onLibraryOnlyChanged: (Boolean) -> Unit = {},
     onTrackClick: (Track) -> Unit,
     onPlayNext: (Track) -> Unit,
     onAddToQueue: (Track) -> Unit,
+    onStartRadio: (Track) -> Unit,
     onDeleteTrack: (Track, Boolean) -> Unit,
     onPlayPlaylist: (Playlist) -> Unit,
     onAddPlaylistToQueue: (Playlist) -> Unit,
@@ -604,8 +619,9 @@ private fun LibraryContent(
     onPlayArtist: (String) -> Unit,
     onAddArtistToQueue: (String) -> Unit,
     onDeleteArtist: (String) -> Unit,
-    onPlayAlbum: (String, String) -> Unit,
-    onAddAlbumToQueue: (String, String) -> Unit,
+    onPlayAlbum: (AlbumInfo) -> Unit,
+    onAddAlbumToQueue: (AlbumInfo) -> Unit,
+    onRemoveAlbum: (AlbumInfo) -> Unit = {},
     onOpenAlbum: (AlbumInfo) -> Unit,
     onStartImport: (List<Uri>) -> Unit,
     onCancelImport: () -> Unit,
@@ -644,6 +660,12 @@ private fun LibraryContent(
             contract = androidx.activity.result.contract.ActivityResultContracts.OpenMultipleDocuments(),
         ) { uris: List<Uri>? ->
             if (!uris.isNullOrEmpty()) onStartImport(uris)
+        }
+        // "+" › Import a playlist file: one document, read once by the preview it opens (no lasting permission kept).
+        val playlistFilePicker = androidx.activity.compose.rememberLauncherForActivityResult(
+            contract = ActivityResultContracts.OpenDocument(),
+        ) { uri: Uri? ->
+            if (uri != null) onOpenPlaylistFile(uri.toString())
         }
         // Opens already showing a query the ViewModel kept (back on this tab, or after a
         // rotation): a hidden field over a still-filtered list was a dead end.
@@ -741,8 +763,36 @@ private fun LibraryContent(
                     tint = chrome.accent,
                 )
             }
-            IconButton(onClick = { importPicker.launch(arrayOf("audio/*")) }) {
-                Icon(Icons.Filled.Add, contentDescription = "Import tracks")
+            // "+": a Spotify / YouTube link, a playlist file another app exported, or audio files from the phone.
+            Box {
+                var addMenu by remember { mutableStateOf(false) }
+                var pasteLink by remember { mutableStateOf(false) }
+                IconButton(onClick = { addMenu = true }) {
+                    Icon(Icons.Filled.Add, contentDescription = "Add music")
+                }
+                DropdownMenu(expanded = addMenu, onDismissRequest = { addMenu = false }) {
+                    DropdownMenuItem(
+                        text = { Text("Add from a link") },
+                        leadingIcon = { Icon(Icons.Filled.Link, contentDescription = null) },
+                        onClick = { addMenu = false; pasteLink = true },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Import audio files") },
+                        leadingIcon = { Icon(Icons.Filled.AudioFile, contentDescription = null) },
+                        onClick = { addMenu = false; importPicker.launch(arrayOf("audio/*")) },
+                    )
+                    DropdownMenuItem(
+                        text = { Text(stringResource(R.string.library_import_playlist_file)) },
+                        leadingIcon = { Icon(Icons.AutoMirrored.Filled.QueueMusic, contentDescription = null) },
+                        onClick = { addMenu = false; playlistFilePicker.launch(PLAYLIST_FILE_TYPES) },
+                    )
+                }
+                if (pasteLink) {
+                    com.stash.feature.library.share.PasteLinkDialog(
+                        onDismiss = { pasteLink = false },
+                        onOpen = { pasteLink = false; onOpenLink(it) },
+                    )
+                }
             }
             // Closing the search clears it: it used to only hide the field, leaving every tab
             // silently filtered by a query the user could no longer see.
@@ -783,25 +833,26 @@ private fun LibraryContent(
             clearSearch()
             onSourceFilterChanged(SourceFilter.ALL)
         }
-        // Artists and Albums: "Show everything" also drops "In your library".
+        // Artists: "Show everything" also drops "In your library".
         val clearSearchAndLibraryOnly: () -> Unit = {
             clearSearch()
             if (state.libraryOnly) onLibraryOnlyChanged(false)
         }
-        val artistsOrAlbums = state.activeTab == LibraryTab.ARTISTS || state.activeTab == LibraryTab.ALBUMS
+        // Albums lists saved albums, all in the library already: "In your library" is Artists' only.
+        val artistsTab = state.activeTab == LibraryTab.ARTISTS
 
         // -- Active source filter, on the tab it narrows. It's persisted and re-applied every
         // launch, and since the chip rows moved into the sheet nothing on screen showed it: a
         // FLAC filter from days ago left Songs at 40 of 5,000 with no hint why. Tap to clear.
-        val activeFilterLabel = sourceFilterLabel(state.sourceFilter)
+        val activeFilterLabel = activeFilterChipLabel(state.sourceFilter)
         if (activeFilterLabel != null && state.activeTab == LibraryTab.TRACKS) {
             ActiveFilterChip(
-                label = "Showing $activeFilterLabel only",
+                label = activeFilterLabel,
                 onClear = { onSourceFilterChanged(SourceFilter.ALL) },
             )
         }
-        // -- "In your library" on Artists and Albums, persisted the same way: shown while it narrows.
-        if (state.libraryOnly && artistsOrAlbums) {
+        // -- "In your library" on Artists, persisted the same way: shown while it narrows.
+        if (state.libraryOnly && artistsTab) {
             ActiveFilterChip(label = "Showing your library only", onClear = { onLibraryOnlyChanged(false) })
         }
 
@@ -837,7 +888,7 @@ private fun LibraryContent(
                 // Kept while it is the active filter, so it can be seen and cleared.
                 showCloudFilter = state.hasCloudSongs || state.sourceFilter == SourceFilter.CLOUD,
                 // Download lists only downloaded songs, all in the library already.
-                showLibraryOnly = state.streamingMode && artistsOrAlbums,
+                showLibraryOnly = state.streamingMode && artistsTab,
                 libraryOnly = state.libraryOnly,
                 onLibraryOnlySelected = onLibraryOnlyChanged,
                 // Scanned songs have no play counts.
@@ -921,6 +972,7 @@ private fun LibraryContent(
                         onTrackClick = onTrackClick,
                         onPlayNext = onPlayNext,
                         onAddToQueue = onAddToQueue,
+                        onStartRadio = onStartRadio,
                         onDeleteTrack = onDeleteTrack,
                         onViewAlbum = onViewAlbum,
                         anyServiceConnected = anyServiceConnected,
@@ -948,6 +1000,7 @@ private fun LibraryContent(
                         onTrackClick = onPlayLikedTrack,
                         onPlayNext = onPlayNext,
                         onAddToQueue = onAddToQueue,
+                        onStartRadio = onStartRadio,
                         onDeleteTrack = onDeleteTrack,
                         selection = selection,
                         userPlaylists = userPlaylists,
@@ -973,14 +1026,14 @@ private fun LibraryContent(
                     )
                     LibraryTab.ALBUMS -> AlbumsGrid(
                         albums = state.albums,
-                        singleTrackAlbums = state.singleTrackAlbums,
-                        anyServiceConnected = anyServiceConnected,
+                        emptyMessage = albumsEmptyMessage(downloadMode = !state.streamingMode),
                         onPlayAlbum = onPlayAlbum,
                         onAddAlbumToQueue = onAddAlbumToQueue,
+                        onRemoveAlbum = onRemoveAlbum,
                         onOpenAlbum = onOpenAlbum,
                         header = {},
                         noMatch = noMatchMessage("albums", state.searchQuery),
-                        onClearFilters = clearSearchAndLibraryOnly,
+                        onClearFilters = clearSearch,
                         alphabetical = alphabetical,
                     )
                     LibraryTab.DEVICE -> Unit // shown above, outside the pager
@@ -1024,6 +1077,7 @@ private fun LikedTab(
     onTrackClick: (Track) -> Unit,
     onPlayNext: (Track) -> Unit,
     onAddToQueue: (Track) -> Unit,
+    onStartRadio: (Track) -> Unit,
     onDeleteTrack: (Track, Boolean) -> Unit,
     selection: SelectionState,
     userPlaylists: List<com.stash.core.ui.components.PlaylistInfo>,
@@ -1043,6 +1097,7 @@ private fun LikedTab(
         if (LikedFilter.STASH in sources) add("Stash" to LikedFilter.STASH)
         if (LikedFilter.SPOTIFY in sources) add("Spotify" to LikedFilter.SPOTIFY)
         if (LikedFilter.YOUTUBE in sources) add("YouTube" to LikedFilter.YOUTUBE)
+        if (LikedFilter.SOUNDCLOUD in sources) add("SoundCloud" to LikedFilter.SOUNDCLOUD)
     }
 
     // Track selected for the context-menu bottom sheet (opened via the ⋮ now;
@@ -1061,6 +1116,8 @@ private fun LikedTab(
     // Track pending delete confirmation.
     var trackToDelete by remember { mutableStateOf<Track?>(null) }
 
+    // Downloaded likes carry the check when the list mixes downloaded and streaming songs (the Songs tab's rule).
+    val mixed = remember(tracks) { tracks.any { it.isDownloaded } && tracks.any { !it.isDownloaded } }
     val listState = rememberLazyListState()
     Box(Modifier.fillMaxSize()) {
         // The rows share one width reading and text measurer (TrackListItem's fit).
@@ -1100,6 +1157,7 @@ private fun LikedTab(
                         onLongPress = { if (!selection.isActive) selection.enter(track.id) },
                         selectionActive = selection.isActive,
                         selected = selection.isSelected(track.id),
+                        showAvailabilityTag = mixed,
                         onMoreClick = { selectedTrack = track },
                     )
                 }
@@ -1137,6 +1195,7 @@ private fun LikedTab(
                 track = track,
                 onPlayNext = { onPlayNext(it); selectedTrack = null },
                 onAddToQueue = { onAddToQueue(it); selectedTrack = null },
+                onStartRadio = { onStartRadio(it); selectedTrack = null },
                 onSaveToPlaylist = { trackToSave = it; selectedTrack = null },
                 onDismiss = { selectedTrack = null },
                 onShare = { trackToShare = it; selectedTrack = null },
@@ -1502,7 +1561,10 @@ private fun PlaylistsGrid(
                                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
-                                SourceIndicator(source = playlist.source)
+                                // Imported playlists are locally owned; BOTH is not their songs' source.
+                                if (!playlist.sourceId.startsWith("custom_link_")) {
+                                    SourceIndicator(source = playlist.source)
+                                }
                                 Text(
                                     text = pluralize(playlist.trackCount, "track"),
                                     style = MaterialTheme.typography.bodySmall,
@@ -1561,7 +1623,10 @@ private fun PlaylistsGrid(
                                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
-                                SourceIndicator(source = playlist.source)
+                                // Imported playlists are locally owned; BOTH is not their songs' source.
+                                if (!playlist.sourceId.startsWith("custom_link_")) {
+                                    SourceIndicator(source = playlist.source)
+                                }
                                 Text(
                                     text = pluralize(playlist.trackCount, "track"),
                                     style = MaterialTheme.typography.bodySmall,
@@ -1625,9 +1690,22 @@ private fun PlaylistsGrid(
                 },
             )
 
+            // On a mix the Home pin is its Favorite, so it says so, as on Home.
+            val onHome = playlist.pinnedToHomeAt != null
+            val isMix = playlist.isMix()
             BottomSheetActionRow(
-                icon = if (playlist.pinnedToHomeAt != null) Icons.Filled.Home else Icons.Outlined.Home,
-                label = if (playlist.pinnedToHomeAt != null) "Remove from Home" else "Show on Home",
+                icon = when {
+                    isMix && onHome -> Icons.Filled.Favorite
+                    isMix -> Icons.Filled.FavoriteBorder
+                    onHome -> Icons.Filled.Home
+                    else -> Icons.Outlined.Home
+                },
+                label = when {
+                    isMix && onHome -> "Remove from favorites"
+                    isMix -> "Favorite"
+                    onHome -> "Remove from Home"
+                    else -> "Show on Home"
+                },
                 onClick = {
                     onTogglePlaylistOnHome(playlist)
                     selectedPlaylist = null
@@ -1867,6 +1945,7 @@ private fun TracksTab(
     onTrackClick: (Track) -> Unit,
     onPlayNext: (Track) -> Unit,
     onAddToQueue: (Track) -> Unit,
+    onStartRadio: (Track) -> Unit,
     onDeleteTrack: (Track, Boolean) -> Unit,
     onViewAlbum: (Track) -> Unit,
     anyServiceConnected: Boolean,
@@ -1991,6 +2070,7 @@ private fun TracksTab(
                 track = track,
                 onPlayNext = { onPlayNext(it); selectedTrack = null },
                 onAddToQueue = { onAddToQueue(it); selectedTrack = null },
+                onStartRadio = { onStartRadio(it); selectedTrack = null },
                 onSaveToPlaylist = { trackToSave = it; selectedTrack = null },
                 onDismiss = { selectedTrack = null },
                 onShare = { trackToShare = it; selectedTrack = null },
@@ -2348,14 +2428,20 @@ private fun ArtistsGrid(
 
 // ── Albums tab (2-column grid) ───────────────────────────────────────────────
 
+/**
+ * Library › Albums: saved albums only (owner, 2026-11-02), each card opening its own tracklist in
+ * album order. Cards are keyed by the saved album's row, so two albums sharing a title and artist
+ * can never collide (the #244 crash).
+ */
 @OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Composable
 private fun AlbumsGrid(
     albums: List<AlbumInfo>,
-    singleTrackAlbums: List<AlbumInfo>,
-    anyServiceConnected: Boolean,
-    onPlayAlbum: (String, String) -> Unit,
-    onAddAlbumToQueue: (String, String) -> Unit,
+    /** What the tab says with no saved album to list ([albumsEmptyMessage]). */
+    emptyMessage: String,
+    onPlayAlbum: (AlbumInfo) -> Unit,
+    onAddAlbumToQueue: (AlbumInfo) -> Unit,
+    onRemoveAlbum: (AlbumInfo) -> Unit,
     onOpenAlbum: (AlbumInfo) -> Unit,
     header: @Composable () -> Unit = {},
     /** Empty-state line when the search emptied the grid (see [noMatchMessage]). */
@@ -2364,23 +2450,16 @@ private fun AlbumsGrid(
     /** Sorted A–Z: the scrollbar shows a letter bubble while dragged. */
     alphabetical: Boolean = false,
 ) {
-    if (albums.isEmpty() && singleTrackAlbums.isEmpty()) {
+    if (albums.isEmpty()) {
         Column {
             header()
-            EmptyTabMessage(
-                noMatch = noMatch,
-                fallback = if (anyServiceConnected) "Sync your library to see albums here"
-                else "Connect a service in Settings to see your albums",
-                onClear = onClearFilters,
-            )
+            EmptyTabMessage(noMatch = noMatch, fallback = emptyMessage, onClear = onClearFilters)
         }
         return
     }
 
     var selectedAlbum by remember { mutableStateOf<AlbumInfo?>(null) }
-    var showSingleTrack by remember { mutableStateOf(false) }
-
-    val displayList = if (showSingleTrack) albums + singleTrackAlbums else albums
+    var albumToRemove by remember { mutableStateOf<AlbumInfo?>(null) }
 
     val gridState = rememberLazyGridState()
     Box(Modifier.fillMaxSize()) {
@@ -2392,7 +2471,7 @@ private fun AlbumsGrid(
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             item(span = { GridItemSpan(maxLineSpan) }) { header() }
-            items(displayList, key = { "${it.name}|${it.artist}" }) { album ->
+            items(albums, key = { it.playlistId }) { album ->
                 Column(
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                     modifier = Modifier
@@ -2403,13 +2482,10 @@ private fun AlbumsGrid(
                             onLongClick = { selectedAlbum = album },
                         ),
                 ) {
-                    // Album art: try local path, then remote URL, then fallback icon.
-                    // AlbumArtwork also falls back to the icon while a remote
-                    // image is loading or after it errors — a failed URL used to
-                    // render as an empty grey box.
-                    val artModel = album.artPath ?: album.artUrl
+                    // Album art: the remote URL, else the fallback icon. AlbumArtwork also falls
+                    // back to the icon while the image loads or after it errors.
                     AlbumArtwork(
-                        model = artModel,
+                        model = album.artUrl,
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(120.dp)
@@ -2421,7 +2497,7 @@ private fun AlbumsGrid(
                                 .padding(8.dp)
                                 .size(32.dp)
                                 .clip(CircleShape)
-                                .clickable { onPlayAlbum(album.name, album.artist) },
+                                .clickable { onPlayAlbum(album) },
                             color = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f),
                             shape = CircleShape,
                         ) {
@@ -2460,49 +2536,12 @@ private fun AlbumsGrid(
                     }
                 }
             }
-
-            // Collapsible section for single-track albums
-            if (singleTrackAlbums.isNotEmpty()) {
-                item(span = { GridItemSpan(2) }) {
-                    Surface(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 8.dp)
-                            .clickable { showSingleTrack = !showSingleTrack },
-                        color = StashTheme.extendedColors.glassBackground,
-                        shape = RoundedCornerShape(12.dp),
-                        border = androidx.compose.foundation.BorderStroke(
-                            1.dp, StashTheme.extendedColors.glassBorder,
-                        ),
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(16.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                        ) {
-                            Text(
-                                text = if (showSingleTrack) "Hide single-track albums"
-                                else "${singleTrackAlbums.size} albums with 1 track",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.weight(1f),
-                            )
-                            Icon(
-                                imageVector = if (showSingleTrack) Icons.Default.ExpandLess
-                                else Icons.Default.ExpandMore,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                    }
-                }
-            }
         }
         VerticalScrollbar(
             state = gridState,
-            // Item 0 is the header; the "albums with 1 track" toggle after the grid shows no letter.
+            // Item 0 is the header.
             sectionLabel = if (alphabetical) {
-                alphabeticalSectionLabel(displayList, leadingItems = 1) { it.name }
+                alphabeticalSectionLabel(albums, leadingItems = 1) { it.name }
             } else {
                 null
             },
@@ -2546,7 +2585,7 @@ private fun AlbumsGrid(
                 icon = Icons.Default.PlayArrow,
                 label = "Play Album",
                 onClick = {
-                    onPlayAlbum(album.name, album.artist)
+                    onPlayAlbum(album)
                     selectedAlbum = null
                 },
             )
@@ -2554,7 +2593,7 @@ private fun AlbumsGrid(
                 icon = Icons.Default.PlaylistAdd,
                 label = com.stash.core.ui.components.playNextLabel(com.stash.core.ui.components.LocalListenTogetherRole.current, "Add to Queue"), // session: queue or suggest
                 onClick = {
-                    onAddAlbumToQueue(album.name, album.artist)
+                    onAddAlbumToQueue(album)
                     selectedAlbum = null
                 },
             )
@@ -2564,14 +2603,40 @@ private fun AlbumsGrid(
                     icon = Icons.Default.CloudUpload,
                     label = com.stash.core.ui.components.SAVE_TO_CLOUD_LABEL,
                     onClick = {
-                        save(com.stash.core.ui.components.CloudSaveTarget.Album(album.name, album.artist))
+                        save(com.stash.core.ui.components.CloudSaveTarget.Playlist(album.playlistId))
                         selectedAlbum = null
                     },
                 )
             }
+            // Saved albums left the Playlists tab, so taking one out of the library is here now.
+            BottomSheetActionRow(
+                icon = Icons.Default.RemoveCircleOutline,
+                label = "Remove from Library",
+                onClick = {
+                    albumToRemove = album
+                    selectedAlbum = null
+                },
+            )
 
             Spacer(modifier = Modifier.height(24.dp))
         }
+    }
+
+    albumToRemove?.let { album ->
+        AlertDialog(
+            onDismissRequest = { albumToRemove = null },
+            title = { Text("Remove \"${album.name}\"?") },
+            text = { Text("The album leaves your library. Its songs stay, and downloaded ones stay on your phone.") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onRemoveAlbum(album)
+                        albumToRemove = null
+                    },
+                ) { Text("Remove", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { albumToRemove = null }) { Text("Cancel") } },
+        )
     }
 }
 
@@ -2619,6 +2684,24 @@ private fun AlbumArtwork(
         content()
     }
 }
+
+/**
+ * What "+" › Import a playlist file offers: the playlist types (M3U, PLS, XSPF, CSV, tab-separated, text), and every file as
+ * well, because phones and apps label an .m3u or a .csv differently (often just "application/octet-stream").
+ */
+private val PLAYLIST_FILE_TYPES = arrayOf(
+    "audio/x-mpegurl",
+    "audio/mpegurl",
+    "application/x-mpegurl",
+    "application/vnd.apple.mpegurl",
+    "audio/x-scpls",
+    "application/xspf+xml",
+    "text/csv",
+    "text/comma-separated-values",
+    "text/tab-separated-values",
+    "text/plain",
+    "*/*",
+)
 
 // ── Artist gradient helper ───────────────────────────────────────────────────
 
@@ -2733,11 +2816,16 @@ private fun EmptyTabMessage(message: String, onClear: (() -> Unit)? = null) {
         modifier = Modifier.fillMaxSize(),
         contentAlignment = Alignment.Center,
     ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            // A two-line message (Albums' how-to) wraps clear of the screen edges, centred.
+            modifier = Modifier.padding(horizontal = 32.dp),
+        ) {
             Text(
                 text = message,
                 style = MaterialTheme.typography.bodyLarge,
                 color = StashTheme.extendedColors.textTertiary,
+                textAlign = TextAlign.Center,
             )
             // Emptied by the user's own search/filter (see noMatchMessage): one tap undoes it.
             if (onClear != null) {
@@ -2785,7 +2873,7 @@ private fun LibraryEmptyState(
         )
         Spacer(modifier = Modifier.height(16.dp))
         Text(
-            text = "Your library is empty",
+            text = "No songs yet",
             style = MaterialTheme.typography.titleMedium,
             fontWeight = FontWeight.SemiBold,
             color = MaterialTheme.colorScheme.onBackground,

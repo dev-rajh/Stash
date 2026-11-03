@@ -43,6 +43,8 @@ class LikedSongsDetailViewModel @Inject constructor(
     private val musicRepository: MusicRepository,
     private val playerRepository: PlayerRepository,
     private val streamingPreference: com.stash.core.data.prefs.StreamingPreference,
+    /** Start radio from a song's menu (null in tests that don't need it). */
+    private val radioStarter: com.stash.core.media.RadioStarter? = null,
 ) : ViewModel() {
 
     private val sourceFilter: MusicSource? =
@@ -73,7 +75,7 @@ class LikedSongsDetailViewModel @Inject constructor(
             if (playlists.isEmpty()) {
                 flowOf(emptyList())
             } else {
-                combine(playlists.map { musicRepository.getTracksByPlaylist(it.id) }) { arrays ->
+                combine(playlists.map { musicRepository.getShownTracksByPlaylist(it.id) }) { arrays ->
                     arrays.flatMap { it.toList() }.distinctBy { it.id }
                 }
             }
@@ -109,8 +111,8 @@ class LikedSongsDetailViewModel @Inject constructor(
         viewModelScope.launch {
             _tappedTrackId.value = trackId
             try {
-                // Streaming is always allowed: the whole list is playable, and
-                // streamable tracks resolve inside setQueue when reached.
+                // The list shown is the list played: downloads only in Download mode
+                // (getShownTracksByPlaylist); in Stream only the rest resolve when reached.
                 val playable = uiState.value.tracks
                 if (playable.isEmpty()) return@launch
                 val index = playable.indexOfFirst { it.id == trackId }.coerceAtLeast(0)
@@ -154,6 +156,12 @@ class LikedSongsDetailViewModel @Inject constructor(
 
     fun playNext(track: Track) {
         viewModelScope.launch { playerRepository.addNext(track) }
+    }
+
+    /** Start radio on a song's menu: a song radio seeded from [track], as every other song menu starts. */
+    fun startRadio(track: Track) {
+        val starter = radioStarter ?: return
+        viewModelScope.launch { starter.fromSong(track)?.let { _userMessages.tryEmit(it) } }
     }
 
     fun addToQueue(track: Track) {

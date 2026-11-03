@@ -24,6 +24,33 @@ import org.junit.Test
  */
 class MusicRepositoryEnsureTrackPersistedTest {
 
+    @Test fun `SoundCloud uses its upload id before a stale positive room id`() = runTest {
+        val dao = mockk<TrackDao>(relaxed = true)
+        coEvery { dao.findBySoundCloudId("123") } returns TrackEntity(id = 42, title = "Song", artist = "Artist", soundCloudId = "123")
+        assertEquals(42L, buildRepo(dao).ensureTrackPersisted(Track(id = 99, title = "Song", artist = "Artist", soundCloudId = "123")))
+        coVerify(exactly = 0) { dao.getById(99) }
+        coVerify(exactly = 0) { dao.findAllByCanonicalIdentity(any(), any()) }
+    }
+
+    @Test fun `missing SoundCloud row gets an exact stub instead of a title match`() = runTest {
+        val dao = mockk<TrackDao>(relaxed = true)
+        coEvery { dao.findBySoundCloudId("123") } returns null
+        coEvery { dao.insert(any()) } returns 88L
+        val guard = mockk<BlocklistGuard> { coEvery { isKeyBlocked(any(), any()) } returns false }
+        assertEquals(88L, buildRepo(dao, guard).ensureTrackPersisted(Track(title = "Song", artist = "Artist", soundCloudId = "123")))
+        coVerify { dao.insert(match { it.soundCloudId == "123" && it.source == MusicSource.SOUNDCLOUD && it.youtubeId == null && it.spotifyUri == null }) }
+        coVerify(exactly = 0) { dao.findAllByCanonicalIdentity(any(), any()) }
+    }
+
+    @Test fun `concurrent saves adopt the winning SoundCloud upload row`() = runTest {
+        val dao = mockk<TrackDao>(relaxed = true)
+        coEvery { dao.findBySoundCloudId("123") } returnsMany listOf(null,
+            TrackEntity(id = 42, title = "Song", artist = "Artist", soundCloudId = "123"))
+        coEvery { dao.insert(any()) } throws SQLiteConstraintException("duplicate")
+        val guard = mockk<BlocklistGuard> { coEvery { isKeyBlocked(any(), any()) } returns false }
+        assertEquals(42L, buildRepo(dao, guard).ensureTrackPersisted(Track(title = "Song", artist = "Artist", soundCloudId = "123")))
+    }
+
     @Test fun `ensureTrackPersisted returns the existing id on a spotify_uri match and does not insert`() = runTest {
         val trackDao = mockk<TrackDao>(relaxed = true)
         // No id, no youtube match, no canonical match — only the spotify_uri hits.
@@ -157,27 +184,55 @@ class MusicRepositoryEnsureTrackPersistedTest {
         assertEquals(12L, id)
     }
 
+    /**
+     * The green-dot lie: Now Playing rebuilt every stream as a Spotify song (the default), and a
+     * like or a listen then saved a YouTube stream as a green Spotify row. A song with a video id
+     * and no Spotify id is saved as a YouTube song; a real Spotify song stays Spotify's.
+     */
+    @Test fun `a YouTube stream rebuilt as a Spotify song is saved as a YouTube song`() = runTest {
+        val trackDao = mockk<TrackDao>(relaxed = true)
+        coEvery { trackDao.findByYoutubeId(any()) } returns null
+        coEvery { trackDao.findBySpotifyUri(any()) } returns null
+        coEvery { trackDao.findAllByCanonicalIdentity(any(), any()) } returns emptyList()
+        coEvery { trackDao.insert(any()) } returns 9L
+        val videoId = "Ikn6Z2fxMs4"
+
+        buildRepo(trackDao).ensureTrackPersisted(
+            Track(id = videoId.hashCode().toLong(), title = "Starting Over", artist = "LSD", youtubeId = videoId, source = MusicSource.SPOTIFY),
+        )
+        buildRepo(trackDao).ensureTrackPersisted(
+            Track(title = "Synced", artist = "LSD", spotifyUri = "spotify:track:1", youtubeId = "video000002", source = MusicSource.SPOTIFY),
+        )
+
+        coVerify(exactly = 1) { trackDao.insert(match { it.youtubeId == videoId && it.source == MusicSource.YOUTUBE }) }
+        coVerify(exactly = 1) { trackDao.insert(match { it.spotifyUri == "spotify:track:1" && it.source == MusicSource.SPOTIFY }) }
+    }
+
     private fun buildRepo(
         trackDao: TrackDao,
         blocklistGuard: BlocklistGuard = mockk(relaxed = true),
-    ): MusicRepositoryImpl = MusicRepositoryImpl(
-        context = mockk(relaxed = true),
-        trackDao = trackDao,
-        playlistDao = mockk(relaxed = true),
-        syncHistoryDao = mockk(relaxed = true),
-        downloadQueueDao = mockk(relaxed = true),
-        discoveryQueueDao = mockk(relaxed = true),
-        blocklistGuard = blocklistGuard,
-        trackMatcher = mockk(relaxed = true),
-        stashMixRecipeDao = mockk(relaxed = true),
-        downloadNetworkPreference = mockk(relaxed = true),
-        streamingPreference = mockk(relaxed = true),
-        libraryScopePreference = mockk(relaxed = true),
-        localFileOps = mockk(relaxed = true),
-        syncPreferencesManager = mockk(relaxed = true),
-        singleTrackDownloadEnqueuer = mockk(relaxed = true),
-        lastFmRecommendationSource = mockk(relaxed = true),
-        sharedMixDao = mockk(relaxed = true),
-        downloadJobs = com.stash.core.data.sync.DownloadJobRegistry(),
-    )
+    ): MusicRepositoryImpl = run {
+        // No merged duplicates here: a relaxed mock would answer every alias lookup with a row.
+        coEvery { trackDao.findByAlias(any(), any()) } returns null
+        MusicRepositoryImpl(
+            context = mockk(relaxed = true),
+            trackDao = trackDao,
+            playlistDao = mockk(relaxed = true),
+            syncHistoryDao = mockk(relaxed = true),
+            downloadQueueDao = mockk(relaxed = true),
+            discoveryQueueDao = mockk(relaxed = true),
+            blocklistGuard = blocklistGuard,
+            trackMatcher = mockk(relaxed = true),
+            stashMixRecipeDao = mockk(relaxed = true),
+            downloadNetworkPreference = mockk(relaxed = true),
+            streamingPreference = mockk(relaxed = true),
+            libraryScopePreference = mockk(relaxed = true),
+            localFileOps = mockk(relaxed = true),
+            syncPreferencesManager = mockk(relaxed = true),
+            singleTrackDownloadEnqueuer = mockk(relaxed = true),
+            lastFmRecommendationSource = mockk(relaxed = true),
+            sharedMixDao = mockk(relaxed = true),
+            downloadJobs = com.stash.core.data.sync.DownloadJobRegistry(),
+        )
+    }
 }

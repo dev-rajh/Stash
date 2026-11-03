@@ -26,7 +26,8 @@ package com.stash.core.common
  * draws the stored URL when the sized-up one fails for any other reason (offline, 5xx, timeout).
  *
  * **Data Saver.** [forSize]'s `maxVariantPx` caps the variants it may pick ([maxVariantPx]): with
- * Android's Data Saver on over a metered network, nothing above [DATA_SAVER_MAX_PX], so Qobuz stays
+ * Android's Data Saver or Stash's own Data saver switch on over a metered network, nothing above
+ * [DATA_SAVER_MAX_PX], so Qobuz stays
  * `_600`, Spotify 640 and Last.fm `770x0` (their next size up is an unbounded original, up to
  * 2.2 MB measured for a Qobuz `_max`).
  *
@@ -129,12 +130,13 @@ object ArtUrlSizer {
     private val DEEZER_TIERS = intArrayOf(250, 500, 1000)
 
     /**
-     * The cap [forSize] should use: [DATA_SAVER_MAX_PX] when Android's Data Saver applies to this
-     * app ([dataSaverRestricting]: `RESTRICT_BACKGROUND_STATUS_ENABLED`) on a metered network,
-     * else [NO_CAP]. Data Saver off, the app allow-listed, or unmetered Wi-Fi: no cap.
+     * The cap [forSize] should use: [DATA_SAVER_MAX_PX] on a metered network when Android's Data
+     * Saver applies to this app ([dataSaverRestricting]: `RESTRICT_BACKGROUND_STATUS_ENABLED`) or
+     * Stash's own Data saver switch is on ([inAppDataSaver]), else [NO_CAP]. Both off, the app
+     * allow-listed, or unmetered Wi-Fi: no cap.
      */
-    fun maxVariantPx(dataSaverRestricting: Boolean, metered: Boolean): Int =
-        if (dataSaverRestricting && metered) DATA_SAVER_MAX_PX else NO_CAP
+    fun maxVariantPx(dataSaverRestricting: Boolean, metered: Boolean, inAppDataSaver: Boolean = false): Int =
+        if ((dataSaverRestricting || inAppDataSaver) && metered) DATA_SAVER_MAX_PX else NO_CAP
 
     /**
      * [url] rewritten to the smallest variant its host serves that is at least [px] on its long
@@ -156,6 +158,7 @@ object ArtUrlSizer {
         val host = afterScheme.substringBefore('/').lowercase()
         val cap = maxVariantPx.coerceAtLeast(1)
         return when {
+            host.matches(Regex("i[0-9]+\\.sndcdn\\.com")) -> soundCloud(url, px, cap)
             GOOGLE_HOST.matches(host) -> google(url, px, cap)
             host == "i.ytimg.com" || host.endsWith(".ytimg.com") -> youtube(url, px)
             host == "i.scdn.co" || host.endsWith(".spotifycdn.com") -> spotify(url, px, cap)
@@ -166,6 +169,15 @@ object ArtUrlSizer {
             host.endsWith(".dzcdn.net") -> deezer(url, px, cap)
             else -> url
         }
+    }
+
+    private fun soundCloud(url: String, px: Int, cap: Int): String {
+        val match = Regex("-(large|t500x500|t1080x1080)(\\.(?:jpg|png|webp))(?=$|[?#])").find(url) ?: return url
+        val stored = when (match.groupValues[1]) { "large" -> 100; "t500x500" -> 500; else -> 1080 }
+        if (bigEnough(stored, px)) return url
+        val target = tierFor(px, intArrayOf(100, 500, 1080), cap)
+        if (target <= stored) return url
+        return url.replaceRange(match.range, "-t${target}x$target${match.groupValues[2]}")
     }
 
     /**

@@ -1,9 +1,9 @@
 package com.stash.feature.settings
 
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.MusicNote
-import androidx.compose.material.icons.rounded.PlayCircle
-import androidx.compose.material.icons.rounded.Forum
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -13,16 +13,23 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.res.vectorResource
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.stash.core.data.social.Destination
+import com.stash.core.ui.R as UiR
 import com.stash.feature.settings.components.AccountConnectionCard
 import com.stash.feature.settings.components.LastFmAccountCard
 import com.stash.feature.settings.components.LikeMirrorToggleRow
 import com.stash.feature.settings.components.ListenBrainzAccountCard
+import com.stash.feature.settings.components.SettingsGroupGap
 import com.stash.feature.settings.components.SettingsScaffold
 import com.stash.feature.settings.components.SettingsSectionLabel
 
@@ -37,10 +44,15 @@ import com.stash.feature.settings.components.SettingsSectionLabel
 fun SettingsAccountsScreen(
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
+    /** Opened from Your Stash's Cloud rows: Cloud storage, last on the page, is scrolled into view once on arrival. */
+    focusCloud: Boolean = false,
     viewModel: SettingsViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val extendedColors = com.stash.core.ui.theme.StashTheme.extendedColors
+    // Your Stash's scroll to Cloud storage happens once. Kept up here, before the sign-in screens
+    // below return early: inside the page it was dropped while one showed, and fired again after.
+    var cloudFocused by rememberSaveable { mutableStateOf(false) }
     // The last sync's verdict on each stored sign-in: an expired card leads with
     // Reconnect (the Sync tab's "Re-authenticate" lands here).
     val authExpiry by viewModel.authExpiry.collectAsStateWithLifecycle()
@@ -161,6 +173,8 @@ fun SettingsAccountsScreen(
 
         // Each account's own switches (likes, history) show only while it is
         // connected: a disconnected card is one line and a Connect button.
+        com.stash.feature.settings.components.SoundCloudAccountCard()
+
         val spotifyConnected = uiState.spotifyAuthState is com.stash.core.auth.model.AuthState.Connected
         val ytConnected = uiState.youTubeAuthState is com.stash.core.auth.model.AuthState.Connected
 
@@ -222,7 +236,7 @@ fun SettingsAccountsScreen(
 
         AccountConnectionCard(
             serviceName = "Spotify",
-            icon = Icons.Rounded.MusicNote,
+            icon = ImageVector.vectorResource(UiR.drawable.ic_brand_spotify),
             accentColor = extendedColors.spotifyGreen,
             authState = uiState.spotifyAuthState,
             expired = authExpiry.spotifyExpired,
@@ -230,10 +244,13 @@ fun SettingsAccountsScreen(
             onDisconnect = { confirmSpotifyDisconnect = true },
             extraContent = if (spotifyConnected) {
                 {
+                    val likeStatus by viewModel.likeStatusSpotify.collectAsStateWithLifecycle()
                     LikeMirrorToggleRow(
                         title = stringResource(R.string.settings_like_mirror_row_title, "Spotify"),
                         checked = uiState.mirrorLikesSpotify,
                         onToggle = { viewModel.onMirrorToggleRequested(Destination.SPOTIFY, it) },
+                        status = likeStatus,
+                        onRetry = { viewModel.onRetryLikeMirror(Destination.SPOTIFY) },
                     )
                 }
             } else {
@@ -243,7 +260,7 @@ fun SettingsAccountsScreen(
 
         AccountConnectionCard(
             serviceName = "YouTube Music",
-            icon = Icons.Rounded.PlayCircle,
+            icon = ImageVector.vectorResource(UiR.drawable.ic_brand_youtube_music),
             accentColor = extendedColors.youtubeRed,
             authState = uiState.youTubeAuthState,
             expired = authExpiry.youtubeExpired,
@@ -253,15 +270,18 @@ fun SettingsAccountsScreen(
                 {
                     val ytUser = (uiState.youTubeAuthState as? com.stash.core.auth.model.AuthState.Connected)?.user
                     com.stash.feature.settings.components.SettingsValueRow(
-                        title = "Profile",
-                        value = ytUser?.displayName?.takeIf { ytUser.id != "youtube_user" } ?: "Your account",
-                        subtitle = "The profile Stash syncs your library from",
+                        title = stringResource(R.string.settings_youtube_profile_title),
+                        value = ytUser?.displayName?.takeIf { ytUser.id != "youtube_user" } ?: stringResource(R.string.settings_youtube_profile_default),
+                        subtitle = stringResource(R.string.settings_youtube_profile_subtitle),
                         onClick = { showYouTubeProfiles = true },
                     )
+                    val likeStatus by viewModel.likeStatusYtMusic.collectAsStateWithLifecycle()
                     LikeMirrorToggleRow(
                         title = stringResource(R.string.settings_like_mirror_row_title, "YouTube Music"),
                         checked = uiState.mirrorLikesYtMusic,
                         onToggle = { viewModel.onMirrorToggleRequested(Destination.YT_MUSIC, it) },
+                        status = likeStatus,
+                        onRetry = { viewModel.onRetryLikeMirror(Destination.YT_MUSIC) },
                     )
                     com.stash.feature.settings.components.YouTubeHistorySyncSection(
                         enabled = uiState.ytHistoryEnabled,
@@ -314,7 +334,7 @@ fun SettingsAccountsScreen(
         }
         AccountConnectionCard(
             serviceName = "Discord",
-            icon = Icons.Rounded.Forum,
+            icon = ImageVector.vectorResource(UiR.drawable.ic_brand_discord),
             accentColor = androidx.compose.ui.graphics.Color(0xFF5865F2), // Discord blurple
             authState = uiState.discordAuthState,
             onConnect = { showDiscordRisk = true },
@@ -336,6 +356,7 @@ fun SettingsAccountsScreen(
         // storage: same job, and users commonly run both.
         val scrobbleFirstArtistOnly by viewModel.scrobbleFirstArtistOnly.collectAsStateWithLifecycle()
         val mirrorLastFm by viewModel.mirrorLikesLastFm.collectAsStateWithLifecycle()
+        val lastFmLikeStatus by viewModel.likeStatusLastFm.collectAsStateWithLifecycle()
         val lastFmUriHandler = androidx.compose.ui.platform.LocalUriHandler.current
         val drainMessage = uiState.scrobbleDrainResult?.let { result ->
             androidx.compose.runtime.LaunchedEffect(result) {
@@ -364,6 +385,8 @@ fun SettingsAccountsScreen(
             onFirstArtistOnlyChange = viewModel::onScrobbleFirstArtistOnlyChanged,
             loveEnabled = mirrorLastFm,
             onLoveToggle = { viewModel.onMirrorToggleRequested(Destination.LAST_FM, it) },
+            loveStatus = lastFmLikeStatus,
+            onLoveRetry = { viewModel.onRetryLikeMirror(Destination.LAST_FM) },
         )
 
         val listenBrainzState by viewModel.listenBrainzState.collectAsStateWithLifecycle()
@@ -381,9 +404,26 @@ fun SettingsAccountsScreen(
         )
 
         // Dropbox / OneDrive / Google Drive: the user's own music in their cloud
-        // storage. Hidden in a build without provider keys.
-        com.stash.feature.settings.cloud.CloudAccountsSection(
-            viewModel = androidx.hilt.navigation.compose.hiltViewModel(),
-        )
+        // storage. Hidden in a build without provider keys. One column, spaced as
+        // the page is, so Your Stash can bring the whole section into view.
+        val cloudSection = remember { BringIntoViewRequester() }
+        Column(
+            modifier = Modifier.bringIntoViewRequester(cloudSection),
+            verticalArrangement = Arrangement.spacedBy(SettingsGroupGap),
+        ) {
+            com.stash.feature.settings.cloud.CloudAccountsSection(
+                viewModel = androidx.hilt.navigation.compose.hiltViewModel(),
+            )
+        }
+        if (focusCloud) {
+            // Once: not again after a rotation, a sign-in screen, or when Back returns here.
+            LaunchedEffect(Unit) {
+                if (cloudFocused) return@LaunchedEffect
+                cloudFocused = true
+                // A frame first, so the cards above are laid out and the scroll lands on the section.
+                withFrameNanos { }
+                cloudSection.bringIntoView()
+            }
+        }
     }
 }

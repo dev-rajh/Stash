@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="app/src/main/res/mipmap-xxxhdpi/ic_launcher.png" alt="Stash app icon" width="120" />
+<img src="docs/readme/logo.png" alt="Stash app icon" width="120" />
 
 # Stash (stashfm.app)
 
@@ -196,7 +196,7 @@ Flip **Download** on (Sync tab) and your playlists get saved to your phone so th
 <summary><b>Where does the FLAC come from?</b></summary>
 <br>
 
-Qobuz and Tidal. Stash looks every song up there. If you have a Qobuz account you can connect it in Settings and it uses yours. If not, it uses the project's relays, which hand your phone a link and the audio comes straight from Qobuz or Tidal. Everyone gets 500 lossless songs a day, which is a lot. No lossless copy? It plays AAC or Opus instead, and Now Playing tells you where it came from. The full details are in [PRIVACY.md](PRIVACY.md#where-lossless-comes-from).
+Qobuz and Tidal. Stash looks every song up there. If you have a Qobuz account you can connect it in Settings and it uses yours. If not, it uses the project's relays, which hand your phone a link and the audio comes straight from Qobuz or Tidal. Everyone gets 300 lossless songs a day, which is a lot. No lossless copy? It plays AAC or Opus instead, and Now Playing tells you where it came from. The full details are in [PRIVACY.md](PRIVACY.md#where-lossless-comes-from).
 
 </details>
 
@@ -280,7 +280,7 @@ Can't donate? A star, a bug report or telling a friend helps just as much.
 
 **Code:** pull requests welcome. [CONTRIBUTING.md](CONTRIBUTING.md) has how to build it and a map of the code. For anything big, open an issue first so we can talk it through.
 
-**Translations:** want Stash in your language? Join the [Crowdin project](https://crowdin.com/project/stash-music-player) and [ask for translator access here](https://docs.google.com/forms/d/e/1FAIpQLSexDpqAvK82QlYYpC8J0ukwVXkzOQSjC8V10SPVbj1ug0ojow/viewform).
+**Translations:** want Stash in your language? [Ask for translator access here](https://docs.google.com/forms/d/e/1FAIpQLSexDpqAvK82QlYYpC8J0ukwVXkzOQSjC8V10SPVbj1ug0ojow/viewform) and then access the Weblate Project [here](https://weblate.paraliyzed.net/projects/stash-music-app/).
 
 **Security:** found a hole? Please follow [SECURITY.md](SECURITY.md) instead of opening a public issue.
 

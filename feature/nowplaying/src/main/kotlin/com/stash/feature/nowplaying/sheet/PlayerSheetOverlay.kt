@@ -81,6 +81,8 @@ fun PlayerSheetOverlay(
     state: PlayerSheetState,
     onNavigateToArtist: (id: String, name: String, avatarUrl: String?, focusAlbum: String?) -> Unit,
     onNavigateToAlbum: (albumId: String, name: String, artUrl: String?, artistName: String) -> Unit,
+    /** "Find a better match": open Failed Matches on this (just flagged) song, its finder searching. */
+    onFixMatch: (trackId: Long) -> Unit,
     onNavigateToPlaylist: (Long) -> Unit = {},
     onNavigateToOfflineArtist: (String) -> Unit = {},
     modifier: Modifier = Modifier,
@@ -128,6 +130,7 @@ fun PlayerSheetOverlay(
                     onDismiss = state::collapse,
                     onNavigateToArtist = onNavigateToArtist,
                     onNavigateToAlbum = onNavigateToAlbum,
+                    onFixMatch = onFixMatch,
                     onNavigateToPlaylist = onNavigateToPlaylist,
                     onNavigateToOfflineArtist = onNavigateToOfflineArtist,
                     viewModel = viewModel,
@@ -211,7 +214,13 @@ private fun SheetCard(state: PlayerSheetState, content: @Composable () -> Unit) 
                     }
                 },
         ) {
-            CompositionLocalProvider(LocalNowPlayingShown provides !parked, content = content)
+            // Now Playing's text-block spacing: the production values, or a debug build's live tuner
+            // overrides (tools/np-tuner). Read once here for the whole player.
+            CompositionLocalProvider(
+                LocalNowPlayingShown provides !parked,
+                com.stash.feature.nowplaying.ui.LocalNpSpacing provides com.stash.feature.nowplaying.ui.rememberNpSpacing(),
+                content = content,
+            )
         }
     }
 }

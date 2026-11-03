@@ -15,6 +15,7 @@ import com.stash.core.data.db.dao.DiscoveryQueueDao
 import com.stash.core.data.db.dao.StashMixRecipeDao
 import com.stash.core.data.discovery.GenreCatalog
 import com.stash.core.data.discovery.HomeDiscoveryRepository
+import com.stash.core.data.home.HomeShownSongs
 import com.stash.core.data.mix.MixBuildState
 import com.stash.core.data.mix.mixBuildState
 import com.stash.core.data.prefs.DownloadNetworkPreference
@@ -44,6 +45,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
@@ -90,6 +92,7 @@ class HomeViewModel @Inject constructor(
     private val homeDiscoveryRepository: HomeDiscoveryRepository,
     private val losslessSourceHealth: com.stash.core.media.streaming.LosslessSourceHealth,
     private val losslessAvailability: com.stash.data.download.lossless.LosslessAvailability,
+    private val shownSongs: HomeShownSongs,
     @ApplicationContext private val context: Context,
 ) : ViewModel() {
 
@@ -189,6 +192,34 @@ class HomeViewModel @Inject constructor(
 
     fun setHeroMinimized(minimized: Boolean) {
         _heroMinimized.value = minimized
+    }
+
+    init {
+        publishDailyDiscoverSongs()
+    }
+
+    /**
+     * Daily Discover's songs while its hero is on Home (Discover shown, the hero not minimized): "Because you like"
+     * leaves them out of its rows as they're shown ([HomeShownSongs]), and has them back once it isn't. The playlist
+     * is the hero's: the first built-in recipe's (homePlaylistFlow).
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private fun publishDailyDiscoverSongs() {
+        viewModelScope.launch {
+            combine(
+                recipeDao.observeAll().map { recipes ->
+                    recipes.filter { it.isBuiltin }.sortedBy { it.id }.firstNotNullOfOrNull { it.playlistId }
+                },
+                homeSectionsPreference.visibleSections.map { com.stash.core.data.prefs.HomeSection.DISCOVER in it },
+                _heroMinimized,
+            ) { playlistId, discoverShown, minimized -> playlistId.takeIf { discoverShown && !minimized } }
+                .distinctUntilChanged()
+                .flatMapLatest { id -> if (id == null) flowOf(emptyList<com.stash.core.model.Track>()) else musicRepository.getTracksByPlaylist(id) }
+                .map { tracks -> tracks.map { it.title to it.artist } }
+                .distinctUntilChanged()
+                .catch { e -> Log.w(TAG, "Daily Discover's songs for Home's other shelves didn't load: ${e.message}") }
+                .collect { songs -> shownSongs.publish(HomeShownSongs.DAILY_DISCOVER, songs) }
+        }
     }
 
     /** Everything derived from the playlists + recipe streams in one holder. */
@@ -360,7 +391,7 @@ class HomeViewModel @Inject constructor(
                             flowOf(LikedCardState(trackCount = 0))
                         } else {
                             combine(
-                                likedPlaylists.map { musicRepository.getTracksByPlaylist(it.id) },
+                                likedPlaylists.map { musicRepository.getShownTracksByPlaylist(it.id) },
                             ) { arrays ->
                                 LikedCardState(
                                     trackCount = arrays.flatMap { it }.distinctBy { it.id }.size,
@@ -400,7 +431,7 @@ class HomeViewModel @Inject constructor(
      * account — is exactly what that user still needs to do.
      */
     private val losslessOfflineFlow = combine(
-        losslessSourceHealth.qbdlxLooksDown,
+        losslessSourceHealth.losslessLooksDown,
         losslessAvailability.anyUserOwned,
         losslessPrefs.enabled,
         losslessPrefs.losslessOfflineDismissed,
@@ -734,10 +765,6 @@ class HomeViewModel @Inject constructor(
         }
     }
 
-    /**
-     * Hide (or unhide) a mix's playlist from the Home rails. Hiding unpins it;
-     * showing pins it, so it leads its rail (see MixRail.pinnedThenFreshest).
-     */
     /** Today in the phone's time zone: a rotation flips at local midnight. */
     private fun today(): Long = java.time.LocalDate.now().toEpochDay()
 
@@ -751,16 +778,17 @@ class HomeViewModel @Inject constructor(
         }
     }
 
-    fun setHideFromHome(playlistId: Long, hidden: Boolean) {
+    /** Hide a mix's playlist from the Home rails; it drops its favorite (the pin) too. */
+    fun hideFromHome(playlistId: Long) {
         viewModelScope.launch {
-            playlistDao.setHomeVisibility(playlistId, hidden, if (hidden) null else System.currentTimeMillis())
+            playlistDao.setHomeVisibility(playlistId, hidden = true, pinnedAt = null)
         }
     }
 
     /**
      * Pin/unpin a playlist on the "Your playlists" rail (Home-side unpin
      * sheet). Goes through the repository — deliberately unlike
-     * [setHideFromHome]'s DAO-direct write above — because Library's sheet
+     * [hideFromHome]'s DAO-direct write above — because Library's sheet
      * shares the same repository write path (it can't reach the DAO).
      */
     fun setPinnedToHome(playlistId: Long, pinned: Boolean) {

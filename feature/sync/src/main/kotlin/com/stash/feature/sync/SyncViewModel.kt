@@ -1,6 +1,5 @@
 package com.stash.feature.sync
 
-import android.text.format.DateUtils
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.stash.core.auth.TokenManager
@@ -17,6 +16,7 @@ import com.stash.core.data.sync.DayOfWeekSet
 import com.stash.core.data.sync.SyncScheduler
 import com.stash.core.data.sync.SyncStateManager
 import com.stash.core.data.sync.toDisplayStatus
+import com.stash.core.data.sync.unreadPlaylistsIn
 import com.stash.core.model.SyncDisplayStatus
 import com.stash.data.download.files.LibrarySizeHolder
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -28,6 +28,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.mapLatest
 import kotlinx.coroutines.flow.stateIn
@@ -61,7 +62,14 @@ data class SyncHistoryInfo(
      * interruption (process kill), and genuine failure.
      */
     val displayStatus: SyncDisplayStatus = SyncDisplayStatus.Idle,
-)
+) {
+    /**
+     * The playlists this run listed but couldn't read, by name. Decoded once per
+     * record from [diagnostics], not on every recomposition of the History row
+     * (its screen recomposes with each progress tick of a running sync).
+     */
+    val unreadPlaylists: com.stash.core.data.sync.UnreadPlaylists = unreadPlaylistsIn(diagnostics)
+}
 
 /**
  * Full UI state for the Sync screen.
@@ -78,6 +86,15 @@ data class SpotifySyncPlaylist(
     val artUrl: String? = null,
     val hideFromHome: Boolean = false,
     val pinnedToHomeAt: Long? = null,
+    /** The playlist's Save switch (#474's keep_offline): kept on the phone in either mode. */
+    val keepOffline: Boolean = false,
+    /** Taken out of the library on its account's page: listed there only, so it can come back. */
+    val userHidden: Boolean = false,
+    /** When the playlist first arrived (epoch ms): the Sync tab's covers lead with the newest. */
+    val dateAdded: Long = 0L,
+    /** A mix that can stack ([com.stash.core.data.sync.MixStacking]), and whether it does. */
+    val stackable: Boolean = false,
+    val stackSongs: Boolean = false,
 )
 
 /**
@@ -95,6 +112,15 @@ data class YouTubeSyncPlaylist(
     val artUrl: String? = null,
     val hideFromHome: Boolean = false,
     val pinnedToHomeAt: Long? = null,
+    /** The playlist's Save switch (#474's keep_offline): kept on the phone in either mode. */
+    val keepOffline: Boolean = false,
+    /** Taken out of the library on its account's page: listed there only, so it can come back. */
+    val userHidden: Boolean = false,
+    /** When the playlist first arrived (epoch ms): the Sync tab's covers lead with the newest. */
+    val dateAdded: Long = 0L,
+    /** A mix that can stack ([com.stash.core.data.sync.MixStacking]), and whether it does. */
+    val stackable: Boolean = false,
+    val stackSongs: Boolean = false,
 )
 
 data class SyncUiState(
@@ -103,12 +129,14 @@ data class SyncUiState(
     val syncPreferences: SyncPreferences = SyncPreferences(),
     val spotifyConnected: Boolean = false,
     val youTubeConnected: Boolean = false,
+    val soundCloudConnected: Boolean = false,
     val recentSyncs: List<SyncHistoryInfo> = emptyList(),
     val isSyncing: Boolean = false,
     /** Spotify playlists available for sync preference toggles. */
     val spotifyPlaylists: List<SpotifySyncPlaylist> = emptyList(),
     /** YouTube Music playlists available for sync preference toggles. */
     val youTubePlaylists: List<YouTubeSyncPlaylist> = emptyList(),
+    val soundCloudPlaylists: List<YouTubeSyncPlaylist> = emptyList(),
     /**
      * Per-source sync modes. Each service's Sync Preferences card
      * renders its own Refresh/Accumulate chip row bound to one of
@@ -148,8 +176,12 @@ data class SyncUiState(
     val flaggedCount: Int = 0,
 
     // -- Hero card: last-sync metadata ----------------------------------------
-    /** Relative time string for the most recent sync, e.g. "2 hours ago". Empty if never synced. */
-    val lastSyncRelativeTime: String = "",
+    /**
+     * When the most recent sync finished ([syncedAt]: its start while it has no real end), or
+     * null if never synced. The screen words it ("synced 3 minutes ago") as it draws, against a clock that
+     * ticks while the tab is on screen: [rememberSyncedAgo].
+     */
+    val lastSyncFinishedAt: Long? = null,
     /** New tracks the most recent sync added, or null if never synced. */
     val lastSyncTrackCount: Int? = null,
     /** Short health label: "✓ healthy", "! partial", "× failed", or "". */
@@ -173,6 +205,17 @@ data class SyncUiState(
      * step with the displayed "Last sync …" line.
      */
     val hasEverSynced: Boolean = false,
+    /**
+     * The first-sync sheet ("How should your music arrive?") is up. A new
+     * install's first Sync asks this before it runs; see [SyncViewModel.onSyncNow].
+     */
+    val showArrivalSheet: Boolean = false,
+    /**
+     * "Save to this phone" was picked on the first-sync sheet: the screen opens
+     * this source's playlists so the user can choose what to download, then
+     * clears it with [SyncViewModel.onManageOpened].
+     */
+    val openManageFor: SyncSource? = null,
 )
 
 /**
@@ -229,7 +272,53 @@ class SyncViewModel @Inject constructor(
      * and forwards the user's toggle.
      */
     private val lastFmRecommendationSource: com.stash.core.data.mix.LastFmRecommendationSource,
+    /** "Play something new" on the synced hero. */
+    private val playerRepository: com.stash.core.media.PlayerRepository,
+    /** Live progress of the songs downloading now, for the Sync tab's Downloads row. */
+    private val downloadManager: com.stash.data.download.DownloadManager,
 ) : ViewModel() {
+
+    /** The Sync tab's Downloads row: how many run, wait and failed, and how far the running ones are. */
+    data class DownloadsSummary(
+        val downloading: Int = 0,
+        val waiting: Int = 0,
+        val failed: Int = 0,
+        /** Mean progress of the songs downloading now, 0..1; null while none runs. */
+        val progress: Float? = null,
+    )
+
+    private val progressByTrackId = MutableStateFlow<Map<Long, Float>>(emptyMap())
+
+    val downloadsSummary: StateFlow<DownloadsSummary> = combine(
+        downloadQueueDao.observeActiveDownloadRows(),
+        downloadQueueDao.getFailedDownloads(),
+        progressByTrackId,
+    ) { active, failed, progress ->
+        val running = active.filter { it.status == com.stash.core.model.DownloadStatus.IN_PROGRESS }
+        DownloadsSummary(
+            downloading = running.size,
+            waiting = active.size - running.size,
+            failed = failed.size,
+            progress = running.takeIf { it.isNotEmpty() }
+                ?.map { progress[it.trackId] ?: 0f }?.average()?.toFloat(),
+        )
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), DownloadsSummary())
+
+    init {
+        // A song's last progress tick, dropped once its download ends either way (as the Downloads screen keeps it).
+        viewModelScope.launch {
+            downloadManager.progress.collect { update ->
+                progressByTrackId.value = when (update.status) {
+                    com.stash.data.download.model.DownloadStatus.COMPLETED,
+                    com.stash.data.download.model.DownloadStatus.FAILED,
+                    com.stash.data.download.model.DownloadStatus.UNMATCHED,
+                    com.stash.data.download.model.DownloadStatus.DEFERRED,
+                    -> progressByTrackId.value - update.trackId
+                    else -> progressByTrackId.value + (update.trackId to update.progress)
+                }
+            }
+        }
+    }
 
     /**
      * Reactive count of blocked songs, displayed as a badge on the
@@ -452,6 +541,7 @@ class SyncViewModel @Inject constructor(
         observeLastSync()
         observeSpotifyPlaylists()
         observeYouTubePlaylists()
+        observeSoundCloud()
         observeUnmatchedCount()
         observeFlaggedCount()
         observeSyncStatusCard()
@@ -468,13 +558,96 @@ class SyncViewModel @Inject constructor(
             android.util.Log.i("SyncViewModel", "onSyncNow ignored — sync already in progress")
             return
         }
+        viewModelScope.launch {
+            if (needsArrivalChoice()) {
+                _uiState.update { it.copy(showArrivalSheet = true) }
+                return@launch
+            }
+            startSync()
+        }
+    }
+
+    private suspend fun startSync() {
         // The Wi-Fi rule this screen shows: what a sync queued offline downloads under.
         val wifiOnly = _uiState.value.syncPreferences.wifiOnly
-        val pausedAfterUndo = _uiState.value.syncPreferences.autoSyncPausedAfterUndo
+        // A manual Sync ends the pause "Undo last sync" put on Auto-sync.
+        if (_uiState.value.syncPreferences.autoSyncPausedAfterUndo) {
+            syncPreferencesManager.setAutoSyncPausedAfterUndo(false)
+        }
+        syncScheduler.triggerManualSync(wifiOnly)
+    }
+
+    /**
+     * Whether this Sync is a new install's first, which asks how music should
+     * arrive before it runs. New installs start in Download mode with every
+     * playlist switched off, so a first sync used to finish with nothing on Home
+     * or in Library and users thought it had failed (2026-10-29). An install that
+     * has synced before keeps its mode and switches and is never asked; it's
+     * marked answered here so the history read happens once.
+     */
+    private suspend fun needsArrivalChoice(): Boolean {
+        if (syncPreferencesManager.arrivalChosen.first()) return false
+        if (syncHistoryDao.getLatest() != null) {
+            syncPreferencesManager.markArrivalChosen()
+            return false
+        }
+        return true
+    }
+
+    /**
+     * The first-sync sheet's answer. "Stream everything" ([streamEverything])
+     * is Stream only plus new playlists on Home: the whole account shows up
+     * after one sync and nothing downloads. "Save to this phone" is Download
+     * mode, and opens the first account's playlists so the user can pick what
+     * to save while the sync reads them. Either way the sync starts now.
+     */
+    fun onArrivalChosen(streamEverything: Boolean) {
+        _uiState.update { it.copy(showArrivalSheet = false) }
         viewModelScope.launch {
-            // A manual Sync ends the pause "Undo last sync" put on Auto-sync.
-            if (pausedAfterUndo) syncPreferencesManager.setAutoSyncPausedAfterUndo(false)
-            syncScheduler.triggerManualSync(wifiOnly)
+            // Written before the sync starts: DiffWorker reads both once per run.
+            streamingPreference.setEnabled(streamEverything)
+            syncPreferencesManager.setArrivalChosen(pinNewPlaylists = streamEverything)
+            startSync()
+            if (!streamEverything) {
+                val state = _uiState.value
+                val source = when {
+                    state.spotifyConnected -> SyncSource.SPOTIFY
+                    state.youTubeConnected -> SyncSource.YOUTUBE
+                    state.soundCloudConnected -> SyncSource.SOUNDCLOUD
+                    else -> null
+                }
+                _uiState.update { it.copy(openManageFor = source) }
+            }
+        }
+    }
+
+    /** The first-sync sheet was dismissed without an answer: nothing runs, it asks again next time. */
+    fun onArrivalDismissed() {
+        _uiState.update { it.copy(showArrivalSheet = false) }
+    }
+
+    /** The screen has navigated to [SyncUiState.openManageFor]. */
+    fun onManageOpened() {
+        _uiState.update { it.copy(openManageFor = null) }
+    }
+
+    /**
+     * A playlist's Save switch: keep it on this phone. The playlist page's
+     * Download switch does the same thing ([MusicRepository.setPlaylistDownload],
+     * #474), so the two always agree. In Download mode a saved playlist is also
+     * switched on for sync, as the old switch was, so later syncs download what
+     * it gains and it stays on Home; off there turns sync off too. A mix is
+     * never pinned by this: on a mix the pin is its Favorite (see
+     * [com.stash.core.data.db.dao.PlaylistDao.setSyncEnabledAndPin]).
+     */
+    fun onSavePlaylist(playlistId: Long, save: Boolean) {
+        viewModelScope.launch {
+            // Saving one that's out of the library brings it back: saved is in.
+            if (save) playlistDao.setUserHidden(playlistId, false)
+            if (save && !streamingPreference.current()) {
+                playlistDao.setSyncEnabledAndPin(playlistId, true, System.currentTimeMillis())
+            }
+            musicRepository.setPlaylistDownload(playlistId, save)
         }
     }
 
@@ -491,43 +664,41 @@ class SyncViewModel @Inject constructor(
         viewModelScope.launch { syncScheduler.cancelSync() }
     }
 
-    /** Toggle sync_enabled for a specific Spotify playlist. */
-    fun onTogglePlaylistSync(playlistId: Long, enabled: Boolean) {
+    /**
+     * A playlist's "In your library" check, on its account's page: the way to
+     * turn off what a sync brought in and isn't wanted (2026-10-29). Out of the
+     * library it leaves Home, Library and Songs, and later syncs leave it alone;
+     * one being saved stops downloading too (songs already on the phone stay,
+     * as with the Download switch). Back in, it shows again.
+     */
+    /**
+     * "Play something new": the newest mix, from its first song. The hero that offers it only
+     * shows in Stream only, where every song plays without a download.
+     */
+    fun onPlayPlaylist(playlistId: Long, name: String) {
         viewModelScope.launch {
-            // The switch decides Home too: sync on pins the playlist to the Your
-            // playlists rail, sync off unpins it (the user's rule, 2026-09-07).
-            playlistDao.setSyncEnabledAndPin(playlistId, enabled, System.currentTimeMillis())
-            // v0.9.21: when DISABLING, sweep pending download_queue rows
-            // whose tracks no longer belong to any sync-enabled playlist.
-            // Without this, deselecting a playlist leaves its in-flight
-            // downloads draining — confusing because the user expects
-            // "deselect" to actually stop downloads. The query is
-            // DELETE-with-NOT-IN so tracks shared with another enabled
-            // playlist (e.g. same track in Liked Songs on both services)
-            // stay queued.
-            if (!enabled) {
-                val cancelled = downloadQueueDao.cancelDownloadsWithNoEnabledPlaylist()
-                if (cancelled > 0) {
-                    android.util.Log.i(
-                        "SyncToggle",
-                        "cancelled $cancelled orphan PENDING download(s) after disable",
-                    )
-                }
+            val tracks = musicRepository.getTracksByPlaylist(playlistId).first()
+            if (tracks.isNotEmpty()) {
+                playerRepository.setQueue(
+                    tracks,
+                    startIndex = 0,
+                    source = com.stash.core.model.PlaybackSource.Playlist(playlistId, name),
+                )
             }
         }
     }
 
-    /**
-     * Toggle hide_from_home for a specific playlist. Unlike [onTogglePlaylistSync]
-     * this does NOT sweep downloads — hiding a mix from Home has nothing to do
-     * with what's queued or synced.
-     */
-    fun onToggleHideFromHome(playlistId: Long, hidden: Boolean) {
-        // Showing pins the mix so it leads its Home rail; hiding unpins it. The
-        // rail shows only its 12 freshest mixes otherwise, and "Shown on Home"
-        // was a promise it kept for none of the others (Cup Noodle Radio, 2026-09-07).
+    /** A mix's Stack switch: keep every song it brings, from the next sync on. */
+    fun onSetStack(playlistId: Long, on: Boolean) {
+        viewModelScope.launch { playlistDao.setStackSongs(playlistId, on) }
+    }
+
+    fun onSetInLibrary(playlistId: Long, inLibrary: Boolean) {
         viewModelScope.launch {
-            playlistDao.setHomeVisibility(playlistId, hidden, if (hidden) null else System.currentTimeMillis())
+            if (!inLibrary) {
+                musicRepository.setPlaylistDownload(playlistId, false)
+            }
+            playlistDao.setUserHidden(playlistId, !inLibrary)
         }
     }
 
@@ -618,6 +789,7 @@ class SyncViewModel @Inject constructor(
             when (source) {
                 MusicSource.YOUTUBE -> syncPreferencesManager.setYoutubeSyncMode(SyncMode.REFRESH)
                 MusicSource.SPOTIFY -> syncPreferencesManager.setSpotifySyncMode(SyncMode.REFRESH)
+                MusicSource.SOUNDCLOUD -> syncPreferencesManager.setSoundCloudSyncMode(SyncMode.REFRESH)
                 MusicSource.LOCAL, MusicSource.BOTH, MusicSource.CLOUD -> Unit
             }
         }
@@ -757,13 +929,6 @@ class SyncViewModel @Inject constructor(
         viewModelScope.launch {
             syncHistoryDao.getRecentSyncs(limit = 1).collect { entities ->
                 val latest = entities.firstOrNull()?.toInfo()
-                val relativeTime = latest?.let {
-                    DateUtils.getRelativeTimeSpanString(
-                        it.startedAt,
-                        System.currentTimeMillis(),
-                        DateUtils.MINUTE_IN_MILLIS,
-                    ).toString()
-                } ?: ""
                 val healthLabel = when (latest?.displayStatus) {
                     null -> ""
                     SyncDisplayStatus.Success -> "✓"
@@ -787,7 +952,7 @@ class SyncViewModel @Inject constructor(
                 }
                 _uiState.update { state ->
                     state.copy(
-                        lastSyncRelativeTime = relativeTime,
+                        lastSyncFinishedAt = latest?.syncedAt(),
                         // What the sync FOUND, not what it downloaded. In Online
                         // mode nothing downloads, so tracksDownloaded is always 0
                         // and the headline read "0 tracks" after a run that added
@@ -818,10 +983,30 @@ class SyncViewModel @Inject constructor(
                                 artUrl = e.artUrl,
                                 hideFromHome = e.hideFromHome,
                                 pinnedToHomeAt = e.pinnedToHomeAt,
+                                keepOffline = e.keepOffline,
+                                userHidden = e.userHidden,
+                                dateAdded = e.dateAdded.toEpochMilli(),
+                                stackable = com.stash.core.data.sync.MixStacking.showsSwitch(e.source, e.type, e.name, e.stackSongs),
+                                stackSongs = e.stackSongs,
                             )
                         }
                     )
                 }
+            }
+        }
+    }
+
+    private fun observeSoundCloud() {
+        viewModelScope.launch {
+            combine(tokenManager.soundCloudSession, playlistDao.getBySource(MusicSource.SOUNDCLOUD)) { session, entities ->
+                session to entities.filter { session != null && com.stash.core.data.sync.SoundCloudPlaylistIds.belongsTo(it.sourceId, session.userId) }
+            }.collect { (session, entities) ->
+                _uiState.update { state -> state.copy(soundCloudConnected = session != null,
+                    soundCloudPlaylists = entities.map { e ->
+                        YouTubeSyncPlaylist(id = e.id, name = e.name, trackCount = e.trackCount, type = e.type,
+                            syncEnabled = e.syncEnabled, artUrl = e.artUrl, keepOffline = e.keepOffline,
+                            userHidden = e.userHidden, dateAdded = e.dateAdded.toEpochMilli())
+                    }) }
             }
         }
     }
@@ -841,6 +1026,11 @@ class SyncViewModel @Inject constructor(
                                 artUrl = e.artUrl,
                                 hideFromHome = e.hideFromHome,
                                 pinnedToHomeAt = e.pinnedToHomeAt,
+                                keepOffline = e.keepOffline,
+                                userHidden = e.userHidden,
+                                dateAdded = e.dateAdded.toEpochMilli(),
+                                stackable = com.stash.core.data.sync.MixStacking.showsSwitch(e.source, e.type, e.name, e.stackSongs),
+                                stackSongs = e.stackSongs,
                             )
                         }
                     )

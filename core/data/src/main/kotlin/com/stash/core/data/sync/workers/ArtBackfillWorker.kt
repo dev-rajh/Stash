@@ -6,11 +6,12 @@ import androidx.hilt.work.HiltWorker
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingWorkPolicy
-import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import com.stash.core.data.audio.AudioDurationExtractor
+import com.stash.core.data.db.dao.PlaylistDao
 import com.stash.core.data.db.dao.TrackDao
 import com.stash.core.data.lastfm.LastFmApiClient
 import com.stash.core.data.lastfm.LastFmApiException
@@ -19,11 +20,13 @@ import com.stash.core.data.lastfm.LastFmCredentials
 import com.stash.core.data.lastfm.LastFmEnrichmentBackoff
 import com.stash.core.data.lastfm.LastFmLookupRules
 import com.stash.core.data.lastfm.LastFmTrackInfo
+import com.stash.core.data.prefs.DataSaverSnapshot
 import com.stash.core.model.YouTubeVideoId
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 
 /**
  * Backfill that repairs Discovery-pipeline metadata gaps. Three passes run
@@ -47,11 +50,10 @@ import kotlinx.coroutines.delay
  * ## Pass 3 — stream-only stubs
  * One `track.getInfo` per stub fills art and duration together.
  *
- * ## Pass 4 — `album`
- * Rows with no album (a Last.fm playlist's or a mix's songs arrive with only a
- * title and an artist) get the album `track.getInfo` names, filled only where
- * blank. Passes 1 and 3 fill it too from their own lookups; a row any pass
- * already asked about this run is not asked again.
+ * No pass fills an album: the one `track.getInfo` names is Last.fm's most
+ * scrobbled release, often a compilation ("Blinding Lights" on "Now 35" by
+ * Various Artists), not the song's own album. A row any pass already asked
+ * about this run is not asked again.
  *
  * ## Keeping the Last.fm traffic to what can fill something
  * This worker was most of the Last.fm proxy's traffic: it re-asked about the
@@ -75,6 +77,7 @@ class ArtBackfillWorker @AssistedInject constructor(
     @Assisted appContext: Context,
     @Assisted params: WorkerParameters,
     private val trackDao: TrackDao,
+    private val playlistDao: PlaylistDao,
     private val lastFmApiClient: LastFmApiClient,
     private val credentials: LastFmCredentials,
     private val audioDurationExtractor: AudioDurationExtractor,
@@ -99,12 +102,6 @@ class ArtBackfillWorker @AssistedInject constructor(
         private const val RETIRED_MIX_REFRESH_WORK_NAME = "stash_art_backfill_mix_refresh"
 
         private const val BATCH_SIZE = 500
-
-        /**
-         * The album pass's batch: smaller than the others, since a library's songs without an album
-         * can run to thousands and each is a Last.fm lookup through the proxy.
-         */
-        private const val ALBUM_BATCH_SIZE = 150
         private const val REQUEST_INTERVAL_MS = 220L
 
         /** Transient Last.fm failures in a row that end a pass's lookups (an outage). */
@@ -117,7 +114,8 @@ class ArtBackfillWorker @AssistedInject constructor(
          * anything to do ([ArtBackfillSchedule]); a cold start with nothing
          * new costs three small queries and no request.
          */
-        fun enqueueOneTime(context: Context) = enqueue(context, ExistingWorkPolicy.KEEP)
+        fun enqueueOneTime(context: Context) =
+            enqueue(context, ExistingWorkPolicy.KEEP, constraints(DataSaverSnapshot.isOn(context)))
 
         /**
          * After each [StashMixRefreshWorker] cycle, so freshly-created
@@ -127,19 +125,47 @@ class ArtBackfillWorker @AssistedInject constructor(
          * up the stubs the refresh just made (a run already under way may have
          * read its batch before they existed); the queued run does nothing if
          * there turns out to be nothing new.
+         *
+         * @param userAsked the refresh was of a mix the user made or refreshed by hand: its art comes
+         *   on any connection under Data saver too (their choice, like the refresh itself), and a run
+         *   waiting for Wi-Fi is replaced, not appended behind, or it would hold this one as well.
          */
-        fun enqueueFromMixRefresh(context: Context) = enqueue(context, ExistingWorkPolicy.APPEND_OR_REPLACE)
+        suspend fun enqueueFromMixRefresh(context: Context, userAsked: Boolean = false) {
+            val dataSaverOn = DataSaverSnapshot.isOn(context)
+            if (!userAsked || !dataSaverOn) {
+                enqueue(context, ExistingWorkPolicy.APPEND_OR_REPLACE, constraints(dataSaverOn))
+                return
+            }
+            val running = WorkManager.getInstance(context).getWorkInfosForUniqueWorkFlow(WORK_NAME).first()
+                .any { it.state == WorkInfo.State.RUNNING }
+            // A run under way keeps going and this one follows it; otherwise it takes the waiting one's place.
+            val policy = if (running) ExistingWorkPolicy.APPEND_OR_REPLACE else ExistingWorkPolicy.REPLACE
+            enqueue(context, policy, constraints(dataSaverOn = false))
+        }
 
-        private fun enqueue(context: Context, policy: ExistingWorkPolicy) {
-            val constraints = Constraints.Builder()
-                .setRequiredNetworkType(NetworkType.CONNECTED)
-                .build()
-            val work = OneTimeWorkRequestBuilder<ArtBackfillWorker>()
-                .setConstraints(constraints)
-                .build()
+        /**
+         * The Data saver switch flipped: a run still waiting for its network is queued again with the
+         * new constraint ([requeueIfWaiting]), so turning Data saver off lets a run held for Wi-Fi go
+         * on mobile data. A run under way, or none waiting, is left alone.
+         */
+        suspend fun requeueIfWaiting(context: Context, dataSaverOn: Boolean): Boolean =
+            WorkManager.getInstance(context).requeueIfWaiting(WORK_NAME, request(constraints(dataSaverOn)))
+
+        /**
+         * Any connection; only Wi-Fi while Data saver is on ([backgroundNetworkType]): a pass is up
+         * to [BATCH_SIZE] Last.fm look-ups nobody is waiting on.
+         */
+        internal fun constraints(dataSaverOn: Boolean): Constraints = Constraints.Builder()
+            .setRequiredNetworkType(backgroundNetworkType(dataSaverOn))
+            .build()
+
+        private fun request(constraints: Constraints) =
+            OneTimeWorkRequestBuilder<ArtBackfillWorker>().setConstraints(constraints).build()
+
+        private fun enqueue(context: Context, policy: ExistingWorkPolicy, constraints: Constraints) {
             val workManager = WorkManager.getInstance(context)
             workManager.cancelUniqueWork(RETIRED_MIX_REFRESH_WORK_NAME)
-            workManager.enqueueUniqueWork(WORK_NAME, policy, work)
+            workManager.enqueueUniqueWork(WORK_NAME, policy, request(constraints))
         }
     }
 
@@ -150,7 +176,6 @@ class ArtBackfillWorker @AssistedInject constructor(
             trackDao.findArtBackfillCandidates(1).firstOrNull()?.id,
             trackDao.findDurationBackfillCandidates(1).firstOrNull()?.id,
             trackDao.findStreamableMetadataBackfillCandidates(1).firstOrNull()?.id,
-            trackDao.findAlbumBackfillCandidates(1).firstOrNull()?.id,
         ).maxOrNull()
         val state = schedule.read()
         if (!ArtBackfillSchedule.shouldRun(state, newest, startedAt)) {
@@ -165,7 +190,7 @@ class ArtBackfillWorker @AssistedInject constructor(
         runArtPass(startedAt)
         runDurationPass()
         runStreamableMetadataPass(startedAt)
-        runAlbumPass(startedAt)
+        if (stats.artFilled > 0) refreshMixCovers()
         Log.i(
             TAG,
             "run done: lastfm network=${stats.network} cached=${stats.cached} " +
@@ -174,12 +199,32 @@ class ArtBackfillWorker @AssistedInject constructor(
         return Result.success()
     }
 
+    /**
+     * Rebuilds every Stash Mix's cover ([PlaylistDao.refreshMixCover]) after
+     * this run filled art. A mix refresh builds the cover from its songs' art
+     * when it links them, and fresh discovery stubs have none until this
+     * worker runs, so a Daily Discover made of them showed a blank cover on
+     * Home until its membership next changed. Cosmetic: a failure is logged.
+     */
+    private suspend fun refreshMixCovers() {
+        try {
+            playlistDao.getStashMixPlaylistIds().forEach { playlistDao.refreshMixCover(it) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "couldn't rebuild the mix covers", e)
+        }
+    }
+
     /** How the lookups of one run went, for the log line that proves the traffic. */
     private class Stats {
         var network = 0
         var cached = 0
         var unlookable = 0
         var transient = 0
+
+        /** Songs any pass gave art this run: the Stash Mix covers are rebuilt when there are some. */
+        var artFilled = 0
     }
 
     private var stats = Stats()
@@ -261,7 +306,6 @@ class ArtBackfillWorker @AssistedInject constructor(
         var transientInARow = 0
         for (row in candidates) {
             val lookup = if (lastFmUsable) lookUp(row.artist, row.title) else null
-            lookup?.info?.let { fillAlbum(row.id, it) }
             val artUrl = lookup?.info?.bestImageUrl?.takeIf { it.isNotBlank() } ?: youTubeArt(row.youtubeId)
             if (artUrl != null) {
                 runCatching { trackDao.fillMissingAlbumArtUrl(row.id, artUrl) }
@@ -289,6 +333,7 @@ class ArtBackfillWorker @AssistedInject constructor(
             if (lookup?.fromNetwork == true) delay(REQUEST_INTERVAL_MS)
         }
         backoff.recordFailures(LastFmEnrichmentBackoff.Pass.ART_BACKFILL, unfillable, startedAt)
+        stats.artFilled += filled
         Log.i(TAG, "art backfill done: filled=$filled unfillable=${unfillable.size} (backed off)")
     }
 
@@ -371,8 +416,7 @@ class ArtBackfillWorker @AssistedInject constructor(
             }
             transientInARow = 0
             val info = lookup.info
-            info?.let { fillAlbum(row.id, it) }
-            val art = info?.bestImageUrl?.takeIf { it.isNotBlank() }
+            val art =info?.bestImageUrl?.takeIf { it.isNotBlank() }
             val ms = info?.durationMs?.takeIf { it > 0 }
             art?.let { artUrl ->
                 runCatching { trackDao.fillMissingAlbumArtUrl(row.id, artUrl) }
@@ -394,58 +438,12 @@ class ArtBackfillWorker @AssistedInject constructor(
             if (art == null || ms == null) unfillable += row.id
         }
         backoff.recordFailures(LastFmEnrichmentBackoff.Pass.ART_BACKFILL, unfillable, startedAt)
+        stats.artFilled += artFilled
         Log.i(
             TAG,
             "stream-only backfill done: art=$artFilled duration=$durationFilled " +
                 "incomplete=${unfillable.size} (backed off)",
         )
-    }
-
-    /** Fills [trackId]'s album from [info] where it has none; true when there was one to fill. */
-    private suspend fun fillAlbum(trackId: Long, info: LastFmTrackInfo): Boolean {
-        val album = info.albumTitle ?: return false
-        runCatching { trackDao.fillMissingAlbum(trackId, album, info.albumArtist.orEmpty()) }
-            .onFailure { e ->
-                if (e is CancellationException) throw e
-                Log.w(TAG, "fillMissingAlbum failed for trackId=$trackId", e)
-            }
-        return true
-    }
-
-    /**
-     * Pass 4: rows with no album get the one Last.fm names. Rows passes 1 and 3
-     * asked about this run cost nothing here; the rest are rate-limited like
-     * [runArtPass]. A row Last.fm names no album for waits out
-     * [LastFmEnrichmentBackoff.Pass.ALBUM_BACKFILL]; five transient failures in
-     * a row end the pass.
-     */
-    private suspend fun runAlbumPass(startedAt: Long) {
-        if (!credentials.isConfigured) return
-        val candidates = backoff.candidateRows(
-            LastFmEnrichmentBackoff.Pass.ALBUM_BACKFILL, ALBUM_BATCH_SIZE, startedAt, { it.id },
-        ) { limit -> trackDao.findAlbumBackfillCandidates(limit) }
-        if (candidates.isEmpty()) {
-            Log.d(TAG, "no tracks need an album")
-            return
-        }
-        var filled = 0
-        val unfillable = mutableListOf<Long>()
-        var transientInARow = 0
-        for (row in candidates) {
-            val lookup = lookUp(row.artist, row.title)
-            if (lookup.fromNetwork) delay(REQUEST_INTERVAL_MS)
-            if (lookup.kind == Lookup.TRANSIENT) {
-                if (++transientInARow >= MAX_TRANSIENT_IN_A_ROW) {
-                    Log.w(TAG, "album pass: $transientInARow Last.fm failures in a row; stopping")
-                    break
-                }
-                continue
-            }
-            transientInARow = 0
-            if (lookup.info?.let { fillAlbum(row.id, it) } == true) filled++ else unfillable += row.id
-        }
-        backoff.recordFailures(LastFmEnrichmentBackoff.Pass.ALBUM_BACKFILL, unfillable, startedAt)
-        Log.i(TAG, "album backfill done: filled=$filled unknown=${unfillable.size} (backed off)")
     }
 
     /** The YouTube still for a row with a real video id, else null. */

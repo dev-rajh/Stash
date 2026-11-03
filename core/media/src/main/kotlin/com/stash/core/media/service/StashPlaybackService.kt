@@ -44,6 +44,7 @@ import com.stash.core.media.output.toSourceFormat
 import com.stash.core.media.streaming.PrefetchOrchestrator
 import com.stash.core.media.streaming.StashMediaSourceFactory
 import com.stash.core.media.streaming.StreamingMediaSourceFactory
+import com.stash.core.media.widget.skippedOne
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -87,6 +88,46 @@ class StashPlaybackService : MediaLibraryService() {
     @Inject lateinit var loudnessController: LoudnessController
     @Inject lateinit var hiResOutputController: com.stash.core.media.output.HiResOutputController
     @Inject lateinit var trackDao: TrackDao
+    @Inject lateinit var streamingPreference: com.stash.core.data.prefs.StreamingPreference
+
+    /**
+     * Download mode just switched on (review on #731): a stream already open keeps reading on the connection it has, and
+     * the next song may already be buffered from the network. So a playing stream stops, and a streamed next song is put
+     * back in its place, which rebuilds its source: opening it then refuses ([com.stash.core.media.streaming.DownloadModeGate])
+     * and the player skips it. A song from a file plays on undisturbed.
+     */
+    private fun dropStreamsForDownloadMode() {
+        val engine = crossfadeEngine ?: return
+        if (engine.isTransitioning()) engine.cancelTransition()
+        val p = engine.masterPlayer
+        val isStream = { item: androidx.media3.common.MediaItem? ->
+            com.stash.core.media.streaming.DownloadModeGate.isNetwork(item?.localConfiguration?.uri)
+        }
+        if (isStream(p.currentMediaItem)) {
+            android.util.Log.i("StashPlayback", "Download mode on: stopping the stream that was playing")
+            p.stop()
+            return
+        }
+        val next = p.currentMediaItemIndex + 1
+        if (next < p.mediaItemCount) {
+            val item = p.getMediaItemAt(next)
+            if (isStream(item)) {
+                p.removeMediaItem(next)
+                p.addMediaItem(next, item)
+            }
+        }
+    }
+
+    /** The Download / Stream only switch as last seen; null until the first read. */
+    @Volatile private var streamAllowedCache: Boolean? = null
+
+    /**
+     * False in Download mode. Read on the playback thread when a song is opened, so the
+     * very first read (a cold-start resume, before [onCreate]'s collector has run) reads
+     * the store once rather than guessing.
+     */
+    private fun streamAllowedNow(): Boolean =
+        streamAllowedCache ?: kotlinx.coroutines.runBlocking { streamingPreference.current() }.also { streamAllowedCache = it }
     @Inject lateinit var playlistDao: PlaylistDao
     @Inject lateinit var likeCoordinator: LikeCoordinator
     @Inject lateinit var likeTargetResolver: LikeTargetResolver
@@ -129,7 +170,30 @@ class StashPlaybackService : MediaLibraryService() {
     @Inject lateinit var playbackDiagnosticsLog: com.stash.core.media.diagnostics.PlaybackDiagnosticsLog
     @Inject lateinit var handoffPublisher: com.stash.core.media.handoff.HandoffPublisher
 
+    /** The home screen widget (bound in the app module, where the Glance widget lives). */
+    @Inject lateinit var widgetSink: com.stash.core.media.widget.NowPlayingWidgetSink
+
     companion object {
+        /**
+         * The intent that opens the app on the full player: what a tap on the media notification
+         * sends (the session activity) and what the home screen widget's cover and title send. Null
+         * when the package has no launcher activity.
+         */
+        fun openPlayerIntent(context: android.content.Context): Intent? =
+            context.packageManager.getLaunchIntentForPackage(context.packageName)?.component
+                ?.let { openPlayerIntent(it) }
+
+        /**
+         * An explicit intent to the launcher activity with its own action: a copy of the launcher
+         * intent would only bring the task forward (it matches the task's root intent, extras and
+         * all), and the activity would never hear it was asked for the player. SINGLE_TOP so a
+         * running activity gets it in onNewIntent.
+         */
+        fun openPlayerIntent(launchComponent: android.content.ComponentName): Intent =
+            Intent(ACTION_OPEN_PLAYER)
+                .setComponent(launchComponent)
+                .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+
         /**
          * The action of the intent a tap on the media notification sends: the app opens the full
          * player over whatever screen it shows (MainActivity turns it into its player deep link).
@@ -299,6 +363,15 @@ class StashPlaybackService : MediaLibraryService() {
     }
 
     private var mediaSession: MediaLibrarySession? = null
+
+    /** The home screen widget's feed; created in onCreate once the session exists. */
+    private var widgetFeed: com.stash.core.media.widget.NowPlayingWidgetFeed? = null
+
+    /**
+     * Set by a widget Next that started this service with nothing loaded: the next playback
+     * resumption starts one song on (see onStartCommand and onPlaybackResumption). Main thread only.
+     */
+    private var resumeSkipPending = false
 
     // Service-scoped CoroutineScope for the like-state observer + toggle
     // suspending calls. Cancelled in onDestroy so the observer doesn't leak
@@ -560,6 +633,8 @@ class StashPlaybackService : MediaLibraryService() {
         // ~1 MB; without this they surface as onPlayerError and skip-storm the
         // queue. Lossless (Kennyy/Squid) and local/downloaded items stay on the
         // default factory, unchanged.
+        // The YouTube refresh chain and Tidal's DASH sources check Download mode when they open, too.
+        streamingMediaSourceFactory.streamAllowed = ::streamAllowedNow
         val mediaSourceFactory = StashMediaSourceFactory(
             context = this,
             streamingFactory = streamingMediaSourceFactory,
@@ -591,6 +666,8 @@ class StashPlaybackService : MediaLibraryService() {
             // Tidal may answer with a DASH MPD, so with a server set placeholders
             // resolve before their media source is chosen.
             resolveBeforeSourcePick = tidalStreamResolver::enabledHint,
+            // Download mode plays only files on the phone, whatever queued a stream.
+            streamAllowed = ::streamAllowedNow,
             // The user's own cloud files: pre-authenticated links (Dropbox, OneDrive), or Google
             // Drive's alt=media with a bearer header through the OkHttp source below.
             cloudDataSourceFactory = com.stash.core.media.streaming.CloudResolvingDataSource.factory(
@@ -620,21 +697,14 @@ class StashPlaybackService : MediaLibraryService() {
         val player = engine.masterPlayer
         player.audioSessionId = audioSessionId
 
-        // Set session activity so tapping the media notification opens the app, on the full player.
-        // An explicit intent to the launcher activity with its own action: a copy of the launcher
-        // intent would only bring the task forward (it matches the task's root intent, extras and
-        // all), and the activity would never hear it was asked for the player. SINGLE_TOP so a
-        // running activity gets it in onNewIntent.
-        val launchComponent = packageManager.getLaunchIntentForPackage(packageName)?.component
-        val sessionActivity = if (launchComponent != null) {
-            val openPlayer = android.content.Intent(ACTION_OPEN_PLAYER)
-                .setComponent(launchComponent)
-                .addFlags(android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        // Set session activity so tapping the media notification opens the app, on the full player
+        // (see openPlayerIntent; the home screen widget's cover sends the same intent).
+        val sessionActivity = openPlayerIntent(this)?.let { openPlayer ->
             android.app.PendingIntent.getActivity(
                 this, 0, openPlayer,
                 android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE,
             )
-        } else null
+        }
 
         val sessionBuilder = MediaLibrarySession.Builder(this, player, StashSessionCallback())
             // #387: hand the platform session a throwaway copy of each artwork
@@ -674,7 +744,9 @@ class StashPlaybackService : MediaLibraryService() {
                                 )
                                 .setMaximumOutputDimension(SizedArtBitmapLoader.TARGET_PX)
                                 .build(),
-                            maxVariantPx = com.stash.core.common.DataSaverArtCap(this),
+                            maxVariantPx = com.stash.core.common.DataSaverArtCap(this) {
+                                com.stash.core.data.prefs.DataSaverSnapshot.isOn(this)
+                            },
                         ),
                     ),
                 ),
@@ -692,9 +764,26 @@ class StashPlaybackService : MediaLibraryService() {
         player.addListener(playerListener)
         listenedPlayer = player
 
+        // The home screen widget: follows the session's player (re-pointed at every `session.player = …`),
+        // pushing its song and play state on events, debounced. Logged at the wiring site.
+        widgetFeed = com.stash.core.media.widget.NowPlayingWidgetFeed(
+            scope = serviceScope,
+            sink = widgetSink,
+            clock = android.os.SystemClock::elapsedRealtime,
+        ).also { it.follow(session.player) }
+        android.util.Log.i("StashPlayback", "home screen widget feed attached")
+
         // Link Stash on the web: publish what plays for the linked browsers, on events only, for as long as this service
         // lives (spec §8.1). A no-op unless the feature is built in, linked and switched on.
         handoffPublisher.start(serviceScope)
+
+        serviceScope.launch {
+            streamingPreference.enabled.collect { allowed ->
+                val was = streamAllowedCache
+                streamAllowedCache = allowed
+                if (was == true && !allowed) dropStreamsForDownloadMode()
+            }
+        }
 
         // Cache crossfade prefs for the poll's prepare/fire decisions.
         serviceScope.launch { crossfadePreference.enabled.collect { onCrossfadePreference(it) } }
@@ -843,6 +932,7 @@ class StashPlaybackService : MediaLibraryService() {
         wrapper.attach(master, remote, positionMs, playWhenReady)
         wrapper.addListener(castListener)
         mediaSession?.player = wrapper
+        widgetFeed?.follow(wrapper)
         val idle = isPlayerIdle(wrapper.playWhenReady, wrapper.playbackState)
         castIdleSinceMs = if (idle) android.os.SystemClock.elapsedRealtime() else null
         playerIdle.value = idle
@@ -869,6 +959,7 @@ class StashPlaybackService : MediaLibraryService() {
         val master = crossfadeEngine?.masterPlayer
         if (master != null) {
             mediaSession?.player = master
+            widgetFeed?.follow(master)
             if (handoff.mediaItemIndex in 0 until master.mediaItemCount) {
                 master.seekTo(handoff.mediaItemIndex, handoff.positionMs)
             }
@@ -1138,6 +1229,16 @@ class StashPlaybackService : MediaLibraryService() {
             ) {
                 hiResOutputController.onSourceFormat(session, format.toSourceFormat())
             }
+
+            // The decoder's name, for the diagnostics bundle's log tail (#705: which one a phone picked)
+            override fun onAudioDecoderInitialized(
+                eventTime: AnalyticsListener.EventTime,
+                decoderName: String,
+                initializedTimestampMs: Long,
+                initializationDurationMs: Long,
+            ) {
+                android.util.Log.i("StashPlayback", "audio decoder: $decoderName")
+            }
         })
         return player
     }
@@ -1303,6 +1404,7 @@ class StashPlaybackService : MediaLibraryService() {
     @OptIn(UnstableApi::class)
     private fun onCrossfadeSwap(newMaster: ExoPlayer) {
         mediaSession?.player = newMaster
+        widgetFeed?.follow(newMaster)
         listenedPlayer?.removeListener(playerListener)
         newMaster.addListener(playerListener)
         listenedPlayer = newMaster
@@ -1368,6 +1470,8 @@ class StashPlaybackService : MediaLibraryService() {
             "idle-stop: no playback for ${IDLE_STOP_TIMEOUT_MS}ms — stopping service",
         )
         playbackSessionBus.onServiceStopping()
+        // The widget keeps the song, paused; its buttons now start the service again.
+        widgetFeed?.stopped()
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -1687,6 +1791,25 @@ class StashPlaybackService : MediaLibraryService() {
     }
 
     /**
+     * A home screen widget Next that has to start playback arrives as a Play media button carrying
+     * [com.stash.core.media.widget.WidgetMediaIntents.EXTRA_SKIP_FIRST] (see WidgetControls): skip one
+     * song here, then let Media3 handle the Play key as usual (it posts that work to the main
+     * thread, so the skip lands first). With nothing loaded (the service was stopped), the skip is
+     * left for onPlaybackResumption, which the Play key triggers.
+     */
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (com.stash.core.media.widget.WidgetMediaIntents.isSkipFirst(intent)) {
+            val player = mediaSession?.player
+            if (player != null && player.mediaItemCount > 0) {
+                if (player.isCommandAvailable(Player.COMMAND_SEEK_TO_NEXT)) player.seekToNext()
+            } else {
+                resumeSkipPending = true
+            }
+        }
+        return super.onStartCommand(intent, flags, startId)
+    }
+
+    /**
      * During a session, or while casting, the notification stays in the foreground even while paused (spec §5;
      * cast spec §3: a frozen process can't serve the speaker its next song). The ceiling: Android 16
      * still demotes a media service paused for 10 minutes (system `setFgsInactiveLocked`; device test 2026-09-25)
@@ -1719,6 +1842,10 @@ class StashPlaybackService : MediaLibraryService() {
         // path (swipe-away, system kill) so the repo never holds a controller
         // for a session that no longer exists.
         playbackSessionBus.onServiceStopping()
+        // Idempotent with performIdleStop's; covers swipe-away and every other exit.
+        widgetFeed?.stopped()
+        widgetFeed?.release()
+        widgetFeed = null
         likeObserverJob?.cancel()
         if (::handoffPublisher.isInitialized) handoffPublisher.stop()
         prefetchPollJob?.cancel()
@@ -1857,6 +1984,7 @@ class StashPlaybackService : MediaLibraryService() {
                 }.also { m.addListener(it) }
             }
             mediaSession?.player = wrapper
+            widgetFeed?.follow(wrapper)
             // Keep the notification (and so the foreground service) even while the one song is idle or failed.
             setShowNotificationForIdlePlayer(androidx.media3.session.MediaSessionService.SHOW_NOTIFICATION_FOR_IDLE_PLAYER_ALWAYS)
             updateCustomLayout()
@@ -1875,6 +2003,7 @@ class StashPlaybackService : MediaLibraryService() {
             m.stop()
             m.clearMediaItems() // PlayerRepositoryImpl puts the user's own queue back on sessionEnds
             mediaSession?.player = m
+            widgetFeed?.follow(m)
             setCrossfadeSuspended(false)
             hiResOutputController.setBitPerfectHeld(false)
             setShowNotificationForIdlePlayer(androidx.media3.session.MediaSessionService.SHOW_NOTIFICATION_FOR_IDLE_PLAYER_AFTER_STOP_OR_ERROR)
@@ -2608,10 +2737,15 @@ class StashPlaybackService : MediaLibraryService() {
                 // notification population (isForPlayback = false).
                 if (isForPlayback) showResumingForegroundNotification()
 
+                // A home screen widget Next on a stopped service: resume one song on (see onStartCommand).
+                val skipOne = isForPlayback && resumeSkipPending
+                if (isForPlayback) resumeSkipPending = false
+
                 // Preferred path: restore the full persisted queue at the
                 // saved track + position so next/prev work and playback
                 // continues where it stopped.
                 val plan = playbackResumer.buildResumePlan()
+                    ?.let { if (skipOne) it.skippedOne() else it }
                 if (plan != null) {
                     val items = plan.tracks.map { buildResumeItem(it) }
                     kotlinx.coroutines.withContext(Dispatchers.Main) {
