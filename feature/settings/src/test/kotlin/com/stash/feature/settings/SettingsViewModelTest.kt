@@ -94,6 +94,7 @@ class SettingsViewModelTest {
         streamingPreference = mockk(relaxed = true),
         crossfadePreference = mockk(relaxed = true),
         autoplayRadioPreference = autoplayRadioPreference,
+        headphonePreference = mockk(relaxed = true),
         databaseBackupManager = mockk(relaxed = true),
         sleepTimerController = mockk(relaxed = true),
         homeDiscoveryPreference = mockk(relaxed = true),
@@ -317,6 +318,18 @@ class SettingsViewModelTest {
         coVerify(exactly = 1) { homeSectionsPreference.setStartTab(StartTab.LIBRARY) }
         assertThat(vm.startTab.value).isEqualTo(StartTab.LIBRARY)
         job.cancel()
+    }
+
+    // -- Home layout: a drag's drop, and TalkBack's one-place moves -----------------------------
+
+    @Test
+    fun `a dropped home section is saved once, to the row it was dropped on`() = runTest {
+        val vm = newVm()
+        vm.onHomeSectionDropped(com.stash.core.data.prefs.HomeSection.RADIOS, to = 0)
+        vm.onHomeSectionMoved(com.stash.core.data.prefs.HomeSection.DISCOVER, up = false)
+        advanceUntilIdle()
+        coVerify(exactly = 1) { homeSectionsPreference.move(com.stash.core.data.prefs.HomeSection.RADIOS, to = 0) }
+        coVerify(exactly = 1) { homeSectionsPreference.move(com.stash.core.data.prefs.HomeSection.DISCOVER, up = false) }
     }
 
     // -- Restore: folder re-grant (A9) ---------------------------------------------------

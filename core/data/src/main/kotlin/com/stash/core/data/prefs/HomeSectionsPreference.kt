@@ -201,12 +201,23 @@ fun effectiveHomeSectionOrder(savedKeys: List<String>, promoted: Boolean): List<
  * is RECORD_MIXES, which goes wherever the card goes.
  */
 fun movedHomeSectionOrder(order: List<HomeSection>, section: HomeSection, up: Boolean): List<HomeSection>? {
+    val idx = order.filter { it != HomeSection.RECORD_MIXES }.indexOf(section)
+    if (idx < 0) return null
+    return movedHomeSectionOrder(order, section, to = if (up) idx - 1 else idx + 1)
+}
+
+/**
+ * [order] with [section] taken to [to], counted among the sections that have a place of their own (the Home layout
+ * editor's rows), the others closing up behind it: a drag's drop. The record's mixes go under the card again, so dropping
+ * "Your record" drops its mixes with it. Null when nothing moves: [section] is already at [to], [to] is off the list,
+ * [section] isn't in [order], or it's RECORD_MIXES, which goes wherever the card goes.
+ */
+fun movedHomeSectionOrder(order: List<HomeSection>, section: HomeSection, to: Int): List<HomeSection>? {
     if (section == HomeSection.RECORD_MIXES) return null
     val movable = order.filter { it != HomeSection.RECORD_MIXES }.toMutableList()
-    val idx = movable.indexOf(section)
-    val target = if (up) idx - 1 else idx + 1
-    if (idx < 0 || target !in movable.indices) return null
-    movable[idx] = movable[target].also { movable[target] = movable[idx] }
+    val from = movable.indexOf(section)
+    if (from < 0 || to !in movable.indices || to == from) return null
+    movable.add(to, movable.removeAt(from))
     return withRecordMixesUnderRecord(movable)
 }
 
@@ -247,7 +258,9 @@ internal val Context.homeSectionsDataStore: DataStore<Preferences> by preference
  * [HomeSection]; [hidden] removes sections from Home without forgetting
  * their position; [showLikedOnHome] adds the merged Liked Songs card to
  * the "Your playlists" section. Defaults preserve today's layout with
- * nothing hidden and no Liked card.
+ * nothing hidden and no Liked card. Also the two other browse choices in
+ * Settings > Appearance: the tab Stash opens on ([startTab]) and Search's
+ * mood and genre tiles ([searchBrowseOn]).
  */
 @Singleton
 class HomeSectionsPreference @Inject constructor(
@@ -257,6 +270,7 @@ class HomeSectionsPreference @Inject constructor(
     private val hiddenKey = stringPreferencesKey("home_sections_hidden")
     private val showLikedKey = booleanPreferencesKey("show_liked_on_home")
     private val communityOnKey = booleanPreferencesKey("community_on")
+    private val searchBrowseKey = booleanPreferencesKey("search_moods_genres")
     /** Set by any write of [orderKey]: a reorder ends the one-time Your listening promotion. */
     private val listeningPromotedKey = booleanPreferencesKey("your_listening_promoted_v1")
 
@@ -281,6 +295,15 @@ class HomeSectionsPreference @Inject constructor(
         prefs[communityOnKey] ?: false
     }.distinctUntilChanged().catch { emit(false) }
 
+    /**
+     * Settings > Appearance > Moods & genres in Search: the Moods & moments and Genres tiles Search shows before
+     * anything is typed (#823). On unless turned off (owner 2026-11-03: not everyone wants them); off, Search opens on
+     * the recent searches as it did before them, and nothing is read for them.
+     */
+    val searchBrowseOn: Flow<Boolean> = context.homeSectionsDataStore.data.map { prefs ->
+        prefs[searchBrowseKey] ?: true
+    }.distinctUntilChanged().catch { emit(true) }
+
     // Open Stash on (#428) lives in SharedPreferences, not the DataStore: launch reads it
     // synchronously before the first frame. Waiting on a DataStore read there held the
     // splash ~0.4 s longer on every cold start (Pixel 5, debug).
@@ -298,7 +321,7 @@ class HomeSectionsPreference @Inject constructor(
     /**
      * What Home actually renders: [order] minus [hidden], and minus Community while its switch is off.
      *
-     * All five flows here are deduped (the store re-emits on every unrelated
+     * The DataStore flows here are all deduped (the store re-emits on every unrelated
      * write) and catch to the same default the `map` already uses: they feed
      * `HomeViewModel`'s and `SettingsViewModel`'s `combine` directly, and a
      * DataStore IOException that terminated the chain would leave those screens
@@ -319,10 +342,23 @@ class HomeSectionsPreference @Inject constructor(
      * Swap [section] one slot up or down ([movedHomeSectionOrder]): "Your record" moves with its mixes, and the
      * mixes alone don't move (nothing is written).
      */
-    suspend fun move(section: HomeSection, up: Boolean) {
+    suspend fun move(section: HomeSection, up: Boolean) = saveMove(section) { current ->
+        movedHomeSectionOrder(current, section, up)
+    }
+
+    /**
+     * Take [section] to [to] among the sections that have a place of their own ([movedHomeSectionOrder]): a drag's drop in
+     * Settings › Home layout, saved once, at the drop. "Your record" goes with its mixes; the mixes alone don't move.
+     */
+    suspend fun move(section: HomeSection, to: Int) = saveMove(section) { current ->
+        movedHomeSectionOrder(current, section, to)
+    }
+
+    /** Saves the order [move] makes of the current one, whole, as every reorder always has; nothing when it's null. */
+    private suspend fun saveMove(section: HomeSection, move: (List<HomeSection>) -> List<HomeSection>?) {
         context.homeSectionsDataStore.edit { prefs ->
             val current = effectiveHomeSectionOrder(prefs[orderKey].toKeys(), prefs[listeningPromotedKey] ?: false)
-            val moved = movedHomeSectionOrder(current, section, up) ?: return@edit
+            val moved = move(current) ?: return@edit
             prefs[orderKey] = moved.joinToString(",") { it.key }
             prefs[listeningPromotedKey] = true
             // Placed by hand before it was ever on: keep that spot when it's turned on.
@@ -352,6 +388,10 @@ class HomeSectionsPreference @Inject constructor(
             }
             prefs[communityOnKey] = on
         }
+    }
+
+    suspend fun setSearchBrowseOn(on: Boolean) {
+        context.homeSectionsDataStore.edit { prefs -> prefs[searchBrowseKey] = on }
     }
 
     suspend fun setStartTab(tab: StartTab) {

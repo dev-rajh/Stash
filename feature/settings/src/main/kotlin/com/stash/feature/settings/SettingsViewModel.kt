@@ -131,6 +131,7 @@ class SettingsViewModel @Inject constructor(
     private val streamingPreference: com.stash.core.data.prefs.StreamingPreference,
     private val crossfadePreference: com.stash.core.data.prefs.CrossfadePreference,
     private val autoplayRadioPreference: com.stash.core.data.prefs.AutoplayRadioPreference,
+    private val headphonePreference: com.stash.core.data.prefs.HeadphonePreference,
     private val databaseBackupManager: DatabaseBackupManager,
     private val listenBrainzPreference: com.stash.core.data.listenbrainz.ListenBrainzPreference,
     private val listenBrainzApiClient: com.stash.core.data.listenbrainz.ListenBrainzApiClient,
@@ -428,6 +429,17 @@ class SettingsViewModel @Inject constructor(
             kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5_000),
             false,
         )
+
+    val headphoneResumeOnReconnect: kotlinx.coroutines.flow.StateFlow<Boolean> =
+        headphonePreference.resumeOnReconnect.stateIn(
+            viewModelScope,
+            kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5_000),
+            false,
+        )
+
+    fun onHeadphoneResumeOnReconnectToggle(enabled: Boolean) {
+        viewModelScope.launch { headphonePreference.setResumeOnReconnect(enabled) }
+    }
 
     fun onAutoplayRadioToggle(enabled: Boolean) {
         viewModelScope.launch { autoplayRadioPreference.setEnabled(enabled) }
@@ -1815,9 +1827,14 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch { nowPlayingPreference.setAmbientStyle(style) }
     }
 
-    /** Move a Home section one slot up/down (Settings > Appearance > Home layout). */
+    /** Move a Home section one slot up/down (Settings > Appearance > Home layout: TalkBack's Move up / Move down). */
     fun onHomeSectionMoved(section: com.stash.core.data.prefs.HomeSection, up: Boolean) {
         viewModelScope.launch { homeSectionsPreference.move(section, up) }
+    }
+
+    /** A Home section dragged to [to] among the sections with a place of their own (Settings > Appearance > Home layout). */
+    fun onHomeSectionDropped(section: com.stash.core.data.prefs.HomeSection, to: Int) {
+        viewModelScope.launch { homeSectionsPreference.move(section, to) }
     }
 
     /** Show/hide a Home section without forgetting its position. */
@@ -1847,6 +1864,17 @@ class SettingsViewModel @Inject constructor(
 
     fun onStartTabChanged(tab: StartTab) {
         viewModelScope.launch { homeSectionsPreference.setStartTab(tab) }
+    }
+
+    /** Settings > Appearance > Moods & genres in Search: on unless turned off. Its own StateFlow, as [startTab]. */
+    val searchBrowseOn: StateFlow<Boolean> = homeSectionsPreference.searchBrowseOn.stateIn(
+        viewModelScope,
+        SharingStarted.WhileSubscribed(5_000),
+        true,
+    )
+
+    fun onSearchBrowseChanged(on: Boolean) {
+        viewModelScope.launch { homeSectionsPreference.setSearchBrowseOn(on) }
     }
 
     /** Clear the kill-switch after PROTOCOL_BROKEN. Exposed to the Settings
