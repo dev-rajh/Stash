@@ -35,7 +35,6 @@ import androidx.compose.material.icons.filled.DownloadDone
 import androidx.compose.material.icons.filled.Flag
 import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.HighQuality
-import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Lyrics
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Bedtime
@@ -245,8 +244,8 @@ internal fun NowPlayingTopBar(
         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        TopBarIcon(Icons.Default.KeyboardArrowDown, dismissDescription, ink, slot, iconSize = 28.dp, onClick = onDismiss, modifier = dismissModifier)
-
+        // Fork: no dismiss arrow — the sheet closes by swipe, Back, or the mini
+        // player's tap. (onDismiss stays wired for the TalkBack path.)
         // The album's name rides the bar's free middle (the pins and ⋮ keep their
         // slots); it shrinks with the row and scrolls when a long name can't fit.
         if (headerTitle != null) {

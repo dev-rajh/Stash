@@ -45,14 +45,14 @@ import kotlin.math.roundToInt
  *   square-art layout puts it while full art is out.
  */
 internal object NpSpacingDefaults {
-    // Title
-    const val TITLE_SIZE_SP = 22f
-    const val TITLE_LINE_HEIGHT_SP = 26.8f
+    // Title (fork: a step bigger — the layout had slack the title now uses)
+    const val TITLE_SIZE_SP = 24f
+    const val TITLE_LINE_HEIGHT_SP = 29f
     const val TITLE_LETTER_SPACING_SP = 0f
 
-    // Artist · album
-    const val ARTIST_SIZE_SP = 15f
-    const val ARTIST_LINE_HEIGHT_SP = 24f
+    // Artist · album (fork: a step bigger with it)
+    const val ARTIST_SIZE_SP = 17f
+    const val ARTIST_LINE_HEIGHT_SP = 26f
     const val ARTIST_LETTER_SPACING_SP = 0f
 
     // Around the art

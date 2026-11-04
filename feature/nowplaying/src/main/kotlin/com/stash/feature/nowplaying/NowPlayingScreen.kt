@@ -260,7 +260,6 @@ fun NowPlayingScreen(
             }
         }
     }
-    val resolvingArtist by viewModel.resolvingArtist.collectAsStateWithLifecycle()
     val isDownloadingCurrent by viewModel.isDownloadingCurrent.collectAsStateWithLifecycle()
     val exportingLyricsTrackId by viewModel.exportingLyricsTrackId.collectAsStateWithLifecycle()
     val radioLabel by viewModel.radioSeedLabel.collectAsStateWithLifecycle()
@@ -1323,37 +1322,15 @@ fun NowPlayingScreen(
                                     val titleAction = titleButton.action?.takeIf { isActionAvailable(it, actionCtx) }
                                     TrackInfoBlock(
                                         track = track,
-                                        resolvingArtist = resolvingArtist,
                                         onTitleTapped = viewModel::onTrackTitleTapped,
                                         onArtistTapped = viewModel::onTrackArtistTapped,
                                         isLiked = uiState.currentTrack?.stashLikedAt != null,
                                         onLikeTap = viewModel::onLikeTap,
                                         alignStart = alignStart,
-                                        // The sleep timer's time left hangs under the moon, beside the
-                                        // artist line: the line keeps clear of it while one runs.
-                                        sideCaption = titleButton == com.stash.core.data.prefs.TitleButton.SLEEP_TIMER &&
-                                            sleepTimerState != SleepTimerController.State.Off,
-                                        sideButton = when {
-                                            titleButton == com.stash.core.data.prefs.TitleButton.SLEEP_TIMER -> { m ->
-                                                // The album accent is read in its own scope: the crossfade
-                                                // recomposes the button, not the title.
-                                                WithAlbumChrome { chrome ->
-                                                    SleepTimerButton(
-                                                        state = sleepTimerState,
-                                                        onClick = { showSleepTimerSheet = true },
-                                                        activeTint = chrome.accent,
-                                                        idleTint = npInk().copy(alpha = 0.7f),
-                                                        buttonSize = 26.dp,
-                                                        iconSize = 20.dp,
-                                                        modifier = m,
-                                                    )
-                                                }
-                                            }
-                                            titleAction != null -> { m ->
-                                                TitleActionButton(titleAction, visualState, onPinnedAction, m)
-                                            }
-                                            else -> null
-                                        },
+                                        // Fork: nothing beside the title — the sleep timer lives in the
+                                        // ⋮ menu now, so the title row is just the title and the heart.
+                                        sideCaption = false,
+                                        sideButton = null,
                                     )
 
                                     // Quality line — codec + bit-depth/sample-rate + bitrate, when known.
@@ -1585,13 +1562,12 @@ private val ArtMax = 375.dp
  * The floors of the three flexible gaps around the art: top bar -> art, art -> title,
  * controls -> the bottom (the lyrics bar or the edge). Their full sizes are NpSpacing's gapTop,
  * gapArt and gapBottom. They shrink together towards the floor only when keeping them would make
- * the art smaller than ART_COMFORT of its full size (a short phone, a large font). A gap tuned
+ * the art smaller than its full size (a short phone, a large font). A gap tuned
  * below its floor is its own floor.
  */
 private val GapTopMin = 8.dp
 private val GapArtMin = 16.dp
 private val GapBottomMin = 12.dp
-private const val ART_COMFORT = 0.75f
 
 /** The side button and the heart beside the title: 26 dp each (a caption under one needs the room). */
 private val SideButtonSize = 26.dp
@@ -1635,8 +1611,14 @@ private fun NowPlayingBody(
         val nominal = gapTop.roundToPx() + gapArt.roundToPx() + gapBottom.roundToPx()
         val floor = GapTopMin.coerceAtMost(gapTop).roundToPx() + GapArtMin.coerceAtMost(gapArt).roundToPx() +
             GapBottomMin.coerceAtMost(gapBottom).roundToPx()
-        val shortfall = (full * ART_COMFORT - (avail - nominal)).coerceIn(0f, (nominal - floor).toFloat())
-        val k = if (nominal > floor) 1f - shortfall / (nominal - floor) else 1f
+        // Fork: the art keeps ONE size — its full width-capped square — whether the lyrics bar
+        // is showing or not. The gaps flex to make room for it; only when even the floors don't
+        // leave room (a short screen, a large font) does the art itself shrink.
+        val k = when {
+            avail >= full + nominal -> 1f
+            avail <= full + floor -> 0f
+            else -> (avail - full - floor).toFloat() / (nominal - floor)
+        }
         fun gap(max: androidx.compose.ui.unit.Dp, min: androidx.compose.ui.unit.Dp): Int {
             val floorPx = min.coerceAtMost(max).roundToPx()
             return (floorPx + (max.roundToPx() - floorPx) * k).toInt()
@@ -1644,7 +1626,7 @@ private fun NowPlayingBody(
         val gTop = gap(gapTop, GapTopMin)
         val gArt = gap(gapArt, GapArtMin)
         val gBottom = gap(gapBottom, GapBottomMin)
-        val artSide = (avail - gTop - gArt - gBottom).coerceIn(0, full)
+        val artSide = full.coerceAtMost((avail - floor).coerceAtLeast(0))
         val slack = (avail - gTop - gArt - gBottom - artSide).coerceAtLeast(0)
 
         val artP = artM.first().measure(androidx.compose.ui.unit.Constraints.fixed(artSide, artSide))
@@ -1727,7 +1709,6 @@ private fun riseIn(risePx: Int, delayMs: Int): EnterTransition =
 @Composable
 private fun TrackInfoBlock(
     track: com.stash.core.model.Track?,
-    resolvingArtist: Boolean,
     /** Title tap: opens the album's offline (Stash) song list. */
     onTitleTapped: () -> Unit,
     /** Artist line tap: opens the offline songs-by-artist list. */
@@ -1772,7 +1753,7 @@ private fun TrackInfoBlock(
     Column(modifier = Modifier.fillMaxWidth()) {
         if (alignStart) {
             Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                TitleLine(track, resolvingArtist, alignStart = true, modifier = Modifier.weight(1f).then(tapToAlbum))
+                TitleLine(track, alignStart = true, modifier = Modifier.weight(1f).then(tapToAlbum))
                 if (showsSide) sideButton?.invoke(Modifier.padding(start = sideGap))
                 heart?.invoke(Modifier.padding(start = sideGap))
             }
@@ -1780,7 +1761,6 @@ private fun TrackInfoBlock(
             Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
                 TitleLine(
                     track,
-                    resolvingArtist,
                     alignStart = false,
                     modifier = Modifier.fillMaxWidth().padding(horizontal = centeredInset).then(tapToAlbum),
                 )
@@ -1814,7 +1794,6 @@ private fun TrackInfoBlock(
 @Composable
 private fun TitleLine(
     track: com.stash.core.model.Track?,
-    resolvingArtist: Boolean,
     alignStart: Boolean,
     modifier: Modifier = Modifier,
 ) {
@@ -1846,23 +1825,6 @@ private fun TitleLine(
                 .marqueeWhileShown(),
         )
         if (track?.soundCloudPreview == true && !track.isDownloaded) com.stash.core.ui.components.PreviewBadge()
-        if (track != null) {
-            Spacer(modifier = Modifier.width(6.dp))
-            if (resolvingArtist) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(16.dp),
-                    strokeWidth = 2.dp,
-                    color = npInk(),
-                )
-            } else {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                    contentDescription = "Open artist",
-                    tint = npInk().copy(alpha = 0.6f),
-                    modifier = Modifier.size(18.dp),
-                )
-            }
-        }
     }
 }
 
@@ -2242,7 +2204,7 @@ private fun QualityLine(
             Spacer(modifier = Modifier.width(6.dp))
             Text(
                 text = qualityText,
-                style = MaterialTheme.typography.bodySmall,
+                style = MaterialTheme.typography.bodyMedium,
                 color = npInk().copy(alpha = 0.5f),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -2610,8 +2572,8 @@ private fun TrackInfoFooter(
                 text = path,
                 style = MaterialTheme.typography.labelSmall,
                 color = npInk().copy(alpha = 0.55f),
-                maxLines = 1,
-                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                // The whole path, however long it is — it wraps.
+                softWrap = true,
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 24.dp),
