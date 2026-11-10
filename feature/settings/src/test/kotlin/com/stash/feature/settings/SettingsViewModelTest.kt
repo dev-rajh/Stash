@@ -8,14 +8,12 @@ import com.stash.data.download.lossless.LosslessAvailability
 import com.stash.data.download.lossless.LosslessSourcePreferences
 import com.stash.data.download.lossless.qbdlx.QbdlxCredentialStore
 import com.stash.core.data.discord.DiscordRpcCoordinator
-import com.stash.data.download.lossless.relay.LosslessRelayClient
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
 import androidx.lifecycle.viewModelScope
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -46,7 +44,6 @@ class SettingsViewModelTest {
     private val losslessPrefs = mockk<LosslessSourcePreferences>(relaxed = true)
     private val qbdlxStore = mockk<QbdlxCredentialStore>(relaxed = true)
     private val librarySizeHolder = mockk<LibrarySizeHolder>(relaxed = true)
-    private val relayClient = mockk<LosslessRelayClient>(relaxed = true)
 
     private val autoplayRadioPreference = mockk<com.stash.core.data.prefs.AutoplayRadioPreference>(relaxed = true)
     private val homeSectionsPreference = mockk<HomeSectionsPreference>(relaxed = true)
@@ -56,9 +53,16 @@ class SettingsViewModelTest {
 
     private var themePreference: com.stash.core.data.prefs.ThemePreference = mockk(relaxed = true)
 
+    private val tokenManager = mockk<com.stash.core.auth.TokenManager>(relaxed = true)
+    private val likeCoordinator = mockk<com.stash.core.data.social.LikeCoordinator>(relaxed = true)
+    private val syncStateManager = com.stash.core.data.sync.SyncStateManager()
+    private var syncPreferences: com.stash.core.data.sync.SyncPreferencesManager = mockk(relaxed = true)
+    private val spotifyAccountDao = mockk<com.stash.core.data.db.dao.SpotifyAccountDao>(relaxed = true)
+    private val spotifyExtraAccountRemover = mockk<com.stash.core.data.sync.SpotifyExtraAccountRemover>(relaxed = true)
+
     private fun newVm(losslessConfigured: Boolean = true) = SettingsViewModel(
         appContext = mockk(relaxed = true),
-        tokenManager = mockk(relaxed = true),
+        tokenManager = tokenManager,
         musicRepository = mockk(relaxed = true),
         librarySizeHolder = librarySizeHolder,
         qualityPreference = mockk(relaxed = true),
@@ -79,11 +83,9 @@ class SettingsViewModelTest {
         youTubeScrobblerState = mockk(relaxed = true),
         losslessPrefs = losslessPrefs,
         streamingQualityPrefs = mockk(relaxed = true),
-        losslessRateLimiter = mockk(relaxed = true),
-        qobuzSource = mockk(relaxed = true),
         qbdlxCredentialStore = qbdlxStore,
         losslessAvailability = mockk<LosslessAvailability> {
-            every { qbdlxEnabled } returns flowOf(losslessConfigured)
+            every { anySourceConfigured } returns flowOf(losslessConfigured)
             every { routingRows } returns flowOf(emptyList())
         },
         qobuzAccountConnector = mockk(relaxed = true),
@@ -104,11 +106,13 @@ class SettingsViewModelTest {
         listenBrainzApiClient = mockk(relaxed = true),
         listenSinkCoordinator = mockk(relaxed = true),
         listenSubmissionDao = mockk(relaxed = true),
-        relayClient = relayClient,
         lastFmRecommendationSource = mockk(relaxed = true),
         discordRpcCoordinator = mockk(relaxed = true),
-        syncStateManager = com.stash.core.data.sync.SyncStateManager(),
-        likeCoordinator = mockk(relaxed = true),
+        syncStateManager = syncStateManager,
+        likeCoordinator = likeCoordinator,
+        syncPreferences = syncPreferences,
+        spotifyAccountDao = spotifyAccountDao,
+        spotifyExtraAccountRemover = spotifyExtraAccountRemover,
     )
 
     // -- Display size (UI scale) ---------------------------------------------
@@ -179,116 +183,38 @@ class SettingsViewModelTest {
         job.cancel()
     }
 
-    // -- Custom lossless endpoint --------------------------------------------
+    // -- The user's own Tidal (BitChord) server ------------------------------
 
-    @Test fun `committing a valid endpoint stores it normalised`() = runTest {
+    @Test fun `committing a valid Tidal server stores it normalised`() = runTest {
         val vm = newVm()
 
-        vm.onCustomEndpointCommitted("https://relay.example/")
+        vm.onBitchordEndpointCommitted("https://tidal.example/")
         advanceUntilIdle()
 
-        coVerify(exactly = 1) { losslessPrefs.setCustomLosslessEndpoint("https://relay.example") }
-        assertThat(vm.customEndpointError.value).isNull()
+        coVerify(exactly = 1) { losslessPrefs.setBitchordEndpoint("https://tidal.example") }
+        assertThat(vm.bitchordEndpointError.value).isNull()
     }
 
-    @Test fun `committing a non-https endpoint errors and stores nothing`() = runTest {
+    @Test fun `committing a non-https Tidal server errors and stores nothing`() = runTest {
         val vm = newVm()
 
-        vm.onCustomEndpointCommitted("http://x")
+        vm.onBitchordEndpointCommitted("http://x")
         advanceUntilIdle()
 
-        assertThat(vm.customEndpointError.value).isEqualTo("Must be an https:// URL")
-        coVerify(exactly = 0) { losslessPrefs.setCustomLosslessEndpoint(any()) }
+        assertThat(vm.bitchordEndpointError.value).isEqualTo("Must be an https:// URL")
+        coVerify(exactly = 0) { losslessPrefs.setBitchordEndpoint(any()) }
     }
 
-    @Test fun `committing blank clears the endpoint without an error`() = runTest {
+    @Test fun `committing blank clears the Tidal server without an error`() = runTest {
         val vm = newVm()
-        vm.onCustomEndpointCommitted("http://x")
-        assertThat(vm.customEndpointError.value).isNotNull()
+        vm.onBitchordEndpointCommitted("http://x")
+        assertThat(vm.bitchordEndpointError.value).isNotNull()
 
-        vm.onCustomEndpointCommitted("")
+        vm.onBitchordEndpointCommitted("")
         advanceUntilIdle()
 
-        assertThat(vm.customEndpointError.value).isNull()
-        coVerify(exactly = 1) { losslessPrefs.setCustomLosslessEndpoint(null) }
-    }
-
-    @Test fun `testing an endpoint goes IDLE to TESTING to REACHABLE`() = runTest {
-        every { losslessPrefs.customLosslessEndpoint } returns flowOf("https://relay.example")
-        coEvery { relayClient.probe("https://relay.example") } returns true
-        val vm = newVm()
-        val job = launch { vm.customEndpoint.collect {} }
-        advanceUntilIdle()
-        assertThat(vm.customEndpointTest.value).isEqualTo(SettingsViewModel.EndpointTestState.IDLE)
-
-        vm.onTestCustomEndpoint()
-        assertThat(vm.customEndpointTest.value).isEqualTo(SettingsViewModel.EndpointTestState.TESTING)
-        advanceUntilIdle()
-
-        assertThat(vm.customEndpointTest.value).isEqualTo(SettingsViewModel.EndpointTestState.REACHABLE)
-        job.cancel()
-    }
-
-    @Test fun `a probe that fails reports UNREACHABLE`() = runTest {
-        every { losslessPrefs.customLosslessEndpoint } returns flowOf("https://relay.example")
-        coEvery { relayClient.probe("https://relay.example") } returns false
-        val vm = newVm()
-        val job = launch { vm.customEndpoint.collect {} }
-        advanceUntilIdle()
-
-        vm.onTestCustomEndpoint()
-        advanceUntilIdle()
-
-        assertThat(vm.customEndpointTest.value).isEqualTo(SettingsViewModel.EndpointTestState.UNREACHABLE)
-        job.cancel()
-    }
-
-    @Test fun `testing with no endpoint set is a no-op`() = runTest {
-        every { losslessPrefs.customLosslessEndpoint } returns flowOf(null)
-        val vm = newVm()
-        val job = launch { vm.customEndpoint.collect {} }
-        advanceUntilIdle()
-
-        vm.onTestCustomEndpoint()
-        advanceUntilIdle()
-
-        assertThat(vm.customEndpointTest.value).isEqualTo(SettingsViewModel.EndpointTestState.IDLE)
-        coVerify(exactly = 0) { relayClient.probe(any()) }
-        job.cancel()
-    }
-
-    /**
-     * The Test button is disabled while a probe runs but the FIELD is not, and a
-     * probe takes up to 8s: without the identity check in `onTestCustomEndpoint`,
-     * endpoint A's verdict came back and painted a green "Reachable" beside the
-     * endpoint B now on screen — a measurement of a URL the user had replaced.
-     */
-    @Test fun `a probe answered after the endpoint changed cannot label the new one`() = runTest {
-        val stored = MutableStateFlow<String?>("https://a.example")
-        every { losslessPrefs.customLosslessEndpoint } returns stored
-        coEvery { losslessPrefs.setCustomLosslessEndpoint(any()) } coAnswers {
-            stored.value = firstArg<String?>()
-        }
-        val probeA = CompletableDeferred<Boolean>()
-        coEvery { relayClient.probe("https://a.example") } coAnswers { probeA.await() }
-        val vm = newVm()
-        val job = launch { vm.customEndpoint.collect {} }
-        advanceUntilIdle()
-
-        vm.onTestCustomEndpoint()
-        advanceUntilIdle()
-        assertThat(vm.customEndpointTest.value).isEqualTo(SettingsViewModel.EndpointTestState.TESTING)
-
-        // The user retypes the base while A is still in flight.
-        vm.onCustomEndpointCommitted("https://b.example")
-        advanceUntilIdle()
-        assertThat(vm.customEndpointTest.value).isEqualTo(SettingsViewModel.EndpointTestState.IDLE)
-
-        probeA.complete(true) // A finally answers, with B on screen.
-        advanceUntilIdle()
-
-        assertThat(vm.customEndpointTest.value).isEqualTo(SettingsViewModel.EndpointTestState.IDLE)
-        job.cancel()
+        assertThat(vm.bitchordEndpointError.value).isNull()
+        coVerify(exactly = 1) { losslessPrefs.setBitchordEndpoint(null) }
     }
 
     // -- Autoplay radio toggle (2026-09-07) --------------------------------------------
@@ -387,5 +313,304 @@ class SettingsViewModelTest {
         advanceUntilIdle()
 
         coVerify(exactly = 0) { likePreferences.setMirrorLikesSpotify(any()) }
+    }
+
+    // -- Spotify account-swap guard ------------------------------------------
+    // A sign-in as another Spotify account used to replace the connected one silently.
+
+    private fun spotifySessionExpired() = syncStateManager.onAuthExpiryProbed(
+        com.stash.core.data.sync.AuthExpiryState(spotifyExpired = true, youtubeExpired = false),
+    )
+
+    @Test fun `a sign-in as another Spotify account is refused with both names, and nothing else moves`() = runTest {
+        spotifySessionExpired()
+        coEvery { tokenManager.connectSpotifyWithCookie("sam-cookie", "") } returns
+            com.stash.core.auth.model.SpotifyConnectResult.DifferentAccount(connectedName = "Rawn", attemptedName = "Sam")
+        val vm = newVm()
+
+        // The card's Reconnect: the WebView hands over the cookie it captured.
+        vm.onSpotifyWebLoginCookieExtracted("sam-cookie")
+        advanceUntilIdle()
+
+        assertThat(vm.spotifyAccountMismatch.value).isEqualTo(SpotifyAccountMismatch("Rawn", "Sam"))
+        // Rawn's session still needs Rawn's sign-in: Reconnect stays offered, his likes keep waiting.
+        assertThat(syncStateManager.authExpiry.value.spotifyExpired).isTrue()
+        coVerify(exactly = 0) { likeCoordinator.retry(any()) }
+    }
+
+    @Test fun `two Spotify accounts with one display name - the message doesn't name the other`() = runTest {
+        coEvery { tokenManager.connectSpotifyWithCookie(any(), any()) } returns
+            com.stash.core.auth.model.SpotifyConnectResult.DifferentAccount(connectedName = "Rawn", attemptedName = " rawn")
+        val vm = newVm()
+
+        vm.onConnectSpotifyWithCookie("sam-cookie", "")
+        advanceUntilIdle()
+
+        assertThat(vm.spotifyAccountMismatch.value).isEqualTo(SpotifyAccountMismatch("Rawn", attemptedName = null))
+    }
+
+    @Test fun `the connected Spotify account signing in again connects as before`() = runTest {
+        spotifySessionExpired()
+        coEvery { tokenManager.connectSpotifyWithCookie("rawn-cookie", "") } returns
+            com.stash.core.auth.model.SpotifyConnectResult.Connected
+        val vm = newVm()
+
+        vm.onSpotifyWebLoginCookieExtracted("rawn-cookie")
+        advanceUntilIdle()
+
+        assertThat(vm.spotifyAccountMismatch.value).isNull()
+        assertThat(syncStateManager.authExpiry.value.spotifyExpired).isFalse()
+        coVerify(exactly = 1) { likeCoordinator.retry(com.stash.core.data.social.Destination.SPOTIFY) }
+    }
+
+    @Test fun `an invalid Spotify cookie is not an account mismatch`() = runTest {
+        spotifySessionExpired()
+        coEvery { tokenManager.connectSpotifyWithCookie(any(), any()) } returns
+            com.stash.core.auth.model.SpotifyConnectResult.Invalid
+        val vm = newVm()
+
+        vm.onConnectSpotifyWithCookie("bad-cookie", "")
+        advanceUntilIdle()
+
+        assertThat(vm.spotifyAccountMismatch.value).isNull()
+        assertThat(syncStateManager.authExpiry.value.spotifyExpired).isTrue()
+        coVerify(exactly = 0) { likeCoordinator.retry(any()) }
+    }
+
+    @Test fun `Cancel drops a Spotify sign-in still being checked`() = runTest {
+        var dropped = false
+        coEvery { tokenManager.connectSpotifyWithCookie(any(), any()) } coAnswers {
+            try {
+                kotlinx.coroutines.awaitCancellation()
+            } finally {
+                dropped = true
+            }
+        }
+        spotifySessionExpired()
+        val vm = newVm()
+        vm.onConnectSpotifyWithCookie("rawn-cookie", "")
+        advanceUntilIdle()
+
+        vm.onDismissSpotifyCookieDialog()
+        advanceUntilIdle()
+
+        assertThat(dropped).isTrue()
+        // Nothing connected, so nothing is settled.
+        assertThat(syncStateManager.authExpiry.value.spotifyExpired).isTrue()
+        assertThat(vm.spotifyAccountMismatch.value).isNull()
+        coVerify(exactly = 0) { likeCoordinator.retry(any()) }
+    }
+
+    @Test fun `the Disconnect confirmation knows when Spotify syncs in Refresh mode`() = runTest {
+        syncPreferences = mockk(relaxed = true) {
+            every { spotifySyncMode } returns flowOf(com.stash.core.model.SyncMode.REFRESH)
+        }
+        val vm = newVm()
+        val job = launch { vm.spotifyRefreshMode.collect {} }
+        advanceUntilIdle()
+
+        assertThat(vm.spotifyRefreshMode.value).isTrue()
+        job.cancel()
+    }
+
+    @Test fun `in Accumulate mode the Disconnect confirmation stays as it was`() = runTest {
+        syncPreferences = mockk(relaxed = true) {
+            every { spotifySyncMode } returns flowOf(com.stash.core.model.SyncMode.ACCUMULATE)
+        }
+        val vm = newVm()
+        val job = launch { vm.spotifyRefreshMode.collect {} }
+        advanceUntilIdle()
+
+        assertThat(vm.spotifyRefreshMode.value).isFalse()
+        job.cancel()
+    }
+
+    @Test fun `dismissing the Spotify account message clears it`() = runTest {
+        coEvery { tokenManager.connectSpotifyWithCookie(any(), any()) } returns
+            com.stash.core.auth.model.SpotifyConnectResult.DifferentAccount(connectedName = "Rawn", attemptedName = "Sam")
+        val vm = newVm()
+        vm.onConnectSpotifyWithCookie("sam-cookie", "")
+        advanceUntilIdle()
+
+        vm.onDismissSpotifyAccountMismatch()
+
+        assertThat(vm.spotifyAccountMismatch.value).isNull()
+    }
+
+    // -- Other Spotify accounts (plan 2026-11-04 §3.4/§3.5) --------------------------------------
+
+    private fun otherAccount(id: Long, userId: String, label: String) =
+        com.stash.core.data.db.entity.SpotifyAccountEntity(id = id, userId = userId, label = label, addedAt = id)
+
+    /**
+     * A cookie that signs in as [userId] (null: Spotify didn't say whose). [ValidatedSpotifySignIn]
+     * can only be made by core:auth.
+     */
+    private fun signedInAs(userId: String?, isMain: Boolean? = false): com.stash.core.auth.model.SpotifyCookieCheck.Valid {
+        val signIn = mockk<com.stash.core.auth.model.ValidatedSpotifySignIn> {
+            every { account } returns userId?.let { com.stash.core.auth.spotify.SpotifyProfile(it, it.replaceFirstChar { c -> c.uppercase() }) }
+        }
+        return com.stash.core.auth.model.SpotifyCookieCheck.Valid(signIn, isMain)
+    }
+
+    @Test fun `a Connect as one of the other accounts is refused, and nothing is connected`() = runTest {
+        coEvery { spotifyAccountDao.count() } returns 1
+        coEvery { tokenManager.validateSpotifyCookie("sam-cookie") } returns signedInAs("sam")
+        coEvery { spotifyAccountDao.findByAccount("sam") } returns otherAccount(4, "sam", "Sam")
+        val vm = newVm()
+
+        vm.onConnectSpotifyWithCookie("sam-cookie", "")
+        advanceUntilIdle()
+
+        assertThat(vm.spotifyAlreadyOtherAccount.value).isEqualTo("Sam")
+        coVerify(exactly = 0) { tokenManager.connectSpotifyWithCookie(any(), any()) }
+        coVerify(exactly = 0) { likeCoordinator.retry(any()) }
+
+        vm.onDismissSpotifyAlreadyOtherAccount()
+        assertThat(vm.spotifyAlreadyOtherAccount.value).isNull()
+    }
+
+    @Test fun `with other accounts, a Connect as a new account connects from the one check`() = runTest {
+        coEvery { spotifyAccountDao.count() } returns 1
+        val check = signedInAs("rawn", isMain = true)
+        coEvery { tokenManager.validateSpotifyCookie("rawn-cookie") } returns check
+        coEvery { spotifyAccountDao.findByAccount("rawn") } returns null
+        coEvery { tokenManager.connectSpotifyWithSignIn(any(), any()) } returns
+            com.stash.core.auth.model.SpotifyConnectResult.Connected
+        val vm = newVm()
+
+        vm.onConnectSpotifyWithCookie("rawn-cookie", "")
+        advanceUntilIdle()
+
+        assertThat(vm.spotifyAlreadyOtherAccount.value).isNull()
+        // One token exchange: the check's. A second one (a 429 away from "invalid") is never made.
+        coVerify(exactly = 1) { tokenManager.validateSpotifyCookie(any()) }
+        coVerify(exactly = 1) { tokenManager.connectSpotifyWithSignIn(check.signIn, "") }
+        coVerify(exactly = 0) { tokenManager.connectSpotifyWithCookie(any(), any()) }
+        coVerify(exactly = 1) { likeCoordinator.retry(com.stash.core.data.social.Destination.SPOTIFY) }
+    }
+
+    @Test fun `with other accounts, a sign-in Spotify didn't name still connects, as the guard lets it`() = runTest {
+        coEvery { spotifyAccountDao.count() } returns 1
+        val check = signedInAs(null, isMain = null)
+        coEvery { tokenManager.validateSpotifyCookie(any()) } returns check
+        coEvery { tokenManager.connectSpotifyWithSignIn(any(), any()) } returns
+            com.stash.core.auth.model.SpotifyConnectResult.Connected
+        val vm = newVm()
+
+        vm.onConnectSpotifyWithCookie("rawn-cookie", "Rawn's phone")
+        advanceUntilIdle()
+
+        coVerify(exactly = 0) { spotifyAccountDao.findByAccount(any()) }
+        coVerify(exactly = 1) { tokenManager.connectSpotifyWithSignIn(check.signIn, "Rawn's phone") }
+        assertThat(vm.spotifyAlreadyOtherAccount.value).isNull()
+    }
+
+    @Test fun `with other accounts, the checked sign-in as a different account is still refused`() = runTest {
+        coEvery { spotifyAccountDao.count() } returns 1
+        coEvery { tokenManager.validateSpotifyCookie(any()) } returns signedInAs("kim", isMain = false)
+        coEvery { spotifyAccountDao.findByAccount("kim") } returns null
+        coEvery { tokenManager.connectSpotifyWithSignIn(any(), any()) } returns
+            com.stash.core.auth.model.SpotifyConnectResult.DifferentAccount(connectedName = "Rawn", attemptedName = "Kim")
+        val vm = newVm()
+
+        vm.onConnectSpotifyWithCookie("kim-cookie", "")
+        advanceUntilIdle()
+
+        assertThat(vm.spotifyAccountMismatch.value).isEqualTo(SpotifyAccountMismatch("Rawn", "Kim"))
+        coVerify(exactly = 0) { likeCoordinator.retry(any()) }
+    }
+
+    @Test fun `with no other accounts, the Connect isn't checked first`() = runTest {
+        coEvery { spotifyAccountDao.count() } returns 0
+        coEvery { tokenManager.connectSpotifyWithCookie(any(), any()) } returns
+            com.stash.core.auth.model.SpotifyConnectResult.Connected
+        val vm = newVm()
+
+        vm.onConnectSpotifyWithCookie("rawn-cookie", "")
+        advanceUntilIdle()
+
+        coVerify(exactly = 0) { tokenManager.validateSpotifyCookie(any()) }
+        coVerify(exactly = 1) { tokenManager.connectSpotifyWithCookie("rawn-cookie", "") }
+    }
+
+    @Test fun `with other accounts, a cookie that doesn't sign in connects nothing`() = runTest {
+        coEvery { spotifyAccountDao.count() } returns 2
+        coEvery { tokenManager.validateSpotifyCookie(any()) } returns com.stash.core.auth.model.SpotifyCookieCheck.Invalid
+        val vm = newVm()
+
+        vm.onConnectSpotifyWithCookie("bad-cookie", "")
+        advanceUntilIdle()
+
+        coVerify(exactly = 0) { tokenManager.connectSpotifyWithCookie(any(), any()) }
+        assertThat(vm.spotifyAlreadyOtherAccount.value).isNull()
+    }
+
+    @Test fun `Disconnect with other accounts removes each of them, then the connected one`() = runTest {
+        coEvery { spotifyAccountDao.getAll() } returns listOf(otherAccount(2, "sam", "Sam"), otherAccount(5, "alex", "Alex"))
+        coEvery { spotifyExtraAccountRemover.remove(2) } returns com.stash.core.data.sync.SpotifyAccountRemoval.Removed(3)
+        // Removed a moment before (a second tap): counts as removed.
+        coEvery { spotifyExtraAccountRemover.remove(5) } returns com.stash.core.data.sync.SpotifyAccountRemoval.NotFound
+        val vm = newVm()
+
+        vm.onDisconnectSpotify()
+        advanceUntilIdle()
+
+        io.mockk.coVerifyOrder {
+            spotifyExtraAccountRemover.remove(2)
+            spotifyExtraAccountRemover.remove(5)
+            tokenManager.clearAuth(com.stash.core.auth.model.AuthService.SPOTIFY)
+        }
+        assertThat(vm.spotifyDisconnectStopped.value).isNull()
+    }
+
+    @Test fun `with no other accounts, Disconnect is as before`() = runTest {
+        coEvery { spotifyAccountDao.getAll() } returns emptyList()
+        val vm = newVm()
+
+        vm.onDisconnectSpotify()
+        advanceUntilIdle()
+
+        coVerify(exactly = 0) { spotifyExtraAccountRemover.remove(any()) }
+        coVerify(exactly = 1) { tokenManager.clearAuth(com.stash.core.auth.model.AuthService.SPOTIFY) }
+    }
+
+    @Test fun `Disconnect stops at an other account that won't sign out, the connected one included`() = runTest {
+        coEvery { spotifyAccountDao.getAll() } returns listOf(otherAccount(2, "sam", "Sam"), otherAccount(5, "alex", "Alex"))
+        coEvery { spotifyExtraAccountRemover.remove(2) } returns com.stash.core.data.sync.SpotifyAccountRemoval.SignInNotForgotten
+        val vm = newVm()
+
+        vm.onDisconnectSpotify()
+        advanceUntilIdle()
+
+        assertThat(vm.spotifyDisconnectStopped.value).isEqualTo(SpotifyDisconnectStopped("Sam"))
+        coVerify(exactly = 0) { spotifyExtraAccountRemover.remove(5) }
+        coVerify(exactly = 0) { tokenManager.clearAuth(any()) }
+
+        vm.onDismissSpotifyDisconnectStopped()
+        assertThat(vm.spotifyDisconnectStopped.value).isNull()
+    }
+
+    @Test fun `Disconnect stops when removing an other account fails part way`() = runTest {
+        coEvery { spotifyAccountDao.getAll() } returns listOf(otherAccount(2, "sam", "Sam"))
+        coEvery { spotifyExtraAccountRemover.remove(2) } throws IllegalStateException("disk full")
+        val vm = newVm()
+
+        vm.onDisconnectSpotify()
+        advanceUntilIdle()
+
+        assertThat(vm.spotifyDisconnectStopped.value).isEqualTo(SpotifyDisconnectStopped("Sam"))
+        coVerify(exactly = 0) { tokenManager.clearAuth(any()) }
+    }
+
+    @Test fun `Disconnect with the accounts unreadable disconnects nothing`() = runTest {
+        coEvery { spotifyAccountDao.getAll() } throws IllegalStateException("locked")
+        val vm = newVm()
+
+        vm.onDisconnectSpotify()
+        advanceUntilIdle()
+
+        assertThat(vm.spotifyDisconnectStopped.value).isEqualTo(SpotifyDisconnectStopped(null))
+        coVerify(exactly = 0) { tokenManager.clearAuth(any()) }
     }
 }

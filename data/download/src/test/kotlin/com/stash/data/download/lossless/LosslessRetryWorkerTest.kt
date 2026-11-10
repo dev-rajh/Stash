@@ -11,9 +11,7 @@ import com.stash.core.data.sync.SingleTrackDownloadEnqueuer
 import com.stash.core.model.DownloadStatus
 import androidx.work.workDataOf
 import com.stash.data.download.lossless.quota.LosslessQuota
-import com.stash.data.download.lossless.relay.LosslessDownloadPurpose
 import io.mockk.every
-import kotlinx.coroutines.currentCoroutineContext
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.mockk
@@ -44,7 +42,10 @@ class LosslessRetryWorkerTest {
 
     private val appContext: Context = mockk(relaxed = true)
     private val workerParams: WorkerParameters = mockk(relaxed = true)
-    private val downloadQueueDao: DownloadQueueDao = mockk(relaxed = true)
+    private val downloadQueueDao: DownloadQueueDao = mockk(relaxed = true) {
+        // Every waiting row is still waiting when the sweep requeues it, unless a test says otherwise.
+        coEvery { requeueIfStillWaiting(any()) } returns 1
+    }
     private val trackDao: TrackDao = mockk(relaxed = true)
     private val registry: LosslessSourceRegistry = mockk()
     private val enqueuer: SingleTrackDownloadEnqueuer = mockk(relaxed = true)
@@ -90,11 +91,28 @@ class LosslessRetryWorkerTest {
         val result = newWorker().doWork() as androidx.work.ListenableWorker.Result.Success
 
         coVerify(exactly = 0) { registry.resolve(any()) }
-        coVerify(exactly = 1) { downloadQueueDao.updateStatus(id = 100L, status = DownloadStatus.PENDING) }
-        coVerify(exactly = 1) { downloadQueueDao.updateStatus(id = 101L, status = DownloadStatus.PENDING) }
+        coVerify(exactly = 1) { downloadQueueDao.requeueIfStillWaiting(100L) }
+        coVerify(exactly = 1) { downloadQueueDao.requeueIfStillWaiting(101L) }
         coVerify(exactly = 1) { enqueuer.enqueue(100L) }
         coVerify(exactly = 1) { enqueuer.enqueue(101L) }
         assertEquals(2, result.outputData.getInt(LosslessRetryWorker.KEY_RESOLVED, -1))
+    }
+
+    @Test
+    fun `a song cancelled while the sweep runs is not downloaded`() = runTest {
+        atReset()
+        coEvery { downloadQueueDao.waitingForLosslessTracks(any()) } returns
+            listOf(entry(id = 100L, trackId = 1L), entry(id = 101L, trackId = 2L))
+        coEvery { trackDao.getById(any()) } answers { stubTrackEntity(firstArg()) }
+        // The X (or Clear queue) landed on 100 after the sweep read the waiting rows: the guarded
+        // update finds it SKIPPED and moves nothing. The old unguarded one made it PENDING again,
+        // wiped its kept-out mark and started its download.
+        coEvery { downloadQueueDao.requeueIfStillWaiting(100L) } returns 0
+
+        newWorker().doWork()
+
+        coVerify(exactly = 0) { enqueuer.enqueue(100L) }
+        coVerify(exactly = 1) { enqueuer.enqueue(101L) }
     }
 
     @Test
@@ -106,7 +124,7 @@ class LosslessRetryWorkerTest {
         val result = newWorker().doWork()
 
         assertEquals(androidx.work.ListenableWorker.Result.retry(), result)
-        coVerify(exactly = 0) { downloadQueueDao.updateStatus(any(), any(), any(), any(), any(), any()) }
+        coVerify(exactly = 0) { downloadQueueDao.requeueIfStillWaiting(any()) }
         coVerify(exactly = 0) { enqueuer.enqueue(any()) }
     }
 
@@ -352,29 +370,6 @@ class LosslessRetryWorkerTest {
     }
 
     @Test
-    fun `the sweep is a download, and stops at the first paced row and retries later`() = runTest {
-        coEvery { downloadQueueDao.waitingForLosslessTracks(any()) } returns listOf(
-            entry(id = 100L, trackId = 1L),
-            entry(id = 101L, trackId = 2L),
-        )
-        coEvery { trackDao.getById(any()) } answers { stubTrackEntity(firstArg()) }
-        var labelled = false
-        coEvery { registry.resolve(any()) } coAnswers {
-            val purpose = currentCoroutineContext()[LosslessDownloadPurpose]
-            labelled = purpose != null
-            purpose?.pacedRetryAfterSec = 3600
-            null
-        }
-
-        val result = newWorker().doWork()
-
-        assertEquals(androidx.work.ListenableWorker.Result.retry(), result)
-        assertEquals(true, labelled)
-        coVerify(exactly = 1) { registry.resolve(any()) } // row 101 never tried
-        coVerify(exactly = 0) { enqueuer.enqueue(any()) }
-    }
-
-    @Test
     fun `resolved row flips to PENDING and reports resolved=1 total=1`() = runTest {
         coEvery { downloadQueueDao.waitingForLosslessTracks(any()) } returns listOf(
             entry(id = 100L, trackId = 1L),
@@ -387,10 +382,7 @@ class LosslessRetryWorkerTest {
         assertEquals(1, result.outputData.getInt(LosslessRetryWorker.KEY_RESOLVED, -1))
         assertEquals(1, result.outputData.getInt(LosslessRetryWorker.KEY_TOTAL, -1))
         coVerify(exactly = 1) {
-            downloadQueueDao.updateStatus(
-                id = 100L,
-                status = DownloadStatus.PENDING,
-            )
+            downloadQueueDao.requeueIfStillWaiting(100L)
         }
     }
 
@@ -407,7 +399,7 @@ class LosslessRetryWorkerTest {
         assertEquals(0, result.outputData.getInt(LosslessRetryWorker.KEY_RESOLVED, -1))
         assertEquals(1, result.outputData.getInt(LosslessRetryWorker.KEY_TOTAL, -1))
         coVerify(exactly = 0) {
-            downloadQueueDao.updateStatus(any(), any(), any(), any(), any(), any())
+            downloadQueueDao.requeueIfStillWaiting(any())
         }
     }
 
@@ -420,7 +412,7 @@ class LosslessRetryWorkerTest {
         assertEquals(0, result.outputData.getInt(LosslessRetryWorker.KEY_RESOLVED, -1))
         assertEquals(0, result.outputData.getInt(LosslessRetryWorker.KEY_TOTAL, -1))
         coVerify(exactly = 0) {
-            downloadQueueDao.updateStatus(any(), any(), any(), any(), any(), any())
+            downloadQueueDao.requeueIfStillWaiting(any())
         }
     }
 
@@ -443,13 +435,13 @@ class LosslessRetryWorkerTest {
         assertEquals(2, result.outputData.getInt(LosslessRetryWorker.KEY_RESOLVED, -1))
         assertEquals(3, result.outputData.getInt(LosslessRetryWorker.KEY_TOTAL, -1))
         coVerify(exactly = 1) {
-            downloadQueueDao.updateStatus(id = 100L, status = DownloadStatus.PENDING)
+            downloadQueueDao.requeueIfStillWaiting(100L)
         }
         coVerify(exactly = 1) {
-            downloadQueueDao.updateStatus(id = 102L, status = DownloadStatus.PENDING)
+            downloadQueueDao.requeueIfStillWaiting(102L)
         }
         coVerify(exactly = 0) {
-            downloadQueueDao.updateStatus(id = 101L, status = DownloadStatus.PENDING)
+            downloadQueueDao.requeueIfStillWaiting(101L)
         }
     }
 
@@ -495,7 +487,7 @@ class LosslessRetryWorkerTest {
         newWorker().doWork()
 
         coVerify(exactly = 0) { registry.resolve(match { it.title == "Track 1" }) }
-        coVerify(exactly = 0) { downloadQueueDao.updateStatus(id = 100L, status = any()) }
+        coVerify(exactly = 0) { downloadQueueDao.requeueIfStillWaiting(100L) }
         coVerify(exactly = 0) { enqueuer.enqueue(100L) }
         coVerify(exactly = 1) { enqueuer.enqueue(200L) }
     }

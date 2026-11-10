@@ -64,6 +64,9 @@ class FakeDriveStore : Interceptor {
 
     var storageFull = false
 
+    /** Accounts (by token) whose own Drive is full, for tests with two accounts on one store. */
+    val fullTokens = mutableSetOf<String>()
+
     /** Codes the next piece PUTs answer instead of taking their bytes. */
     val putFaults = ArrayDeque<Int>()
 
@@ -166,7 +169,7 @@ class FakeDriveStore : Interceptor {
     }
 
     private fun startSession(req: Request): Response {
-        if (storageFull) return respond(req, 403, error(403, "storageQuotaExceeded"))
+        if (storageFull || req.header("Authorization")?.removePrefix("Bearer ") in fullTokens) return respond(req, 403, error(403, "storageQuotaExceeded"))
         val body = Json.parseToJsonElement(bodyOf(req).decodeToString()).jsonObject
         val parents = body["parents"]!!.jsonArray.map { it.jsonPrimitive.content }
         if (parents.any { p -> p != "root" && entries[p]?.isFolder != true }) return respond(req, 404, error(404, "notFound"))
@@ -242,6 +245,15 @@ class FakeDriveStore : Interceptor {
 /** Song files in memory, by path. */
 class MemoryAudioFiles : LocalAudioFiles {
     val files = HashMap<String, ByteArray>()
+
+    /** Runs as the uploader reads a file's checksum, the moment before it opens a session. */
+    var onMd5: suspend () -> Unit = {}
+
+    override suspend fun md5(path: String): String {
+        onMd5()
+        return super.md5(path)
+    }
+
     override suspend fun size(path: String): Long? = files[path]?.size?.toLong()
     override fun open(path: String, offset: Long): InputStream =
         ByteArrayInputStream(files[path] ?: throw java.io.FileNotFoundException(path)).apply { skip(offset) }

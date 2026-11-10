@@ -6,6 +6,8 @@ import com.stash.core.data.db.dao.TrackDao
 import com.stash.core.data.db.entity.PlaylistTrackCrossRef
 import com.stash.core.data.db.entity.TrackEntity
 import com.stash.core.auth.TokenManager
+import com.stash.core.data.sync.DownloadJobRegistry
+import com.stash.core.data.sync.connectedDownloadSources
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -50,6 +52,10 @@ class LibraryReconciliationUseCase @Inject constructor(
     private val trackDao: TrackDao,
     private val tokenManager: TokenManager,
     private val playlistDao: PlaylistDao,
+    /** Which rows a job in this process is downloading right now: their claims stay. */
+    private val downloadJobs: DownloadJobRegistry,
+    /** The one-time pass over old cancels, which the requeue waits for. Null only in tests that don't need it. */
+    private val loneCancelBackfill: com.stash.core.data.db.LoneCancelBackfill? = null,
 ) {
     companion object {
         const val TOTAL_STEPS = 5
@@ -82,12 +88,7 @@ class LibraryReconciliationUseCase @Inject constructor(
     ): ReconciliationResult {
         onProgress(0, TOTAL_STEPS)
 
-        val connectedSources = buildList {
-            if (tokenManager.isAuthenticated(com.stash.core.auth.model.AuthService.SPOTIFY)) add("SPOTIFY")
-            if (tokenManager.isAuthenticated(com.stash.core.auth.model.AuthService.YOUTUBE_MUSIC)) add("YOUTUBE")
-                if (tokenManager.hasSoundCloudConnection()) add("SOUNDCLOUD")
-            add("BOTH")
-        }
+        val connectedSources = connectedDownloadSources(tokenManager)
 
         // Leftovers too (#532): Verify reports them as stale entries cleaned up, and
         // a sync clears one before its requeue below, so the song it was hiding
@@ -99,8 +100,10 @@ class LibraryReconciliationUseCase @Inject constructor(
         downloadQueueDao.resetExhaustedRetries()
         onProgress(2, TOTAL_STEPS)
 
-        // The sync's own leftovers only: a download run outside the sync may be mid-song.
-        val resetInProgress = downloadQueueDao.resetStaleSyncInProgress()
+        // Claims no live job holds (a killed process, a stopped worker), any runner's. A song a
+        // live job is downloading keeps its claim: the resume run or the drain outside the sync
+        // may be mid-song, and resetting it let this sync download the same song twice.
+        val resetInProgress = downloadJobs.releaseDeadClaims(downloadQueueDao)
         onProgress(3, TOTAL_STEPS)
 
         // Disk-truth check: every track the DB believes is downloaded gets
@@ -137,7 +140,12 @@ class LibraryReconciliationUseCase @Inject constructor(
         // used to file had no sync id, so only the background drain took them, and
         // since #474 it downloaded them unasked at every app start, Stream-only
         // included (#532). They also hid their songs from the next sync's requeue.
-        val unqueued = if (syncId != null) downloadQueueDao.getUnqueuedTrackIds(connectedSources) else emptyList()
+        // A song cancelled during this sync (Clear queue while it runs) waits for the next one:
+        // this sync is what the user stopped. On the first launch after the update, the one-time
+        // pass over old cancels goes first (LoneCancelBackfill.ensureRan): a lone cancel it hasn't
+        // marked yet would be queued here and its row dropped, so it could never be marked.
+        if (syncId != null) loneCancelBackfill?.ensureRan()
+        val unqueued = if (syncId != null) downloadQueueDao.getUnqueuedTrackIds(connectedSources, runningSync = syncId) else emptyList()
         // A song already on the phone as another row is never downloaded a second time
         // (SameSongRule.isLibraryCopy, the check a tap, a Download switch and the sync ask): the
         // sync links that copy instead and leaves the song unqueued, and this requeue would
@@ -146,19 +154,22 @@ class LibraryReconciliationUseCase @Inject constructor(
         val copies = if (unqueued.isEmpty()) emptyMap() else trackDao.libraryCopiesOf(trackDao.getByIds(unqueued))
         if (copies.isNotEmpty()) linkCopies(copies)
         val unqueuedTrackIds = unqueued.filterNot { it in copies }
-        if (unqueuedTrackIds.isNotEmpty()) {
-            val newEntries = unqueuedTrackIds.map { trackId ->
-                com.stash.core.data.db.entity.DownloadQueueEntity(trackId = trackId, syncId = syncId)
-            }
-            downloadQueueDao.insertAll(newEntries)
-        }
+        // A song Clear queue cancelled before this sync comes back here (it only stopped that
+        // attempt). queueSongs checks each song again, drops its cancelled row (History doesn't
+        // list it as cancelled while it downloads) and keeps a tap's ask, in one transaction. A
+        // waiting-for-lossless row doesn't hold a song back here, as it never has.
+        val requeued = if (unqueuedTrackIds.isEmpty()) 0 else downloadQueueDao.queueSongs(
+            unqueuedTrackIds.map { com.stash.core.data.db.entity.DownloadQueueEntity(trackId = it, syncId = syncId) },
+            runningSync = syncId,
+            leaveWaiting = false,
+        )
         onProgress(5, TOTAL_STEPS)
 
         return ReconciliationResult(
             orphansSwept = sweptOrphans,
             staleResumed = resetInProgress,
             filesMissing = filesMissing,
-            unqueuedRequeued = unqueuedTrackIds.size,
+            unqueuedRequeued = requeued,
             filesAdopted = adopted,
         )
     }

@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import com.stash.core.auth.TokenManager
 import com.stash.core.auth.model.AuthService
 import com.stash.core.auth.model.AuthState
+import com.stash.core.auth.model.SpotifyConnectResult
 import com.stash.core.auth.youtube.YouTubeCookieHelper
 import android.content.Context
 import android.net.Uri
@@ -42,7 +43,6 @@ import com.stash.data.download.files.MoveLibraryCoordinator
 import com.stash.data.download.files.MoveLibraryState
 import com.stash.data.download.files.ReorganizeLibraryCoordinator
 import com.stash.data.download.files.ReorganizeLibraryState
-import com.stash.data.download.lossless.AggregatorRateLimiter
 import com.stash.data.download.lossless.LosslessAvailability
 import com.stash.data.download.lossless.LosslessQualityTier
 import com.stash.data.download.lossless.LosslessSourcePreferences
@@ -50,10 +50,7 @@ import com.stash.data.download.lossless.RoutingRow
 import com.stash.data.download.lossless.qbdlx.QbdlxCredentialStore
 import com.stash.data.download.lossless.qbdlx.QobuzAccountConnector
 import com.stash.data.download.lossless.qbdlx.QobuzLoginResult
-import com.stash.data.download.lossless.qobuz.QobuzSource
-import com.stash.data.download.lossless.relay.LosslessRelayClient
 import com.stash.data.download.prefs.StreamingQualityPreferences
-import com.stash.feature.settings.components.squidCaptchaStatus
 import com.stash.core.data.repository.MusicRepository
 import com.stash.core.model.QualityTier
 import com.stash.core.model.ThemeMode
@@ -64,6 +61,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
@@ -76,6 +74,9 @@ import javax.inject.Inject
 /** Shown when a connect call failed with an error (e.g. the sign-in could not be stored) rather than a rejection. */
 private const val CONNECT_SAVE_FAILED =
     "Couldn't finish connecting on this device. Please try again."
+
+/** Shown in the Spotify paste dialog when the cookie gives no signed-in session. */
+private const val SPOTIFY_COOKIE_INVALID = "Invalid or expired sp_dc cookie. Please try again."
 
 /**
  * ViewModel for the Settings screen.
@@ -119,8 +120,6 @@ class SettingsViewModel @Inject constructor(
     private val youTubeScrobblerState: YouTubeScrobblerState,
     private val losslessPrefs: LosslessSourcePreferences,
     private val streamingQualityPrefs: StreamingQualityPreferences,
-    private val losslessRateLimiter: AggregatorRateLimiter,
-    private val qobuzSource: QobuzSource,
     private val qbdlxCredentialStore: QbdlxCredentialStore,
     private val losslessAvailability: LosslessAvailability,
     private val qobuzAccountConnector: QobuzAccountConnector,
@@ -137,7 +136,6 @@ class SettingsViewModel @Inject constructor(
     private val listenBrainzApiClient: com.stash.core.data.listenbrainz.ListenBrainzApiClient,
     private val listenSinkCoordinator: com.stash.core.data.listen.ListenSinkCoordinator,
     private val listenSubmissionDao: com.stash.core.data.db.dao.ListenSubmissionDao,
-    private val relayClient: LosslessRelayClient,
     /**
      * Issue #255 — Last.fm-as-a-source lifecycle. Connect/disconnect
      * reconcile the "Recommended by Last.fm" recipe so the Sync-tab
@@ -152,6 +150,13 @@ class SettingsViewModel @Inject constructor(
     private val syncStateManager: com.stash.core.data.sync.SyncStateManager,
     /** The line under each "Like on … too" switch, and its "tap to retry". */
     private val likeCoordinator: com.stash.core.data.social.LikeCoordinator,
+    private val syncPreferences: com.stash.core.data.sync.SyncPreferencesManager,
+    /**
+     * The other Spotify accounts (plan 2026-11-04 §3): a Connect as one of them is refused, and
+     * Disconnect removes them all first. core:auth can't see them, so both checks live here.
+     */
+    private val spotifyAccountDao: com.stash.core.data.db.dao.SpotifyAccountDao,
+    private val spotifyExtraAccountRemover: com.stash.core.data.sync.SpotifyExtraAccountRemover,
 ) : ViewModel() {
 
     // ── ListenBrainz ────────────────────────────────────────────────────────
@@ -380,7 +385,7 @@ class SettingsViewModel @Inject constructor(
 
     /**
      * Test-only "Force YouTube fallback" toggle. When on,
-     * [StreamSourceRegistry] skips Kennyy/Squid and streams every track
+     * [StreamSourceRegistry] skips the lossless rungs and streams every track
      * via YouTube — surfaced as a switch in the Diagnostics card so the
      * lossless-down fallback path can be reproduced on demand.
      */
@@ -475,18 +480,18 @@ class SettingsViewModel @Inject constructor(
     private val _localState = MutableStateFlow(LocalState())
 
     /**
-     * True when NO lossless path is configured (no connected account, no custom
-     * endpoint, no relay) — drives the Settings "connect your account" line.
-     * Derived from [LosslessAvailability] rather than the credential store: the
-     * store now knows only about the user's own connected account, and a custom
-     * endpoint or a relay is a working lossless path without one.
+     * True when NO lossless path is configured (no connected Qobuz account, no Tidal
+     * server of the user's own, no Tidal relay in the signed config) — drives the
+     * Settings "no lossless source" line. Derived from [LosslessAvailability] rather
+     * than the credential store: the store knows only about the user's own connected
+     * account, and Tidal is a working lossless path without one.
      *
      * MUST stay declared above the [init] block: Kotlin initializes properties
      * top-to-bottom, and anything in `init` that touches this field before its
      * declaration reads null → NPE opening Settings.
      */
     val qbdlxExpired: StateFlow<Boolean> =
-        losslessAvailability.qbdlxEnabled.map { !it }
+        losslessAvailability.anySourceConfigured.map { !it }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
     /**
@@ -497,52 +502,6 @@ class SettingsViewModel @Inject constructor(
     val losslessRouting: StateFlow<List<RoutingRow>> =
         losslessAvailability.routingRows
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
-
-    // -- Custom lossless endpoint --------------------------------------------
-
-    /** Result of the manual "Test" — reachability only, never health. */
-    enum class EndpointTestState { IDLE, TESTING, REACHABLE, UNREACHABLE }
-
-    private val _customEndpointTest = MutableStateFlow(EndpointTestState.IDLE)
-    val customEndpointTest: StateFlow<EndpointTestState> = _customEndpointTest
-
-    /** "Must be an https:// URL" while the last commit was rejected, else null. */
-    private val _customEndpointError = MutableStateFlow<String?>(null)
-    val customEndpointError: StateFlow<String?> = _customEndpointError
-
-    /**
-     * The user's own relay base, normalised, or null. `QbdlxFileUrlRouter` puts it
-     * ahead of every relay from runtime config, so this field is the whole feature.
-     */
-    val customEndpoint: StateFlow<String?> =
-        losslessPrefs.customLosslessEndpoint
-            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
-
-    /**
-     * Commits the field on IME Done / focus loss (the screen never calls this per
-     * keystroke — `https://re` must never be persisted as a base). Blank means
-     * "clear it", which is a valid instruction and not an error; anything else
-     * that [LosslessSourcePreferences.normaliseEndpoint] rejects is.
-     */
-    fun onCustomEndpointCommitted(raw: String) {
-        val trimmed = raw.trim()
-        val normalised = LosslessSourcePreferences.normaliseEndpoint(trimmed)
-        if (trimmed.isNotEmpty() && normalised == null) {
-            _customEndpointError.value = "Must be an https:// URL"
-            return
-        }
-        _customEndpointError.value = null
-        // A commit invalidates the last test result — it described the old base.
-        // This lives here and NOT in an `onEach` on [customEndpoint]: that operator
-        // runs inside the WhileSubscribed(5_000) share, so leaving Settings for more
-        // than five seconds and coming back silently wiped a "Reachable" the user
-        // had just earned, with nothing having changed.
-        _customEndpointTest.value = EndpointTestState.IDLE
-        viewModelScope.launch { losslessPrefs.setCustomLosslessEndpoint(normalised) }
-    }
-
-    /** Typing clears the rejection — it described text that is no longer in the field. */
-    fun onCustomEndpointEdited() { _customEndpointError.value = null }
 
     // -- Tidal via a self-hosted BitChord server ------------------------------
 
@@ -568,7 +527,12 @@ class SettingsViewModel @Inject constructor(
     private val _bitchordEndpointError = MutableStateFlow<String?>(null)
     val bitchordEndpointError: StateFlow<String?> = _bitchordEndpointError
 
-    /** Commit-on-Done, same rules as [onCustomEndpointCommitted]; blank clears it. */
+    /**
+     * Commits the field on IME Done / focus loss (the screen never calls this per
+     * keystroke — `https://re` must never be persisted as a base). Blank means
+     * "clear it", which is a valid instruction and not an error; anything else
+     * that [LosslessSourcePreferences.normaliseEndpoint] rejects is.
+     */
     fun onBitchordEndpointCommitted(raw: String) {
         val trimmed = raw.trim()
         val normalised = LosslessSourcePreferences.normaliseEndpoint(trimmed)
@@ -585,30 +549,6 @@ class SettingsViewModel @Inject constructor(
     /** Blank clears the stored token. */
     fun onBitchordTokenCommitted(raw: String) {
         viewModelScope.launch { losslessPrefs.setBitchordAccessToken(raw) }
-    }
-
-    /** The in-flight probe, so a second Test cannot be answered by the first. */
-    private var testJob: Job? = null
-
-    /** No endpoint set = nothing to test; the button is disabled for the same reason. */
-    fun onTestCustomEndpoint() {
-        val base = customEndpoint.value ?: return
-        // A probe runs up to 8s and the field stays editable throughout: without
-        // cancelling the previous one AND re-checking what is on screen, a probe of
-        // the OLD base returned and painted a green "Reachable" beside the new one —
-        // a measurement of a URL the user had already replaced.
-        testJob?.cancel()
-        _customEndpointTest.value = EndpointTestState.TESTING
-        testJob = viewModelScope.launch {
-            val reachable = relayClient.probe(base)
-            if (customEndpoint.value == base) {
-                _customEndpointTest.value = if (reachable) {
-                    EndpointTestState.REACHABLE
-                } else {
-                    EndpointTestState.UNREACHABLE
-                }
-            }
-        }
     }
 
     /**
@@ -659,10 +599,6 @@ class SettingsViewModel @Inject constructor(
     fun consumeDeepLinkFocus(): com.stash.core.data.navigation.SettingsFocus? =
         settingsDeepLinkController.consume()
 
-    // Phase 8: `blockedCount` + `onRunYtLibraryBackfill` relocated to
-    // SyncViewModel — the Blocked Songs + Fix-wrong-version rows moved
-    // out of Settings into the Sync tab's Library section.
-
     /**
      * The main UI state, combining reactive auth states from [TokenManager],
      * the persisted quality tier, and local UI state.
@@ -686,9 +622,7 @@ class SettingsViewModel @Inject constructor(
         youTubeHistoryScrobbler.pendingCount(),
         losslessPrefs.enabled,
         losslessPrefs.downloadMode,
-        losslessPrefs.captchaCookieValue,
         losslessPrefs.qualityTier,
-        qobuzSource.lastKnownBadCookie,
         likePreferences.heartDefaultStash,
         likePreferences.heartDefaultSpotify,
         likePreferences.heartDefaultYtMusic,
@@ -734,9 +668,7 @@ class SettingsViewModel @Inject constructor(
         val ytPendingCount = v.next<Int>()
         val losslessEnabled = v.next<Boolean>()
         val downloadMode = v.next<com.stash.core.model.DownloadMode>()
-        val squidWtfCaptchaCookie = (v.next<String?>()).orEmpty()
         val losslessQualityTier = v.next<LosslessQualityTier>()
-        val lastKnownBadCookie = v.next<String?>()
         val heartDefaultStash = v.next<Boolean>()
         val heartDefaultSpotify = v.next<Boolean>()
         val heartDefaultYtMusic = v.next<Boolean>()
@@ -816,8 +748,6 @@ class SettingsViewModel @Inject constructor(
             ytPendingCount = ytPendingCount,
             losslessEnabled = losslessEnabled,
             downloadMode = downloadMode,
-            squidWtfCaptchaCookie = squidWtfCaptchaCookie,
-            squidCaptchaStatus = squidCaptchaStatus(squidWtfCaptchaCookie, lastKnownBadCookie),
             losslessQualityTier = losslessQualityTier,
             streamingWifiTier = streamingWifiTier,
             streamingCellularTier = streamingCellularTier,
@@ -1315,43 +1245,190 @@ class SettingsViewModel @Inject constructor(
             return
         }
 
-        viewModelScope.launch {
+        spotifyConnectJob?.cancel()
+        spotifyConnectJob = viewModelScope.launch {
             _localState.update {
                 it.copy(isSpotifyCookieValidating = true, spotifyCookieError = null)
             }
 
-            val success = connectGuarded { tokenManager.connectSpotifyWithCookie(cookie, username) }
-
-            if (success == true) {
-                // A fresh sp_dc renews the session the last sync found expired.
-                syncStateManager.clearAuthExpiry(spotify = true)
-                retryLikesAfterSignIn(com.stash.core.data.social.Destination.SPOTIFY)
-                _localState.update {
-                    it.copy(
-                        showSpotifyCookieDialog = false,
-                        spotifyCookieError = null,
-                        isSpotifyCookieValidating = false,
-                    )
+            // Null: connect from the cookie. Checked already: from that check, no second token exchange.
+            val checked: com.stash.core.auth.model.ValidatedSpotifySignIn? = when (val precheck = precheckSpotifyConnect(cookie)) {
+                MainConnectPrecheck.ConnectCookie -> null
+                is MainConnectPrecheck.ConnectChecked -> precheck.signIn
+                is MainConnectPrecheck.Failed -> {
+                    _localState.update { it.copy(spotifyCookieError = precheck.message, isSpotifyCookieValidating = false) }
+                    return@launch
                 }
-            } else {
-                _localState.update {
-                    it.copy(
-                        spotifyCookieError = if (success == null) {
-                            CONNECT_SAVE_FAILED
-                        } else {
-                            "Invalid or expired sp_dc cookie. Please try again."
-                        },
-                        isSpotifyCookieValidating = false,
-                    )
+                is MainConnectPrecheck.AlreadyOther -> {
+                    // Refused, nothing saved. The paste dialog is the wrong place to say why (as for
+                    // a different account below): it closes and the Accounts screen explains.
+                    _localState.update {
+                        it.copy(showSpotifyCookieDialog = false, spotifyCookieError = null, isSpotifyCookieValidating = false)
+                    }
+                    _spotifyAlreadyOtherAccount.value = precheck.name
+                    return@launch
+                }
+            }
+
+            val connected = connectGuarded {
+                if (checked == null) {
+                    tokenManager.connectSpotifyWithCookie(cookie, username)
+                } else {
+                    tokenManager.connectSpotifyWithSignIn(checked, username)
+                }
+            }
+            when (val result = connected) {
+                SpotifyConnectResult.Connected -> {
+                    // A fresh sp_dc renews the session the last sync found expired.
+                    syncStateManager.clearAuthExpiry(spotify = true)
+                    retryLikesAfterSignIn(com.stash.core.data.social.Destination.SPOTIFY)
+                    _localState.update {
+                        it.copy(
+                            showSpotifyCookieDialog = false,
+                            spotifyCookieError = null,
+                            isSpotifyCookieValidating = false,
+                        )
+                    }
+                }
+                is SpotifyConnectResult.DifferentAccount -> {
+                    // Refused, nothing saved: the connected account (and its expired flag,
+                    // and its waiting likes) stay as they were. The paste dialog is the wrong
+                    // place to say why, so it closes and the Accounts screen explains.
+                    _localState.update {
+                        it.copy(
+                            showSpotifyCookieDialog = false,
+                            spotifyCookieError = null,
+                            isSpotifyCookieValidating = false,
+                        )
+                    }
+                    _spotifyAccountMismatch.value = SpotifyAccountMismatch.of(result)
+                }
+                SpotifyConnectResult.Invalid, null -> {
+                    _localState.update {
+                        it.copy(
+                            spotifyCookieError = if (result == null) {
+                                CONNECT_SAVE_FAILED
+                            } else {
+                                SPOTIFY_COOKIE_INVALID
+                            },
+                            isSpotifyCookieValidating = false,
+                        )
+                    }
                 }
             }
         }
     }
 
+    /** The Spotify sign-in being checked, which Cancel in its dialog drops. */
+    private var spotifyConnectJob: Job? = null
+
+    private val _spotifyAccountMismatch = MutableStateFlow<SpotifyAccountMismatch?>(null)
+
     /**
-     * Dismisses the Spotify cookie input dialog without connecting.
+     * Set when a Spotify sign-in was refused for being another account than the connected one;
+     * the Accounts screen tells the listener how to switch. Kept out of the big [uiState] combine
+     * like [authExpiry]: one screen reads it.
+     */
+    val spotifyAccountMismatch: StateFlow<SpotifyAccountMismatch?> = _spotifyAccountMismatch.asStateFlow()
+
+    /** The listener read why the Spotify sign-in was refused. */
+    fun onDismissSpotifyAccountMismatch() {
+        _spotifyAccountMismatch.value = null
+    }
+
+    /** What [precheckSpotifyConnect] found. */
+    private sealed interface MainConnectPrecheck {
+        /** No other accounts: connect from the cookie, exactly as before they existed. */
+        data object ConnectCookie : MainConnectPrecheck
+
+        /** Checked, and not one of the other accounts (or not identified): connect [signIn]. */
+        data class ConnectChecked(val signIn: com.stash.core.auth.model.ValidatedSpotifySignIn) : MainConnectPrecheck
+
+        /** The sign-in is one of the other accounts, [name]: refused. */
+        data class AlreadyOther(val name: String) : MainConnectPrecheck
+
+        /** The check itself said no (the cookie doesn't sign in) or failed: [message] in the paste dialog. */
+        data class Failed(val message: String) : MainConnectPrecheck
+    }
+
+    /**
+     * A Connect (or Reconnect) on the Spotify card must not take an account that is already one of
+     * the other Spotify accounts: the same account would then be both, its library read twice and
+     * its likes counted as the main account's. core:auth can't see that list, so the cookie is
+     * identified here first ([TokenManager.validateSpotifyCookie], which saves nothing), only while
+     * there are other accounts at all: with none, the connect runs exactly as before. A check that
+     * can't tell whose account it is lets the connect go ahead, as the account-swap guard does: a
+     * guard that can't see must not lock anyone out. A sign-in it checked is connected from that
+     * check ([TokenManager.connectSpotifyWithSignIn]): one token exchange, not two, so a rate-limited
+     * second exchange can't turn a good cookie into "invalid".
+     */
+    private suspend fun precheckSpotifyConnect(cookie: String): MainConnectPrecheck {
+        val anyOther = try {
+            spotifyAccountDao.count() > 0
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            android.util.Log.w("SettingsViewModel", "couldn't read the other Spotify accounts; connecting unchecked", e)
+            false
+        }
+        if (!anyOther) return MainConnectPrecheck.ConnectCookie
+        return when (val check = connectGuarded { tokenManager.validateSpotifyCookie(cookie.trim()) }) {
+            null -> MainConnectPrecheck.Failed(CONNECT_SAVE_FAILED)
+            com.stash.core.auth.model.SpotifyCookieCheck.Invalid -> MainConnectPrecheck.Failed(SPOTIFY_COOKIE_INVALID)
+            is com.stash.core.auth.model.SpotifyCookieCheck.Valid -> {
+                val other = check.account?.let { account ->
+                    try {
+                        spotifyAccountDao.findByAccount(account.userId)
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        android.util.Log.w("SettingsViewModel", "couldn't look the account up among the others; connecting unchecked", e)
+                        null
+                    }
+                }
+                if (other != null) MainConnectPrecheck.AlreadyOther(other.label) else MainConnectPrecheck.ConnectChecked(check.signIn)
+            }
+        }
+    }
+
+    private val _spotifyAlreadyOtherAccount = MutableStateFlow<String?>(null)
+
+    /**
+     * Set to an other account's name when a Connect on the Spotify card signed in as it; the
+     * Accounts screen says to remove it first. One screen reads it, like [spotifyAccountMismatch].
+     */
+    val spotifyAlreadyOtherAccount: StateFlow<String?> = _spotifyAlreadyOtherAccount.asStateFlow()
+
+    fun onDismissSpotifyAlreadyOtherAccount() {
+        _spotifyAlreadyOtherAccount.value = null
+    }
+
+    private val _spotifyDisconnectStopped = MutableStateFlow<SpotifyDisconnectStopped?>(null)
+
+    /**
+     * Set when Disconnect stopped because an other account couldn't be signed out on this phone
+     * (nothing more was disconnected); the Accounts screen says so.
+     */
+    val spotifyDisconnectStopped: StateFlow<SpotifyDisconnectStopped?> = _spotifyDisconnectStopped.asStateFlow()
+
+    fun onDismissSpotifyDisconnectStopped() {
+        _spotifyDisconnectStopped.value = null
+    }
+
+    /**
+     * True while Spotify syncs in Refresh mode, when the Disconnect confirmation says what a
+     * different account's first sync would do. One dialog reads it, so it stays out of [uiState].
+     */
+    val spotifyRefreshMode: StateFlow<Boolean> = syncPreferences.spotifySyncMode
+        .map { it == com.stash.core.model.SyncMode.REFRESH }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+
+    /**
+     * Dismisses the Spotify cookie input dialog without connecting. A check still running is
+     * dropped: nothing is saved until its very last step, and this stops it short of that.
      */
     fun onDismissSpotifyCookieDialog() {
+        spotifyConnectJob?.cancel()
         _localState.update {
             it.copy(
                 showSpotifyCookieDialog = false,
@@ -1363,14 +1440,55 @@ class SettingsViewModel @Inject constructor(
 
     /**
      * Disconnects the Spotify account by clearing all stored credentials.
+     *
+     * With other Spotify accounts added (plan 2026-11-04 §3.5, v1), every one of them is removed
+     * first, each exactly as its own Remove does it ([com.stash.core.data.sync.SpotifyExtraAccountRemover]:
+     * its sign-in forgotten, its rows hidden, its downloads kept): they sync behind the connected
+     * account and can't stay without it (making one of them the connected account is for later).
+     * Should one not sign out on this phone, nothing more is done, the connected account included,
+     * and [spotifyDisconnectStopped] says which. One already gone (a second tap) counts as removed.
      */
     fun onDisconnectSpotify() {
         viewModelScope.launch {
+            removeOtherSpotifyAccounts()?.let { stopped ->
+                _spotifyDisconnectStopped.value = stopped
+                return@launch
+            }
             musicRepository.cancelPendingDownloadsForSource("SPOTIFY")
             tokenManager.clearAuth(AuthService.SPOTIFY)
             // Nothing left to re-authenticate: the Sync tab's banner stops asking.
             syncStateManager.clearAuthExpiry(spotify = true)
         }
+    }
+
+    /** Removes every other Spotify account, in order; what stopped it, or null when all went. */
+    private suspend fun removeOtherSpotifyAccounts(): SpotifyDisconnectStopped? {
+        val others = try {
+            spotifyAccountDao.getAll()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            android.util.Log.w("SettingsViewModel", "couldn't read the other Spotify accounts; Spotify stays connected", e)
+            return SpotifyDisconnectStopped(name = null)
+        }
+        for (other in others) {
+            val removal = try {
+                spotifyExtraAccountRemover.remove(other.id)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                android.util.Log.w("SettingsViewModel", "removing an other Spotify account failed part way", e)
+                null
+            }
+            when (removal) {
+                is com.stash.core.data.sync.SpotifyAccountRemoval.Removed,
+                com.stash.core.data.sync.SpotifyAccountRemoval.NotFound,
+                -> Unit
+                com.stash.core.data.sync.SpotifyAccountRemoval.SignInNotForgotten, null ->
+                    return SpotifyDisconnectStopped(name = other.label)
+            }
+        }
+        return null
     }
 
     /**
@@ -1380,7 +1498,7 @@ class SettingsViewModel @Inject constructor(
      * unavailable), the exception used to escape this bare viewModelScope
      * launch and crash the app mid sign-in. Cancellation still propagates.
      */
-    private suspend fun connectGuarded(connect: suspend () -> Boolean): Boolean? = try {
+    private suspend fun <T : Any> connectGuarded(connect: suspend () -> T): T? = try {
         connect()
     } catch (e: kotlinx.coroutines.CancellationException) {
         throw e
@@ -1890,7 +2008,7 @@ class SettingsViewModel @Inject constructor(
 
     /**
      * Master switch for the lossless-source pipeline. When true, the
-     * download path tries the squid.wtf-proxied Qobuz registry before
+     * download path tries the lossless registry (own Qobuz, then Tidal) before
      * falling back to yt-dlp; when false (default), yt-dlp runs as it
      * always has and the lossless code is dead at runtime.
      */
@@ -1931,17 +2049,6 @@ class SettingsViewModel @Inject constructor(
     fun onYoutubeFallbackChanged(value: Boolean) {
         viewModelScope.launch {
             losslessPrefs.setYoutubeFallbackEnabled(value)
-        }
-    }
-
-    /**
-     * Persists the user-pasted `captcha_verified_at` cookie value
-     * for qobuz.squid.wtf. Empty / blank input clears the stored value.
-     * Whitespace is trimmed inside [LosslessSourcePreferences.setCaptchaCookieValue].
-     */
-    fun onSquidWtfCaptchaCookieChanged(value: String) {
-        viewModelScope.launch {
-            losslessPrefs.setCaptchaCookieValue(value)
         }
     }
 
@@ -2014,18 +2121,6 @@ class SettingsViewModel @Inject constructor(
 
     fun onPreferCloudCopiesChanged(value: Boolean) =
         viewModelScope.launch { streamingQualityPrefs.setPreferCloudCopies(value) }
-
-    /**
-     * Clear the rate-limiter's circuit breaker for the squid.wtf
-     * source. Useful when the breaker tripped on a transient outage
-     * and the user knows the source is back up — skips the 30-min
-     * organic timeout. No-op if the breaker isn't currently tripped.
-     */
-    fun onResetLosslessRateLimiter() {
-        viewModelScope.launch {
-            losslessRateLimiter.reset(QobuzSource.SOURCE_ID)
-        }
-    }
 
     // -- Library & Likes (v0.9.13) ------------------------------------------
 

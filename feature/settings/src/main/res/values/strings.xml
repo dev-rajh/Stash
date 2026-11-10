@@ -91,6 +91,10 @@
     <string name="settings_license_label">License</string>
     <string name="settings_album_art_credit">Album art</string>
     <string name="settings_album_art_credit_detail">Back covers and inside pages come from the Cover Art Archive and Discogs. This app uses Discogs\' API but is not affiliated with, sponsored or endorsed by Discogs. \'Discogs\' is a trademark of Zink Media, LLC.</string>
+    <string name="settings_open_source_notices">Open-source notices</string>
+    <string name="settings_open_source_notices_detail">Tuning is built on Signalsmith Stretch and Signalsmith Linear (MIT License).</string>
+    <string name="settings_open_source_notices_body" translatable="false">Signalsmith Stretch\nCopyright (c) 2022 Geraint Luff / Signalsmith Audio Ltd.\n\nSignalsmith Linear\nCopyright (c) 2025 Signalsmith Audio\n\nMIT License\n\nPermission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the \"Software\"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.</string>
+    <string name="settings_open_source_notices_close">Close</string>
     <string name="settings_checking_updates_toast">Checking for updates…</string>
     <string name="settings_checking_updates">Checking…</string>
     <string name="settings_check_updates">Check for updates</string>
@@ -134,7 +138,7 @@
     <string name="settings_support_goal">%1$s of %2$s this month</string>
     <!-- A supporter's card: thanks and their status instead of the ask. -->
     <string name="settings_support_thanks_title">Thank you for supporting Stash</string>
-    <string name="settings_support_thanks_line">You\'re a supporter: unlimited Tidal &amp; Qobuz is on.</string>
+    <string name="settings_support_thanks_line">You\'re a supporter: unlimited Tidal is on.</string>
     <string name="settings_support_donate_again">Donate again</string>
     <!-- Settings › About: the GitHub star row (the Support card also has a small "Star" button, and TalkBack reads
          this title for it). -->
@@ -175,6 +179,102 @@
     <string name="settings_spotify_username_label">Spotify username (optional)</string>
     <string name="settings_spotify_username_placeholder">Your Spotify username</string>
     <string name="settings_spotify_username_hint">Find at spotify.com/account under \'Username\'</string>
+    <!-- Settings > Accounts > Spotify: a sign-in as a different account than the connected one is refused; nothing is replaced. %1$s = connected account's name, %2$s = the other account's name. -->
+    <string name="settings_spotify_other_account_title">Different Spotify account</string>
+    <string name="settings_spotify_other_account_body">Stash is connected to Spotify as %1$s, but you just signed in as %2$s. To reconnect %1$s, sign in again with %1$s\'s email or Google account. To switch to %2$s, tap Disconnect on the Spotify card first.</string>
+    <!-- Same, when the other account has no name of its own to show (it reads the same as the connected one). %1$s = connected account's name. -->
+    <string name="settings_spotify_other_account_body_unnamed">Stash is connected to Spotify as %1$s, but you just signed in with a different account. To reconnect %1$s, sign in again with %1$s\'s email or Google account. To switch accounts, tap Disconnect on the Spotify card first.</string>
+
+    <!-- Settings > Accounts > Spotify: the "other accounts". Besides the connected Spotify account (the one hearts go to), up to 3 more can be added. Stash only reads them: their playlists, liked songs, saved albums and, if switched on, mixes. Never call them "extra", "secondary" or "main" in these strings. -->
+    <!-- Under an other account's name on its card. %1$s = the name of the connected Spotify account, which hearts go to. -->
+    <string name="settings_spotify_others_read_only">Read-only: hearts go to %1$s</string>
+    <!-- The same, when the connected account has no name to show (or none is connected). -->
+    <string name="settings_spotify_others_read_only_unnamed">Read-only</string>
+    <!-- Under an other account's name when its sign-in stopped working, or isn't on this phone (after a restore). -->
+    <string name="settings_spotify_others_signed_out">Signed out. Sign in again to keep it syncing.</string>
+    <!-- Button on an other account's card and sheet. -->
+    <string name="settings_spotify_others_sign_in_again">Sign in again</string>
+    <!-- Accessibility: what tapping an other account's card does. -->
+    <string name="settings_spotify_others_open">Open its settings</string>
+    <!-- The row under the Spotify accounts that adds one more. -->
+    <string name="settings_spotify_others_add_title">Add another Spotify account</string>
+    <!-- Under it. %1$s = the name of the connected Spotify account. -->
+    <string name="settings_spotify_others_add_subtitle">Stash reads its playlists and liked songs. Hearts still go to %1$s.</string>
+    <string name="settings_spotify_others_add_subtitle_unnamed">Stash reads its playlists and liked songs.</string>
+    <!-- Title of Spotify's sign-in screen and of the paste dialog when adding an other account. -->
+    <string name="settings_spotify_others_add_signin_title">Add a Spotify account</string>
+    <!-- Shown above Spotify's sign-in page when adding an other account. "Continue with Google" is the button on Spotify's own page: keep Spotify's wording in your language. -->
+    <string name="settings_spotify_others_google_hint">Use \"Continue with Google\" only if the other Spotify account uses a different Google account, or sign in with email.</string>
+    <!-- Shown above Spotify's sign-in page when signing an other account in again. %1$s = that account's name. -->
+    <string name="settings_spotify_others_again_hint">Sign in as %1$s, with the same email or Google account as before.</string>
+    <!-- Errors in the paste dialog while adding or signing in an other account. -->
+    <string name="settings_spotify_others_error_invalid">That sign-in didn\'t work. Try again.</string>
+    <string name="settings_spotify_others_error_not_saved">Couldn\'t finish on this phone. Try again.</string>
+    <!-- Dialog: the account just signed in is the one Stash is already connected to, so it wasn't added. %1$s = its name. -->
+    <string name="settings_spotify_others_already_connected_title">Already connected</string>
+    <string name="settings_spotify_others_already_connected_body">That\'s %1$s, the Spotify account Stash is already connected to. To add another, sign in with a different account. If \"Continue with Google\" signed you straight back in, use the other account\'s email instead.</string>
+    <string name="settings_spotify_others_already_connected_body_unnamed">That\'s the Spotify account Stash is already connected to. To add another, sign in with a different account. If \"Continue with Google\" signed you straight back in, use the other account\'s email instead.</string>
+    <!-- Dialog: Spotify didn't say whose account the sign-in is, so it wasn't added. -->
+    <string name="settings_spotify_others_unidentified_title">Couldn\'t tell which account</string>
+    <string name="settings_spotify_others_unidentified_body">Spotify didn\'t say which account this is, so Stash can\'t keep it apart from your others. Try again in a moment.</string>
+    <!-- Dialog: Stash couldn't check whether the sign-in is the Spotify account it is already connected to, so nothing was saved. %1$s = that connected account's name. "Reconnect" is the button on its card in Settings > Accounts. -->
+    <string name="settings_spotify_others_main_unchecked_title">Couldn\'t check this account</string>
+    <string name="settings_spotify_others_main_unchecked_body">Stash couldn\'t check this account against %1$s, the Spotify account it\'s connected to, so nothing was saved. Try again in a moment, or reconnect %1$s first.</string>
+    <!-- As settings_spotify_others_main_unchecked_body, when the connected account has no name to show. -->
+    <string name="settings_spotify_others_main_unchecked_body_unnamed">Stash couldn\'t check this account against the Spotify account it\'s connected to, so nothing was saved. Try again in a moment, or reconnect that account first.</string>
+    <!-- Dialog (titled "Different Spotify account"): signing an other account in again landed on another account. %1$s = the account's name. -->
+    <string name="settings_spotify_others_different_body">That\'s a different Spotify account. To keep %1$s syncing, sign in as %1$s, with the same email or Google account as before.</string>
+    <!-- Dialog: the most other accounts are added already. %1$d = how many (3). -->
+    <string name="settings_spotify_others_full_title">No room for another account</string>
+    <string name="settings_spotify_others_full_body">Stash syncs up to %1$d other Spotify accounts. Remove one to add another.</string>
+    <!-- Dialog right after adding an account: its name, pre-filled with Spotify's. -->
+    <string name="settings_spotify_others_name_title">Name this account</string>
+    <!-- Dialog title: renaming an other account. -->
+    <string name="settings_spotify_others_rename_title">Rename</string>
+    <string name="settings_spotify_others_name_hint">Shown on its cards in Stash, on this phone only.</string>
+    <!-- Button: keep the pre-filled name. -->
+    <string name="settings_spotify_others_name_skip">Skip</string>
+    <!-- Dialog after naming a new account. %1$s = its name. -->
+    <string name="settings_spotify_others_sync_now_title">Sync now?</string>
+    <string name="settings_spotify_others_sync_now_body">Bring in %1$s\'s playlists and liked songs now, or with the next sync.</string>
+    <string name="settings_spotify_others_sync_now">Sync now</string>
+    <string name="settings_spotify_others_sync_later">Later</string>
+    <!-- An other account's sheet: its name row, then what it syncs. -->
+    <string name="settings_spotify_others_name_row">Name</string>
+    <string name="settings_spotify_others_sync_label">Sync from this account</string>
+    <string name="settings_spotify_others_playlists_title">Playlists</string>
+    <string name="settings_spotify_others_playlists_subtitle">Its own playlists and the ones it follows</string>
+    <string name="settings_spotify_others_liked_title">Liked Songs</string>
+    <string name="settings_spotify_others_liked_subtitle">Shown with your other liked songs from Spotify</string>
+    <string name="settings_spotify_others_albums_title">Saved albums</string>
+    <string name="settings_spotify_others_albums_subtitle">In Library › Albums</string>
+    <string name="settings_spotify_others_mixes_title">Mixes</string>
+    <string name="settings_spotify_others_mixes_subtitle">Daily Mix, Discover Weekly and others. Off keeps Home from showing two of each.</string>
+    <!-- The last row of an other account's sheet. %1$s = its name. -->
+    <string name="settings_spotify_others_remove">Remove %1$s</string>
+    <!-- Confirm before removing an other account. %1$s = its name. Its playlists are hidden, not deleted: adding the same account again brings them back. -->
+    <string name="settings_spotify_others_remove_title">Remove %1$s?</string>
+    <string name="settings_spotify_others_remove_body">Stash signs out of %1$s on this phone and takes its playlists, albums and liked songs out of your library. Songs you\'ve downloaded stay on this phone.\n\nAdd %1$s again any time to bring its playlists back.</string>
+    <string name="settings_spotify_others_remove_confirm">Remove</string>
+    <!-- Short messages at the bottom of the screen. %1$s = the account's name. -->
+    <string name="settings_spotify_others_signed_in_again">%1$s is signed in again.</string>
+    <string name="settings_spotify_others_removed">%1$s removed. Its downloaded songs stay on this phone.</string>
+    <string name="settings_spotify_others_already_removed">That account was already removed.</string>
+    <string name="settings_spotify_others_not_removed">Couldn\'t sign out of %1$s on this phone, so it wasn\'t removed. Try again.</string>
+    <string name="settings_spotify_others_remove_unfinished">Couldn\'t finish removing %1$s. Remove it again to finish.</string>
+    <string name="settings_spotify_others_added_first_sync">%1$s added. Its music comes in with your first sync.</string>
+    <string name="settings_spotify_others_syncing">Syncing now.</string>
+    <!-- Disconnect on the Spotify card while other accounts are added: every Spotify account goes. %1$s = all their names, comma-separated ("Rawn, Sam"). -->
+    <string name="settings_spotify_disconnect_all_title">Disconnect all Spotify accounts?</string>
+    <string name="settings_spotify_disconnect_all_body">Stash signs out of all your Spotify accounts on this phone (%1$s) and stops syncing them. Playlists from your other accounts leave your library, and songs from Spotify still waiting to download are dropped from the queue.\n\nSongs you\'ve already downloaded stay on this phone.</string>
+    <string name="settings_spotify_disconnect_all_confirm">Disconnect all</string>
+    <!-- Dialog: Disconnect stopped because one other account couldn't be signed out on this phone. %1$s = its name. -->
+    <string name="settings_spotify_disconnect_stopped_title">Spotify is still connected</string>
+    <string name="settings_spotify_disconnect_stopped_body">Couldn\'t sign out of %1$s on this phone, so Spotify stays connected. Try again.</string>
+    <string name="settings_spotify_disconnect_stopped_body_unnamed">Couldn\'t sign out of your other Spotify accounts on this phone, so Spotify stays connected. Try again.</string>
+    <!-- Dialog: Connect on the Spotify card signed in as an account already added as an other account; nothing changed. %1$s = its name. -->
+    <string name="settings_spotify_already_other_title">Already added</string>
+    <string name="settings_spotify_already_other_body">%1$s is already one of your other Spotify accounts. To connect it here instead, remove %1$s first, then connect again.</string>
 
     <!-- Settings > Accounts > YouTube Login & Fallbacks -->
     <string name="settings_youtube_signin_title">Sign in to YouTube Music</string>
@@ -185,18 +285,6 @@
     <string name="settings_youtube_how_to_get_cookies_steps">1. Open a Private/Incognito window\n2. Go to music.youtube.com and log in\n3. Press F12 to open DevTools\n4. Go to Network tab, click any request\n5. Find \'Cookie\' in Request Headers\n6. Copy the ENTIRE cookie value\n\nMust contain: SAPISID, LOGIN_INFO, SID</string>
     <string name="settings_youtube_cookie_label">Cookie</string>
     <string name="settings_youtube_cookie_placeholder">Paste your cookie here</string>
-    <string name="settings_youtube_credentials_title">YouTube Music Credentials</string>
-    <string name="settings_youtube_credentials_desc">Enter your Google Cloud OAuth credentials. Create them at console.cloud.google.com with the \"TVs and Limited Input devices\" type and enable the YouTube Data API v3.</string>
-    <string name="settings_youtube_client_id_label">Client ID</string>
-    <string name="settings_youtube_client_secret_label">Client Secret</string>
-    <string name="settings_youtube_save_connect">Save &amp; Connect</string>
-    <string name="settings_youtube_device_code_instructions">Go to the URL below and enter this code:</string>
-    <string name="settings_youtube_copy_code">Copy Code</string>
-    <string name="settings_youtube_copy_code_cd">Copy code</string>
-    <string name="settings_youtube_open_browser">Open Browser</string>
-    <string name="settings_youtube_open_browser_cd">Open browser</string>
-    <string name="settings_youtube_waiting_authorization">Waiting for authorization…</string>
-    <string name="settings_youtube_device_code_clip_label">YouTube Code</string>
     <string name="settings_lastfm_connect_first">Connect Last.fm first.</string>
     <string name="settings_lastfm_reach_error">Couldn\'t reach Last.fm. Your plays stay queued and will be sent later.</string>
     <string name="settings_lastfm_no_new_scrobbles">No new scrobbles to send.</string>
@@ -232,6 +320,8 @@
     <!-- Settings > Accounts > DisconnectAccountDialog -->
     <string name="settings_disconnect_account_title">Disconnect %1$s?</string>
     <string name="settings_disconnect_account_body">Stash signs out of %1$s on this phone and stops syncing it. Songs from %1$s still waiting to download are dropped from the queue.\n\nSongs you\'ve already downloaded stay in your library, and you can reconnect any time.</string>
+    <!-- Added to the Spotify disconnect dialog while Spotify syncs in Refresh mode. Disconnecting alone hides nothing: the first sync of a different account does. -->
+    <string name="settings_disconnect_spotify_refresh_note">Spotify syncs in Refresh mode: if you connect a different account next, its first sync takes this account\'s playlists out of Stash. \"Undo last sync\" in Sync History brings them back, until the next sync runs.</string>
 
     <!-- Settings > Accounts > LikeMirrorWarningDialog -->
     <string name="settings_like_mirror_warning_title">Mirror likes to %1$s?</string>
@@ -411,7 +501,7 @@
     <string name="settings_lossless_subtitle_off">Off: songs play from JioSaavn or YouTube</string>
     <string name="settings_lossless_subtitle_no_source">No lossless source set up yet</string>
     <string name="settings_lossless_subtitle_active">Streams in FLAC</string>
-    <string name="settings_qobuz_no_source_warning">No lossless source configured — connect your Qobuz account below</string>
+    <string name="settings_qobuz_no_source_warning">No lossless source configured — connect your own Qobuz account below</string>
     <string name="settings_qobuz_account_title">Your Qobuz account</string>
     <string name="settings_connected_as">Connected as %1$s</string>
     <string name="settings_qobuz_connected_token">Connected (token)</string>
@@ -451,22 +541,12 @@
     <string name="settings_lossy_fallback_switch_label">JioSaavn, then YouTube, when there\'s no lossless match</string>
     <string name="settings_lossy_fallback_switch_label_aac">JioSaavn, then YouTube, when Tidal has no AAC</string>
     <string name="settings_advanced">Advanced</string>
-    <string name="settings_custom_relay_desc">Point Stash at your own lossless relay. It takes priority over Stash\'s.</string>
-    <string name="settings_custom_endpoint_label">Custom lossless endpoint</string>
     <string name="settings_url_placeholder">https://…</string>
-    <string name="settings_test">Test</string>
-    <string name="settings_testing">Testing…</string>
-    <string name="settings_reachable">Reachable</string>
-    <string name="settings_not_reachable">Not reachable</string>
     <string name="settings_bitchord_desc">Optional: use your own BitChord server for Tidal instead of Stash\'s. Leave blank otherwise.</string>
     <string name="settings_bitchord_server_label">Custom Tidal server (optional)</string>
     <string name="settings_access_token_label">Access token (optional)</string>
     <string name="settings_bitchord_token_saved">A token is saved</string>
     <string name="settings_bitchord_token_hint">Only if your own server sets ACCESS_TOKEN</string>
-    <string name="settings_squid_captcha_desc">qobuz.squid.wtf captcha: paste the captcha_verified_at cookie value directly.</string>
-    <string name="settings_squid_captcha_label">captcha_verified_at value</string>
-    <string name="settings_squid_captcha_placeholder">e.g. 1777687404951</string>
-    <string name="settings_reset_lossless_attempts">Reset lossless attempts</string>
     <string name="settings_equalizer_title">Equalizer</string>
 
     <!-- Settings > Audio & Quality > Lossless tiers -->
@@ -493,12 +573,36 @@
     <string name="settings_hires_bit_perfect_dialog_body">In bit-perfect mode Android doesn\'t touch the volume: your DAC sets it. If your DAC has no volume control of its own, the phone\'s volume keys may stop working and music can play at full level.\n\nTurn the volume down before you press play. EQ, normalization and crossfade are bypassed while bit-perfect is active.</string>
     <string name="settings_hires_bit_perfect_confirm">Use bit-perfect</string>
 
+    <!-- Settings > Audio & Quality > Output > Tuning (TuningSection) -->
+    <string name="settings_tuning_title">Tuning</string>
+    <string name="settings_tuning_value_standard">Standard</string>
+    <string name="settings_tuning_value_hz">A = %1$s Hz</string>
+    <string name="settings_tuning_subtitle_lower">A little lower in pitch. Same speed.</string>
+    <string name="settings_tuning_subtitle_higher">A little higher in pitch. Same speed.</string>
+    <string name="settings_tuning_unavailable">Not available on this phone</string>
+    <string name="settings_tuning_cents_lower">%1$s cents lower</string>
+    <string name="settings_tuning_cents_higher">%1$s cents higher</string>
+    <string name="settings_tuning_cents_standard">Standard pitch, as recorded</string>
+    <string name="settings_tuning_preset_standard">%1$s · Standard</string>
+    <string name="settings_tuning_preset_528">%1$s · C = %2$s</string>
+    <string name="settings_tuning_preset_baroque">%1$s · Baroque</string>
+    <string name="settings_tuning_slider">Tuning reference</string>
+    <string name="settings_tuning_exact_label">Exact Hz</string>
+    <string name="settings_tuning_exact_range">Any value from %1$s to %2$s Hz</string>
+    <string name="settings_tuning_exact_lowest">Sets %1$s Hz, the lowest</string>
+    <string name="settings_tuning_exact_highest">Sets %1$s Hz, the highest</string>
+    <string name="settings_tuning_exact_invalid">Type a number, like %1$s or %2$s</string>
+    <string name="settings_tuning_set">Set</string>
+    <string name="settings_tuning_reset">Back to %1$s</string>
+    <string name="settings_tuning_hz_suffix">Hz</string>
+    <string name="settings_tuning_footer">Applies to everything you play, streamed or downloaded. Speed and lyrics don\'t change. Not used while casting. Bit-perfect turns off while tuning is on.</string>
+
     <!-- Settings > Audio & Quality > SupporterSection -->
-    <string name="settings_supporter_active">Supporter · unlimited Tidal &amp; Qobuz</string>
+    <string name="settings_supporter_active">Supporter · unlimited Tidal</string>
     <string name="settings_supporter_remove_from_device">Remove from this device</string>
-    <string name="settings_supporter_offer">Unlimited Tidal &amp; Qobuz for supporters</string>
-    <string name="settings_supporter_sheet_title">Unlimited Tidal &amp; Qobuz</string>
-    <string name="settings_supporter_sheet_desc">$5 or more on Ko-fi unlocks unlimited Tidal and Qobuz, FLAC and AAC. Enter the email you used on Ko-fi and we\'ll send you a code.</string>
+    <string name="settings_supporter_offer">Unlimited Tidal for supporters</string>
+    <string name="settings_supporter_sheet_title">Unlimited Tidal</string>
+    <string name="settings_supporter_sheet_desc">$5 or more on Ko-fi unlocks unlimited Tidal, FLAC and AAC. Enter the email you used on Ko-fi and we\'ll send you a code.</string>
     <string name="settings_supporter_kofi_email_label">Ko-fi email</string>
     <string name="settings_supporter_email_code_button">Email me a code</string>
     <string name="settings_supporter_code_sent_desc">If %1$s is on our Ko-fi list, a code is on its way. It can take a minute.</string>
@@ -1091,6 +1195,32 @@
     <string name="settings_cloud_section_title">Cloud storage</string>
     <string name="settings_cloud_gdrive_add_songs_title">Add songs from Google Drive</string>
     <string name="settings_cloud_gdrive_add_songs_subtitle">Stash sees only the songs you pick.</string>
+    <string name="settings_cloud_gdrive_account_unidentified">Google didn\'t say which account this is, so Stash can\'t keep it apart from your other Google Drive account.</string>
+    <string name="settings_cloud_gdrive_add_account_title">Add another Google account</string>
+    <string name="settings_cloud_gdrive_add_account_subtitle">You pick the account, then its songs.</string>
+    <string name="settings_cloud_gdrive_already_connected">Already connected as %1$s.</string>
+    <plurals name="settings_cloud_gdrive_already_connected_adding">
+        <item quantity="one">Already connected as %1$s. Adding %2$d song.</item>
+        <item quantity="other">Already connected as %1$s. Adding %2$d songs.</item>
+    </plurals>
+    <string name="settings_cloud_gdrive_save_here_title">Save and back up to this account</string>
+    <string name="settings_cloud_gdrive_saving_to">Saves and backup go to %1$s from now on. Songs already saved stay where they are.</string>
+    <plurals name="settings_cloud_gdrive_waiting_on">
+        <item quantity="one">%1$d song is waiting on %2$s.</item>
+        <item quantity="other">%1$d songs are waiting on %2$s.</item>
+    </plurals>
+    <plurals name="settings_cloud_gdrive_already_in">
+        <item quantity="one">%1$d song is already in %2$s.</item>
+        <item quantity="other">%1$d songs are already in %2$s.</item>
+    </plurals>
+    <plurals name="settings_cloud_gdrive_waiting_for_reconnect">
+        <item quantity="one">%1$d song is waiting for a reconnect</item>
+        <item quantity="other">%1$d songs are waiting for a reconnect</item>
+    </plurals>
+    <string name="settings_cloud_disconnected">%1$s disconnected.</string>
+    <string name="settings_cloud_disconnect_failed">Couldn\'t disconnect %1$s. Try again.</string>
+    <string name="settings_cloud_folder_removed">Folder removed.</string>
+    <string name="settings_cloud_folder_remove_failed">Couldn\'t remove this folder. Try again.</string>
     <string name="settings_cloud_folder_add_title">Add a music folder</string>
     <string name="settings_cloud_folder_add_subtitle">Read-only. Your files stay as they are.</string>
     <string name="settings_cloud_disconnect_dialog_title">Disconnect %1$s?</string>
@@ -1104,6 +1234,8 @@
         <item quantity="other">%d downloaded songs stay on this phone.</item>
     </plurals>
     <string name="settings_cloud_disconnect_dialog_gdrive_pending">Songs waiting to be saved to it won\'t be.</string>
+    <string name="settings_cloud_disconnect_dialog_backup_off">Backup turns off until you turn it on for another account.</string>
+    <string name="settings_cloud_disconnect_dialog_saves_move">Save to Google Drive will use %1$s.</string>
     <string name="settings_cloud_disconnect_dialog_untouched">Your files in %1$s are not touched.</string>
 
     <string name="settings_cloud_folders_section_title">Cloud folders</string>
@@ -1187,4 +1319,72 @@
     <string name="soundcloud_disconnect">Disconnect SoundCloud</string>
     <string name="soundcloud_disconnect_body">Stop syncing this account. Your library and downloaded files stay here.</string>
     <string name="soundcloud_cancel">Cancel</string>
+
+    <!-- Settings > Accounts: Connection Status -->
+    <string name="settings_account_session_expired">Session expired. Reconnect to keep syncing.</string>
+    <string name="settings_account_session_expired_for">Session expired for %1$s. Reconnect to keep syncing.</string>
+    <string name="settings_account_connecting">Connecting...</string>
+
+    <!-- Settings Hub Subtitles -->
+    <string name="settings_summary_cellular_on">Cellular on</string>
+    <string name="settings_summary_cellular_off">Cellular off</string>
+    <string name="settings_summary_lossless">Lossless · %1$s</string>
+    <string name="settings_summary_opus">Opus · %1$s</string>
+    <string name="settings_summary_connected_count">%1$d connected</string>
+    <string name="settings_theme_follow_system">Follow system</string>
+    <string name="settings_summary_pure_black">Pure black</string>
+    <plurals name="settings_summary_tracks_count">
+        <item quantity="one">%d track</item>
+        <item quantity="other">%d tracks</item>
+    </plurals>
+
+    <!-- Settings > Supporter Claim Messages -->
+    <string name="settings_supporter_msg_code_sent">A new code is on its way.</string>
+    <string name="settings_supporter_msg_bad_email">That doesn\'t look like an email address. Check it and try again.</string>
+    <string name="settings_supporter_msg_bad_code">That code didn\'t work. Check it, or send a new one.</string>
+    <string name="settings_supporter_msg_rate_limited_min">Too many tries. Wait a minute.</string>
+    <string name="settings_supporter_msg_rate_limited_mins">Too many tries. Wait %1$d minutes.</string>
+    <string name="settings_supporter_msg_not_configured">Unlocking isn\'t available right now. Please try again later.</string>
+    <string name="settings_supporter_msg_unreachable">Couldn\'t reach Stash. Check your connection and try again.</string>
+    <string name="settings_supporter_msg_unlocked_pending">Code accepted. Unlimited Tidal shows here once Stash confirms it.</string>
+
+    <!-- Settings > Web Library Import -->
+    <string name="web_library_import_intro_this_file_has">This file has</string>
+    <string name="web_library_import_intro_body">%1$s %2$s, %3$s and %4$s.</string>
+    <string name="web_library_import_result_added">Added %1$s.</string>
+    <string name="web_library_import_result_nothing_new">Nothing new: you already had all of it.</string>
+    <plurals name="web_library_import_playlists_updated">
+        <item quantity="one">new songs in %,d playlist you had</item>
+        <item quantity="other">new songs in %,d playlists you had</item>
+    </plurals>
+    <!-- The import picker's and result's counts, with thousands separators: "This file has 1,204 likes, 5,000 plays and 14 playlists." -->
+    <plurals name="web_library_import_likes">
+        <item quantity="one">%,d like</item>
+        <item quantity="other">%,d likes</item>
+    </plurals>
+    <plurals name="web_library_import_plays">
+        <item quantity="one">%,d play</item>
+        <item quantity="other">%,d plays</item>
+    </plurals>
+    <plurals name="web_library_import_playlists">
+        <item quantity="one">%,d playlist</item>
+        <item quantity="other">%,d playlists</item>
+    </plurals>
+    <string name="web_library_inbox_add_failed">Couldn\'t add it. Try again.</string>
+
+    <!-- Settings > FLAC Upgrades -->
+    <string name="settings_flac_upgrade_checking">Checking for upgrades…</string>
+    <string name="settings_flac_upgrade_waiting">Waiting to run. It starts by itself when it can, on Wi-Fi if sync is set to Wi-Fi only.</string>
+    <string name="settings_flac_upgrade_stopped">Stopped before it finished.</string>
+    <string name="settings_flac_upgrade_streaming_mode">Stash is set to Online, so there are no downloads to upgrade.</string>
+    <string name="settings_flac_upgrade_lossless_disabled">Set Download quality to Lossless in Audio &amp; Quality first.</string>
+    <string name="settings_flac_upgrade_nothing">Nothing to upgrade. Every downloaded track is FLAC already or was checked in the last two weeks.</string>
+    <string name="settings_flac_upgrade_done_none">Done: no new FLAC versions found.</string>
+    <string name="settings_flac_upgrade_done_upgraded">Done: %1$s upgraded to FLAC.</string>
+    <string name="settings_flac_upgrade_detail_no_match">No lossless version yet for %1$s. They\'re checked again in two weeks.</string>
+    <string name="settings_flac_upgrade_detail_failed">Couldn\'t check %1$s this time. They\'re tried again next run.</string>
+    <plurals name="settings_flac_upgrade_tracks">
+        <item quantity="one">%d track</item>
+        <item quantity="other">%d tracks</item>
+    </plurals>
 </resources>

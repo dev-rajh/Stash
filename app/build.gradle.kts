@@ -44,6 +44,10 @@ val hasReleaseSigning = releaseStoreFilePath != null &&
     releaseKeyAlias != null &&
     releaseKeyPassword != null
 
+// `-Pstash.minifyDebug=true` builds the debug app the way release is built (R8 + resource
+// shrinking). Off by default; see the debug build type below.
+val minifyDebug: Boolean = providers.gradleProperty("stash.minifyDebug").orNull.toBoolean()
+
 // ── Last.fm API credentials ────────────────────────────────────────────────
 //
 // Read from `local.properties` (gitignored) or env vars (CI). Users who want
@@ -76,6 +80,17 @@ val lastFmExtraApiKeys: String = localOrEnvProp("lastfm.extraApiKeys", "LASTFM_E
 // route through it (the Worker holds the server key + shared cache), decoupling
 // Last.fm load from user count. Empty = app talks to Last.fm directly.
 val lastFmProxyUrl: String = localOrEnvProp("lastfm.proxyUrl", "LASTFM_PROXY_URL")
+
+// ── The app's own locales (androidResources.localeFilters below) ──────────────
+//
+// Read from the values-<lang>[-r<REGION>] folders of every module, so a translation added later is
+// never filtered out by accident: values-de-rDE gives "de" and "de-rDE".
+val appOwnLocales: List<String> = rootProject.subprojects
+    .flatMap { (it.projectDir.resolve("src/main/res").listFiles() ?: emptyArray()).toList() }
+    .mapNotNull { Regex("values-([a-z]{2,3})(-r[A-Z]{2})?").matchEntire(it.name) }
+    .flatMap { m -> listOf(m.groupValues[1], m.groupValues[1] + m.groupValues[2]) }
+    .distinct()
+    .sorted()
 
 // ── Cloud storage libraries (spec 2026-10-19-cloud-storage-design.md) ─────
 //
@@ -150,8 +165,8 @@ android {
         applicationId = "com.stash.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 159
-        versionName = "0.9.123"
+        versionCode = 160
+        versionName = "0.9.124"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // Cloud storage sign-in. OneDrive redirects to `${applicationId}://oauth/onedrive` (the
         // data:cloud manifest declares it, so debug and release each get their own); Dropbox to
@@ -208,22 +223,20 @@ android {
             buildConfigField("String", "SYNC_BASE_URL", "\"$syncReleaseBaseUrl\"")
             buildConfigField("Boolean", "WEB_LINK_ENABLED", "true")
             manifestPlaceholders["webLinkEnabled"] = "true"
-            // R8 minification is DISABLED because youtubedl-android embeds
-            // Chaquopy (Python runtime) + Apache Commons Compress + native
-            // binaries that use extensive reflection. R8 obfuscation renames
-            // classes those libraries look up by string name, causing
-            // "class X is not a concrete class" crashes on startup.
-            //
-            // This is the standard approach for apps in this space: NewPipe,
-            // Seal, YTDLnis, InnerTune all ship with minification off. The
-            // APK is ~5-10MB larger without minification (negligible next to
-            // the ~145MB Python/yt-dlp bundle it already carries), and the
-            // code-obfuscation benefit is moot for an open-source GPL-3.0
-            // project anyway.
-            //
-            // Resource shrinking is also off because it requires minification.
-            isMinifyEnabled = false
-            isShrinkResources = false
+            // ARM only in the release APK. x86/x86_64 were ~71 MB of the universal APK (each ABI
+            // carries its own ffmpeg + python zips) for CPUs no phone at minSdk 26 has. This filters
+            // the AAR libs as well as app/src/main/jniLibs. Still one Stash.apk, so the in-app updater
+            // (first .apk asset) and releases/latest/download/Stash.apk keep working. Debug stays
+            // universal so x86_64 emulators can run it.
+            ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
+            // R8 shrinks the release build: it drops the code and resources nothing uses (most of
+            // material-icons-extended, unused library code) and optimizes the rest, but renames
+            // nothing (-dontobfuscate). app/proguard-rules.pro says why each keep rule is there; a
+            // module's own lookups by name sit in its consumer-rules.pro. youtubedl-android needs
+            // little: it runs Python and ffmpeg as child processes, not over JNI. CI builds this on
+            // every PR (tests.yml), so a shrinking break fails there, not when a release is tagged.
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             // Only wire the release signing config if credentials were found.
             // Otherwise release builds fall back to the debug key for local testing.
@@ -238,6 +251,20 @@ android {
             applicationIdSuffix = ".debug"
             isDebuggable = true
             signingConfig = signingConfigs.getByName("debug")
+            if (minifyDebug) {
+                // The R8 check build (-Pstash.minifyDebug=true, never the default): the everyday
+                // debug app (same id, key and data) shrunk and optimized with the release rules, to
+                // try a keep-rule change on a phone with real data. Not debuggable, because R8 skips
+                // its optimizations for a debuggable build, and those are where a missing rule shows.
+                // Close to release, not identical: `adb shell run-as` stops working while it is
+                // installed (so do rig backups before), and only :app's BuildConfig.DEBUG turns false;
+                // the library modules keep DEBUG = true. The last check before a tag is still the
+                // release APK itself, signed with the debug key and installed fresh.
+                isDebuggable = false
+                isMinifyEnabled = true
+                isShrinkResources = true
+                proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            }
         }
     }
     compileOptions {
@@ -245,7 +272,22 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     buildFeatures { compose = true; buildConfig = true }
-    androidResources { generateLocaleConfig = true }
+    androidResources {
+        generateLocaleConfig = true
+        // Library strings only in the app's own languages. Libraries (appcompat, Cast, mediarouter,
+        // play-services, ...) ship ~80 locales; unfiltered they fill half of resources.arsc.
+        // aapt2 matches these exactly ("de" does NOT keep "de-rDE"), so appOwnLocales names both
+        // the plain code and the region of every values-* folder in our modules: drop one and the
+        // app loses that translation and the language picker loses the language. The default
+        // (unqualified) strings always stay.
+        localeFilters += appOwnLocales
+        // The libraries' other regions of those languages that v0.9.123 shipped, and tl, the
+        // older code for Filipino that AndroidX still uses (ours is fil-rPH).
+        localeFilters += listOf(
+            "en", "en-rAU", "en-rCA", "en-rGB", "en-rIN",
+            "es-rUS", "fr-rCA", "pt-rPT", "tl", "zh-rHK", "zh-rTW",
+        )
+    }
     packaging {
         jniLibs {
             // Must extract native libs to disk so ffmpeg/ffprobe executables and
@@ -302,8 +344,8 @@ dependencies {
     implementation(libs.appcompat)
     implementation(libs.activity.compose)
     implementation(libs.lifecycle.runtime.compose)
-    // ProcessLifecycleOwner — used by StashApplication to start/stop
-    // SquidCookieAutoRefresher on app foreground/background transitions.
+    // ProcessLifecycleOwner — used by StashApplication for its work on app
+    // foreground/background transitions.
     implementation(libs.lifecycle.process)
     implementation(libs.navigation.compose)
     implementation(libs.hilt.android)

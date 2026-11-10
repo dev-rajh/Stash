@@ -67,6 +67,10 @@ class SyncViewModelTest {
     private val blocklistGuard = mockk<com.stash.core.data.blocklist.BlocklistGuard>(relaxed = true)
     private val librarySizeHolder = mockk<com.stash.data.download.files.LibrarySizeHolder>(relaxed = true)
     private val streamingPreference = mockk<com.stash.core.data.prefs.StreamingPreference>(relaxed = true)
+    private val spotifyAccountDao = mockk<com.stash.core.data.db.dao.SpotifyAccountDao>(relaxed = true)
+    private val downloadQueueResumer = mockk<com.stash.core.data.sync.DownloadQueueResumer>(relaxed = true) {
+        every { runState() } returns MutableStateFlow(com.stash.core.data.sync.QueueRunState.Idle)
+    }
 
     /** Stub every flow the VM's init collects eagerly so construction doesn't throw. */
     private fun stubInitFlows() {
@@ -95,6 +99,8 @@ class SyncViewModelTest {
         every { librarySizeHolder.size } returns MutableStateFlow(mockk(relaxed = true))
         // The first-sync sheet is answered: Sync runs straight away unless a test says otherwise.
         every { prefs.arrivalChosen } returns MutableStateFlow(true)
+        // No other Spotify account unless a test adds some.
+        every { spotifyAccountDao.observeAll() } returns MutableStateFlow(emptyList())
     }
 
     private fun newVm(): SyncViewModel = SyncViewModel(
@@ -114,6 +120,8 @@ class SyncViewModelTest {
         lastFmRecommendationSource = mockk(relaxed = true),
         playerRepository = mockk(relaxed = true),
         downloadManager = downloadManager,
+        spotifyAccountDao = spotifyAccountDao,
+        downloadQueueResumer = downloadQueueResumer,
     )
 
     @Before fun setUp() {
@@ -124,6 +132,47 @@ class SyncViewModelTest {
 
     @After fun tearDown() {
         Dispatchers.resetMain()
+    }
+
+    // -- Several Spotify accounts (plan 2026-11-04 §3.7) ---------------------------------------
+
+    @Test
+    fun `each Spotify row carries its account, and the other accounts are read`() {
+        every { playlistDao.getSpotifyPlaylistsForPreferences() } returns kotlinx.coroutines.flow.flowOf(
+            listOf(spotifyRow(1, "MainPlaylist1xxxxxxxxxx"), spotifyRow(2, "SamPlaylist1xxxxxxxxxxx").copy(spotifyAccount = "sam")),
+        )
+        every { spotifyAccountDao.observeAll() } returns kotlinx.coroutines.flow.flowOf(
+            listOf(com.stash.core.data.db.entity.SpotifyAccountEntity(id = 4, userId = "sam", label = "Sam", addedAt = 1, syncMixes = true)),
+        )
+
+        val state = newVm().uiState.value
+
+        assertEquals(listOf(null, "sam"), state.spotifyPlaylists.map { it.spotifyAccount })
+        assertEquals(listOf(SpotifyOtherAccount(4, "sam", "Sam", syncAlbums = true, syncMixes = true)), state.spotifyOtherAccounts)
+        assertTrue(state.spotifyOtherAccountsLoaded)
+    }
+
+    @Test
+    fun `an unreadable accounts table leaves only the main account, read`() {
+        every { spotifyAccountDao.observeAll() } returns kotlinx.coroutines.flow.flow { throw IllegalStateException("locked") }
+
+        val state = newVm().uiState.value
+
+        assertEquals(emptyList<SpotifyOtherAccount>(), state.spotifyOtherAccounts)
+        assertTrue(state.spotifyOtherAccountsLoaded)
+    }
+
+    @Test
+    fun `an other account's albums and mixes switches are its own, never the main account's`() {
+        val vm = newVm()
+
+        vm.onSyncOtherAccountAlbumsChanged(4, false)
+        vm.onSyncOtherAccountMixesChanged(4, true)
+
+        coVerify(exactly = 1) { spotifyAccountDao.setSyncAlbums(4, false) }
+        coVerify(exactly = 1) { spotifyAccountDao.setSyncMixes(4, true) }
+        coVerify(exactly = 0) { prefs.setSyncSpotifySavedAlbums(any()) }
+        coVerify(exactly = 0) { prefs.setDiscoverAutoMixes(any()) }
     }
 
     // -- Spotify saved albums (item 5, 2026-11-02) --------------------------------------------
@@ -259,6 +308,13 @@ class SyncViewModelTest {
     }
 
     @Test
+    fun `Stop also pauses downloads, so nothing starts again on its own`() {
+        newVm().onStopSync()
+        // Without it, the resume run took the songs the sync left as soon as the app came back.
+        coVerify(exactly = 1) { downloadQueueResumer.pause() }
+    }
+
+    @Test
     fun `turning Auto-sync off cancels the daily schedule`() = runTest {
         every { prefs.preferences } returns MutableStateFlow(SyncPreferences(autoSyncEnabled = true))
         val vm = newVm()
@@ -293,6 +349,33 @@ class SyncViewModelTest {
         advanceUntilIdle()
 
         coVerify { syncScheduler.triggerManualSync(false) }
+    }
+
+    @Test
+    fun `Sync now ends a download pause before the sync starts`() = runTest {
+        val vm = newVm()
+
+        vm.onSyncNow()
+        advanceUntilIdle()
+
+        io.mockk.coVerifyOrder {
+            downloadQueueResumer.clearHold()
+            syncScheduler.triggerManualSync(any())
+        }
+    }
+
+    @Test
+    fun `the Downloads row says what holds the queue back`() {
+        assertEquals(SyncViewModel.DownloadsHold.PAUSED, downloadsHoldFor(com.stash.core.data.sync.QueueRunState.Paused, waiting = 0))
+        assertEquals(SyncViewModel.DownloadsHold.STORAGE_FULL, downloadsHoldFor(com.stash.core.data.sync.QueueRunState.StorageFull, waiting = 0))
+        assertEquals(SyncViewModel.DownloadsHold.WAITING_FOR_WIFI, downloadsHoldFor(com.stash.core.data.sync.QueueRunState.WaitingForWifi, waiting = 37))
+        assertEquals(null, downloadsHoldFor(com.stash.core.data.sync.QueueRunState.WaitingForWifi, waiting = 0))
+        assertEquals(
+            SyncViewModel.DownloadsHold.WAITING_FOR_CONNECTION,
+            downloadsHoldFor(com.stash.core.data.sync.QueueRunState.WaitingForConnection, waiting = 3),
+        )
+        assertEquals(null, downloadsHoldFor(com.stash.core.data.sync.QueueRunState.Running, waiting = 3))
+        assertEquals(null, downloadsHoldFor(com.stash.core.data.sync.QueueRunState.Idle, waiting = 3))
     }
 
     @Test

@@ -2,6 +2,7 @@ package com.stash.data.cloud.provider.gdrive
 
 import com.stash.core.data.db.dao.CloudDao
 import com.stash.core.data.db.entity.CloudAccountEntity
+import com.stash.core.data.db.entity.CloudScanStatus
 import com.stash.core.model.CloudProvider
 import com.stash.data.cloud.auth.CloudTokenManager
 import com.stash.data.cloud.auth.TokenResult
@@ -18,10 +19,20 @@ sealed interface GooglePickOutcome {
         val isNewAccount: Boolean,
         val added: Int,
         val alreadyThere: Int,
-    ) : GooglePickOutcome
+        val email: String? = null,
+    ) : GooglePickOutcome {
+        /** What tells this account apart from another: its email, when it has one. */
+        val label: String get() = email ?: displayName
+    }
 
     data object Cancelled : GooglePickOutcome
     data class Failed(val message: String) : GooglePickOutcome
+
+    /**
+     * Refused: another Drive account is connected and Google didn't say which account one of them
+     * is (see [GoogleDrivePicks]). Nothing was stored.
+     */
+    data object AccountUnidentified : GooglePickOutcome
 }
 
 /**
@@ -31,7 +42,13 @@ sealed interface GooglePickOutcome {
  * Steps: look up who picked (Drive `about`), create or re-link the `cloud_accounts` row, store
  * the token (its refresh slot = the account email, for silent re-authorization), make sure the
  * account's picks folder row exists, queue the new ids in [GooglePickStore] and start a scan of
- * that folder. Ids already in the library aren't queued again.
+ * that folder. Ids already in the library under this account (in either folder row) aren't queued
+ * again.
+ *
+ * Silent re-authorization finds an account by its email. Without one, Play services answers for
+ * whichever account it likes, which with two accounts can be the wrong one, and songs would then
+ * play and upload under the wrong sign-in. So an account with no email is never connected next to
+ * another, in either order.
  */
 class GoogleDrivePicks(
     private val dao: CloudDao,
@@ -51,14 +68,22 @@ class GoogleDrivePicks(
         val who = auth.identity(accessToken)
         val provider = CloudProvider.GOOGLE_DRIVE
         val existing = dao.findAccount(provider.id, who.remoteId)
+        // A lookup that lost the email must not cost a known account the one it has.
+        val email = who.email?.takeIf { it.isNotBlank() } ?: existing?.email
+        if (existing == null) {
+            val others = dao.getAccounts().filter { it.provider == provider.id }
+            if (others.isNotEmpty() && (email == null || others.any { it.email.isNullOrBlank() })) {
+                return GooglePickOutcome.AccountUnidentified
+            }
+        }
         val accountId = if (existing != null) {
-            dao.updateAccount(existing.copy(displayName = who.displayName, email = who.email))
+            dao.updateAccount(existing.copy(displayName = who.displayName, email = email))
             existing.id
         } else {
             dao.insertAccount(
                 CloudAccountEntity(
                     provider = provider.id, remoteId = who.remoteId, displayName = who.displayName,
-                    email = who.email, connectedAt = clock(),
+                    email = email, connectedAt = clock(),
                 ),
             )
         }
@@ -66,7 +91,7 @@ class GoogleDrivePicks(
             provider, accountId,
             TokenResult(
                 accessToken = accessToken,
-                refreshToken = who.email?.takeIf { it.isNotBlank() } ?: GoogleDriveAuth.NO_ACCOUNT,
+                refreshToken = email ?: GoogleDriveAuth.NO_ACCOUNT,
                 expiresInSeconds = GoogleDriveAuth.TOKEN_LIFETIME_SECONDS,
                 scope = PlayServicesGoogleAuthorizer.DRIVE_FILE_SCOPE,
             ),
@@ -75,13 +100,17 @@ class GoogleDrivePicks(
         // Songs Stash saved to this Drive (on another phone, or before a reinstall) come along.
         val uploads = uploadsFolder(accountId)
         if (existing == null) scanNow(uploads)
-        val known = dao.folderItemIds(folderId).toSet()
+        // Already a song of this account, in either folder row: a pick, or a copy Stash saved here
+        // that is linked to its download. A picked file that is a song on the phone in another way
+        // (the same bytes, a saved copy not linked yet) is recognised by the scan and linked.
+        val known = dao.accountItemIds(accountId).toSet()
         val fresh = fileIds.filter { it !in known }
-        if (fresh.isNotEmpty()) {
-            store.add(folderId, fresh)
-            scanNow(folderId)
-        }
-        return GooglePickOutcome.Added(accountId, who.displayName, existing == null, fresh.size, fileIds.size - fresh.size)
+        if (fresh.isNotEmpty()) store.add(folderId, fresh)
+        // A Reconnect: rows a lost sign-in turned red ("Sign-in expired") would otherwise stay red
+        // next to a card that says connected, until the next scan up to 12 hours away.
+        val red = if (existing == null) emptyList() else dao.getFolders(accountId).filter { it.lastScanStatus == CloudScanStatus.ERROR.name }.map { it.id }
+        (red + listOfNotNull(folderId.takeIf { fresh.isNotEmpty() })).distinct().forEach { scanNow(it) }
+        return GooglePickOutcome.Added(accountId, who.displayName, existing == null, fresh.size, fileIds.size - fresh.size, email)
     }
 
     /** The account's picks folder row, made on first use. */

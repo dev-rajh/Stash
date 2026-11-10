@@ -56,6 +56,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.flatMapLatest
@@ -88,6 +89,7 @@ class StashPlaybackService : MediaLibraryService() {
     @Inject lateinit var eqController: EqController
     @Inject lateinit var loudnessController: LoudnessController
     @Inject lateinit var hiResOutputController: com.stash.core.media.output.HiResOutputController
+    @Inject lateinit var tuningController: com.stash.core.media.tuning.TuningController
     @Inject lateinit var trackDao: TrackDao
     @Inject lateinit var streamingPreference: com.stash.core.data.prefs.StreamingPreference
 
@@ -897,6 +899,15 @@ class StashPlaybackService : MediaLibraryService() {
         serviceScope.launch {
             hiResOutputController.bitPerfectEngaged.collect { setCrossfadeHeldForBitPerfect(it) }
         }
+        // Tuning on or off: rebuild the idle players' outputs now, while silent, not on resume
+        // or at the start of the next crossfade (see CrossfadeEngine.rebuildIdleOutputs).
+        serviceScope.launch {
+            tuningController.effectiveHz
+                .map { com.stash.core.model.TuningMath.isRetuned(it) }
+                .distinctUntilChanged()
+                .drop(1)
+                .collect { crossfadeEngine?.rebuildIdleOutputs() }
+        }
 
         // The service is up — tell the repository so it (re)connects its
         // controller. This is the half the reverted design was missing: it
@@ -935,9 +946,11 @@ class StashPlaybackService : MediaLibraryService() {
             catalog = listenTogetherCatalog,
             api = roomApiClient,
             connector = roomConnector,
-            autoplayRadio = { autoplayRadioPreference.enabled.first() },
+            // Radio streams, so an Offline host's station would only be a run of songs it can't play.
+            autoplayRadio = { autoplayRadioPreference.enabled.first() && streamAllowedNow() },
             displayName = { sharePreference.displayName() },
             clock = { android.os.SystemClock.elapsedRealtime() },
+            guestsAddPreference = { sharePreference.guestsAddNow() },
         ).also { it.start() }
         listenTogetherController.serviceAttached = true
         android.util.Log.i("StashPlayback", "listen-together engine attached")
@@ -1495,7 +1508,7 @@ class StashPlaybackService : MediaLibraryService() {
             )
             .build()
         val renderersFactory = StashRenderersFactory(
-            this, eqController, loudnessController, hiResOutputController, mainPlayback = true,
+            this, eqController, loudnessController, hiResOutputController, tuningController, mainPlayback = true,
         )
         val player = ExoPlayer.Builder(this)
             .setRenderersFactory(renderersFactory)
@@ -2341,6 +2354,9 @@ class StashPlaybackService : MediaLibraryService() {
 
         /** Player.setPlaybackSpeed keeps pitch at 1, so Sonic time-stretches (spec §4). */
         override fun setSpeed(speed: Float) = master.setPlaybackSpeed(speed)
+
+        /** What the MediaSession's controllers read as playWhenReady: the room's, not the held-paused master's. */
+        override fun setPlayIntent(playing: Boolean) { togetherPlayer?.setPlayIntent(playing) }
 
         override val positionMs: Long get() = master.currentPosition
         override val durationMs: Long? get() = master.duration.takeIf { it != C.TIME_UNSET && it > 0 }

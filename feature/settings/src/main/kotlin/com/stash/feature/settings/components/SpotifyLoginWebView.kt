@@ -98,6 +98,13 @@ fun SpotifyLoginWebView(
     onDismiss: () -> Unit,
     onManualFallback: () -> Unit,
     modifier: Modifier = Modifier,
+    /** The bar's title: "Sign in to Spotify", or what this sign-in is for ("Add a Spotify account"). */
+    title: String = stringResource(R.string.settings_spotify_signin_title),
+    /**
+     * One line above Spotify's page, when this sign-in needs saying how (adding another account:
+     * "Continue with Google" would sign the connected account straight back in). Null = none.
+     */
+    hint: String? = null,
 ) {
     var isLoading by remember { mutableStateOf(true) }
     var cookieFound by remember { mutableStateOf(false) }
@@ -114,7 +121,7 @@ fun SpotifyLoginWebView(
 
     Column(modifier = modifier.fillMaxSize()) {
         TopAppBar(
-            title = { Text(stringResource(R.string.settings_spotify_signin_title)) },
+            title = { Text(title) },
             navigationIcon = {
                 TextButton(onClick = onDismiss) {
                     Text(stringResource(R.string.settings_cancel))
@@ -132,6 +139,18 @@ fun SpotifyLoginWebView(
                 containerColor = MaterialTheme.colorScheme.surface,
             ),
         )
+
+        if (hint != null) {
+            // On the bar's own colour, so it reads as part of the bar rather than of Spotify's page.
+            Surface(color = MaterialTheme.colorScheme.surface) {
+                Text(
+                    text = hint,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 10.dp),
+                )
+            }
+        }
 
         if (isLoading) {
             LinearProgressIndicator(
@@ -186,6 +205,21 @@ fun SpotifyLoginWebView(
                             cacheMode = WebSettings.LOAD_NO_CACHE
                         }
 
+                        // Hands the cookie over once, then takes Spotify's session out of the
+                        // shared jar: from here the app sends its own stored copy on every
+                        // request and never reads the jar again. So a sign-in Stash refuses
+                        // (another account than the connected one) or can't validate leaves no
+                        // Spotify session behind in the WebView, and the page loads that follow
+                        // the sign-in can't hand the same cookie over a second time. Expiring it
+                        // here doesn't sign the session out on Spotify's side.
+                        val capture: (String) -> Unit = { spDc ->
+                            if (!cookieFound) {
+                                cookieFound = true
+                                clearSpotifyWebSession()
+                                onCookieExtracted(spDc)
+                            }
+                        }
+
                         webViewClient = object : WebViewClient() {
                             override fun onPageStarted(
                                 view: WebView?,
@@ -193,16 +227,12 @@ fun SpotifyLoginWebView(
                                 favicon: Bitmap?,
                             ) {
                                 isLoading = true
-                                checkForSpDcCookie(url, onCookieExtracted) {
-                                    cookieFound = true
-                                }
+                                checkForSpDcCookie(url, capture)
                             }
 
                             override fun onPageFinished(view: WebView?, url: String?) {
                                 isLoading = false
-                                checkForSpDcCookie(url, onCookieExtracted) {
-                                    cookieFound = true
-                                }
+                                checkForSpDcCookie(url, capture)
                             }
 
                             override fun shouldOverrideUrlLoading(
@@ -221,6 +251,18 @@ fun SpotifyLoginWebView(
                     }.also { webViewRef = it }
                 },
                 modifier = Modifier.fillMaxSize(),
+                // Leaving the sign-in (Cancel, Back, a captured cookie handed over, the screen
+                // closed) ends its page: a load still running could otherwise call back after the
+                // sign-in is gone. Its client is swapped for a plain one first, so nothing reaches
+                // [capture] once released. A captured cookie was handed over before this runs (the
+                // hand-over is what closes the sign-in), so every caller, the connected account's
+                // Connect included, has what it needs.
+                onRelease = { webView ->
+                    webView.stopLoading()
+                    webView.webViewClient = WebViewClient()
+                    webView.destroy()
+                    if (webViewRef === webView) webViewRef = null
+                },
             )
         }
 
@@ -256,8 +298,9 @@ fun SpotifyLoginWebView(
  * Expires Spotify's session cookies (the account's `sp_dc` among them) in the
  * shared WebView cookie jar, leaving every other cookie alone. Runs when the
  * sign-in opens, so it starts from a fresh login form instead of re-submitting
- * an old (possibly revoked) `sp_dc`, and on Disconnect, so the credential does
- * not stay on disk in the WebView profile.
+ * an old (possibly revoked) `sp_dc`; as soon as a sign-in's `sp_dc` is captured,
+ * so the WebView never holds an account (one Stash refuses included); and on
+ * Disconnect, so the credential does not stay on disk in the WebView profile.
  *
  * Expires both the host-only and the `Domain=.spotify.com` form (see
  * [WebSessionCookies.expiryHeaders]); the old host-only-only expiry never
@@ -288,7 +331,6 @@ internal fun clearSpotifyWebSession() {
 private fun checkForSpDcCookie(
     url: String?,
     onExtracted: (String) -> Unit,
-    onFound: () -> Unit,
 ) {
     val cookieString = CookieManager.getInstance().getCookie("https://open.spotify.com")
         ?: CookieManager.getInstance().getCookie("https://accounts.spotify.com")
@@ -303,7 +345,6 @@ private fun checkForSpDcCookie(
 
     if (!spDcValue.isNullOrBlank()) {
         Log.i(TAG, "sp_dc cookie extracted from $url (length=${spDcValue.length})")
-        onFound()
         onExtracted(spDcValue)
     }
 }

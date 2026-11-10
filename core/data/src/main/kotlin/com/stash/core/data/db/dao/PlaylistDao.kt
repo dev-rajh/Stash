@@ -606,20 +606,31 @@ interface PlaylistDao {
     // ── Like mirroring: "is it liked on Spotify already?" ────────────────
 
     /**
-     * When the synced Spotify Liked Songs was last read (epoch millis), or null when it never was. A Liked Songs snapshot
-     * carries no revision, so every sync re-diffs it and moves this ([com.stash.core.data.sync.workers.DiffWorker]).
+     * When the main Spotify account's synced Liked Songs was last read (epoch millis), or null when it never was. A Liked
+     * Songs snapshot carries no revision, so every sync re-diffs it and moves this
+     * ([com.stash.core.data.sync.workers.DiffWorker]).
+     *
+     * The main account's row only ([com.stash.core.data.sync.SpotifyPlaylistIds.MAIN_LIKED_SONGS]): hearts go to the main
+     * account, and an extra account's Liked Songs (`spotify_liked_songs:<userId>`) being fresh says nothing about it.
      */
-    @Query("SELECT MAX(last_synced) FROM playlists WHERE type = 'LIKED_SONGS' AND source = 'SPOTIFY'")
+    @Query(
+        "SELECT MAX(last_synced) FROM playlists " +
+            "WHERE type = 'LIKED_SONGS' AND source = 'SPOTIFY' AND source_id = 'spotify_liked_songs'",
+    )
     suspend fun spotifyLikedSongsLastSynced(): Long?
 
-    /** Whether the synced Spotify Liked Songs holds the song: its row, or any row with the same Spotify URI. */
+    /**
+     * Whether the main Spotify account's synced Liked Songs holds the song: its row, or any row with the same Spotify URI.
+     * The main account's row only (see [spotifyLikedSongsLastSynced]): a song liked only on an extra account is not liked
+     * where Stash's hearts go, so it must not count as "already liked there".
+     */
     @Query(
         """
         SELECT EXISTS(
             SELECT 1 FROM playlist_tracks pt
             INNER JOIN playlists p ON p.id = pt.playlist_id
             INNER JOIN tracks t ON t.id = pt.track_id
-            WHERE p.type = 'LIKED_SONGS' AND p.source = 'SPOTIFY'
+            WHERE p.type = 'LIKED_SONGS' AND p.source = 'SPOTIFY' AND p.source_id = 'spotify_liked_songs'
               AND pt.removed_at IS NULL
               AND (pt.track_id = :trackId OR (:spotifyUri IS NOT NULL AND t.spotify_uri = :spotifyUri))
         )
@@ -1032,6 +1043,45 @@ interface PlaylistDao {
     """)
     fun getSpotifyPlaylistsForPreferences(): Flow<List<PlaylistEntity>>
 
+    /**
+     * One Spotify account's rows for its own Sync page (plan 2026-11-04 §3.7), ordered as
+     * [getSpotifyPlaylistsForPreferences]: [account] null for the main account's (untagged) rows,
+     * an extra's Spotify user id (as its `spotify_accounts` row stores it) for that extra's. A
+     * playlist two accounts follow is one row and shows under the account that owns it.
+     */
+    @Query("""
+        SELECT * FROM playlists
+        WHERE source = 'SPOTIFY' AND (is_active = 1 OR user_hidden = 1)
+          AND spotify_account IS :account
+        ORDER BY
+            CASE type
+                WHEN 'LIKED_SONGS' THEN 0
+                WHEN 'CUSTOM' THEN 1
+                WHEN 'DAILY_MIX' THEN 2
+            END,
+            name ASC
+    """)
+    fun getSpotifyAccountPlaylistsForPreferences(account: String?): Flow<List<PlaylistEntity>>
+
+    /**
+     * Gives the Spotify row [playlistId] to [account] (null = the main account): the sync's diff,
+     * when a snapshot from another account is applied to it (ownership follows the snapshot).
+     */
+    @Query("UPDATE playlists SET spotify_account = :account WHERE id = :playlistId")
+    suspend fun updateSpotifyAccount(playlistId: Long, account: String?)
+
+    /**
+     * Hides every row the Spotify sync filed for the extra account [userId] (plan 2026-11-04 §3.5,
+     * removing an account): `is_active = 0` on its source-SPOTIFY rows, nothing else. Tracks, their
+     * downloads and every other account's rows stay; a row the listener saved in Stash themselves
+     * (source BOTH) stays too. Its rows keep their tag, so adding the same account again re-adopts
+     * them: each comes back when its listing names it again (the diff revives a listed row).
+     *
+     * @return the rows hidden.
+     */
+    @Query("UPDATE playlists SET is_active = 0 WHERE source = 'SPOTIFY' AND spotify_account = :userId AND is_active = 1")
+    suspend fun hideSpotifyAccountRows(userId: String): Int
+
     /** All YouTube Music playlists ordered by type (liked first, then mixes) and name. */
     @Query("""
         SELECT * FROM playlists
@@ -1153,29 +1203,6 @@ interface PlaylistDao {
     )
     suspend fun hasActiveYouTubeRows(type: PlaylistType, savedAlbums: Boolean): Boolean
 
-    /**
-     * Soft-deactivate only Spotify CUSTOM playlists absent from a complete
-     * inventory. With [hasCurrentIds] false every active one goes. Worked out
-     * in memory and written in chunks for the same bind-cap reason as
-     * [deactivateMissingForSource].
-     *
-     * Saved albums ([com.stash.core.data.album.SavedAlbums]) are never in the
-     * playlist listing, so they are left out: Spotify's saved albums (item 5)
-     * need their own "still saved" check against the album listing.
-     */
-    @Transaction
-    suspend fun deactivateMissingSpotifyCustomPlaylists(
-        currentSourceIds: List<String>,
-        hasCurrentIds: Boolean,
-    ): Int {
-        val current = currentSourceIds.toHashSet()
-        val missing = getActivePlaylistsBySource(MusicSource.SPOTIFY)
-            .filter { it.type == PlaylistType.CUSTOM && (!hasCurrentIds || it.sourceId !in current) }
-            .filterNot { com.stash.core.data.album.SavedAlbums.isSavedAlbum(it.type, it.source, it.sourceId) }
-            .map { it.id }
-        return deactivateByIdsChunked(missing)
-    }
-
     /** Every row keyed one of [sourceIds] (at most one each: the key is unique). Keep it to a page. */
     @Query("SELECT * FROM playlists WHERE source_id IN (:sourceIds)")
     suspend fun findBySourceIds(sourceIds: List<String>): List<PlaylistEntity>
@@ -1214,27 +1241,6 @@ interface PlaylistDao {
      */
     @Query("UPDATE playlists SET source = 'BOTH' WHERE id = :playlistId AND source = 'SPOTIFY'")
     suspend fun takeIntoStash(playlistId: Long): Int
-
-    /**
-     * Active saved albums synced from the Spotify account: source SPOTIFY, keyed `album:spotify:<id>`
-     * ([com.stash.core.data.album.SavedAlbums.sourceId]). Never an album saved in Stash under the same
-     * key (a pasted link, source BOTH), nor any other service's.
-     */
-    @Query(
-        """
-        SELECT id, source_id AS sourceId FROM playlists
-        WHERE source = 'SPOTIFY' AND type = 'CUSTOM' AND is_active = 1 AND source_id LIKE 'album:spotify:%'
-        """
-    )
-    suspend fun activeSyncedSpotifyAlbums(): List<SyncedAlbumKey>
-
-    /**
-     * The synced Spotify albums ([activeSyncedSpotifyAlbums]) whose key isn't in [listedSourceIds]: the
-     * ones a whole saved-albums listing no longer holds. Worked out in memory, so a library of any size
-     * binds nothing; [deactivateByIdsChunked] hides them.
-     */
-    suspend fun spotifySavedAlbumIdsMissingFrom(listedSourceIds: Set<String>): List<Long> =
-        activeSyncedSpotifyAlbums().filter { it.sourceId !in listedSourceIds }.map { it.id }
 
     /** Flip [is_active] back to 1 for a specific playlist id. Paired with
      *  [deactivateMissingForSource] so a rotating home-feed mix that

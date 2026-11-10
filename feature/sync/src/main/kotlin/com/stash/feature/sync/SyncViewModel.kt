@@ -1,5 +1,6 @@
 package com.stash.feature.sync
 
+import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.stash.core.auth.TokenManager
@@ -20,12 +21,14 @@ import com.stash.core.data.sync.unreadPlaylistsIn
 import com.stash.core.model.SyncDisplayStatus
 import com.stash.data.download.files.LibrarySizeHolder
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.emptyFlow
@@ -99,6 +102,29 @@ data class SpotifySyncPlaylist(
     val stackSongs: Boolean = false,
     /** A saved album ([com.stash.core.data.album.SavedAlbums]): its account page lists it under Albums, never Playlists. */
     val album: Boolean = false,
+    /**
+     * Which Spotify account it is filed under (`playlists.spotify_account`): null for the main
+     * (connected) account, an other account's tag ([SpotifyOtherAccount.tag]) for that one's. Its
+     * card and page on the Sync tab are picked by it.
+     */
+    val spotifyAccount: String? = null,
+)
+
+/**
+ * One of the other Spotify accounts (plan 2026-11-04 §3.7): its own card ("Spotify · Sam") and
+ * page on the Sync tab, beside the main account's.
+ *
+ * @property tag What its rows carry in `playlists.spotify_account` (its normalised Spotify user
+ *   id). Used to pick its rows, never shown.
+ * @property syncAlbums Its own saved-albums switch, shown on its page's Albums tab.
+ * @property syncMixes Its own mixes switch, shown on its page's Mixes tab.
+ */
+data class SpotifyOtherAccount(
+    val id: Long,
+    val tag: String,
+    val name: String,
+    val syncAlbums: Boolean,
+    val syncMixes: Boolean,
 )
 
 /**
@@ -138,8 +164,12 @@ data class SyncUiState(
     val soundCloudConnected: Boolean = false,
     val recentSyncs: List<SyncHistoryInfo> = emptyList(),
     val isSyncing: Boolean = false,
-    /** Spotify playlists available for sync preference toggles. */
+    /** Spotify playlists available for sync preference toggles: every Spotify account's ([SpotifySyncPlaylist.spotifyAccount]). */
     val spotifyPlaylists: List<SpotifySyncPlaylist> = emptyList(),
+    /** The other Spotify accounts, in the order they were added; each has its own card and page. */
+    val spotifyOtherAccounts: List<SpotifyOtherAccount> = emptyList(),
+    /** True once [spotifyOtherAccounts] has been read: an other account's page waits for it. */
+    val spotifyOtherAccountsLoaded: Boolean = false,
     /** YouTube Music playlists available for sync preference toggles. */
     val youTubePlaylists: List<YouTubeSyncPlaylist> = emptyList(),
     val soundCloudPlaylists: List<YouTubeSyncPlaylist> = emptyList(),
@@ -284,6 +314,11 @@ class SyncViewModel @Inject constructor(
     private val playerRepository: com.stash.core.media.PlayerRepository,
     /** Live progress of the songs downloading now, for the Sync tab's Downloads row. */
     private val downloadManager: com.stash.data.download.DownloadManager,
+    /** The other Spotify accounts: a card and a page each, and their own albums and mixes switches. */
+    private val spotifyAccountDao: com.stash.core.data.db.dao.SpotifyAccountDao,
+    /** What the download queue is doing, for the Downloads row; "Sync now" ends a Pause. */
+    private val downloadQueueResumer: com.stash.core.data.sync.DownloadQueueResumer,
+    @param:ApplicationContext private val context: Context? = null,
 ) : ViewModel() {
 
     /** The Sync tab's Downloads row: how many run, wait and failed, and how far the running ones are. */
@@ -293,7 +328,12 @@ class SyncViewModel @Inject constructor(
         val failed: Int = 0,
         /** Mean progress of the songs downloading now, 0..1; null while none runs. */
         val progress: Float? = null,
+        /** Why downloads hold back, said after the counts ("14 waiting · Paused"); null when nothing does. */
+        val hold: DownloadsHold? = null,
     )
+
+    /** What holds the queue back, as the Downloads row says it. */
+    enum class DownloadsHold { PAUSED, STORAGE_FULL, WAITING_FOR_WIFI, WAITING_FOR_CONNECTION }
 
     private val progressByTrackId = MutableStateFlow<Map<Long, Float>>(emptyMap())
 
@@ -301,14 +341,18 @@ class SyncViewModel @Inject constructor(
         downloadQueueDao.observeActiveDownloadRows(),
         downloadQueueDao.getFailedDownloads(),
         progressByTrackId,
-    ) { active, failed, progress ->
+        // WorkManager and the connection: a failure there never blanks the counts.
+        downloadQueueResumer.runState().catch { emit(com.stash.core.data.sync.QueueRunState.Idle) },
+    ) { active, failed, progress, runState ->
         val running = active.filter { it.status == com.stash.core.model.DownloadStatus.IN_PROGRESS }
+        val waiting = active.size - running.size
         DownloadsSummary(
             downloading = running.size,
-            waiting = active.size - running.size,
+            waiting = waiting,
             failed = failed.size,
             progress = running.takeIf { it.isNotEmpty() }
                 ?.map { progress[it.trackId] ?: 0f }?.average()?.toFloat(),
+            hold = downloadsHoldFor(runState, waiting),
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), DownloadsSummary())
 
@@ -440,7 +484,8 @@ class SyncViewModel @Inject constructor(
     }
 
     private suspend fun undoLastSync(): String {
-        val point = syncUndoDao.latestPointNow() ?: return "Nothing to undo."
+        val point = syncUndoDao.latestPointNow()
+            ?: return context?.getString(R.string.sync_undo_nothing) ?: "Nothing to undo."
         val changed = try {
             val changed = syncUndoDao.countChangedPlaylists(point.syncId, point.createdAtEpochMs)
             syncScheduler.cancelPendingSync()
@@ -450,7 +495,7 @@ class SyncViewModel @Inject constructor(
             throw e
         } catch (e: Exception) {
             android.util.Log.w("SyncViewModel", "Undo of sync ${point.syncId} failed", e)
-            return "Couldn't undo that sync. Nothing was changed."
+            return context?.getString(R.string.sync_undo_error) ?: "Couldn't undo that sync. Nothing was changed."
         }
         // After the restore, and never failing it: the library is already back.
         try {
@@ -460,13 +505,18 @@ class SyncViewModel @Inject constructor(
         } catch (e: Exception) {
             android.util.Log.w("SyncViewModel", "Couldn't pause Auto-sync after the undo", e)
         }
-        val playlists = if (changed == 1) "1 playlist is" else "$changed playlists are"
+        val playlists = if (context != null) {
+            context.resources.getQuantityString(R.plurals.sync_undo_playlists_count, changed, changed)
+        } else {
+            if (changed == 1) "1 playlist is" else "$changed playlists are"
+        }
         val paused = if (_uiState.value.syncPreferences.autoSyncEnabled) {
-            " Auto-sync is paused until you tap Sync."
+            context?.getString(R.string.sync_undo_paused_suffix) ?: " Auto-sync is paused until you tap Sync."
         } else {
             ""
         }
-        return "Undone — $playlists back to how they were before that sync.$paused"
+        return context?.getString(R.string.sync_undo_result, playlists, paused)
+            ?: "Undone — $playlists back to how they were before that sync.$paused"
     }
 
     /** Clear the one-shot undo message once the UI has shown it. */
@@ -548,6 +598,7 @@ class SyncViewModel @Inject constructor(
         observeHistory()
         observeLastSync()
         observeSpotifyPlaylists()
+        observeSpotifyOtherAccounts()
         observeYouTubePlaylists()
         observeSoundCloud()
         observeUnmatchedCount()
@@ -581,6 +632,14 @@ class SyncViewModel @Inject constructor(
         // A manual Sync ends the pause "Undo last sync" put on Auto-sync.
         if (_uiState.value.syncPreferences.autoSyncPausedAfterUndo) {
             syncPreferencesManager.setAutoSyncPausedAfterUndo(false)
+        }
+        // ...and a download Pause (or an out-of-space hold), or its download step would download nothing.
+        try {
+            downloadQueueResumer.clearHold()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            android.util.Log.w("SyncViewModel", "clearing the download pause failed", e)
         }
         syncScheduler.triggerManualSync(wifiOnly)
     }
@@ -686,7 +745,18 @@ class SyncViewModel @Inject constructor(
      * the top of the tab stops saying "Syncing...".
      */
     fun onStopSync() {
-        viewModelScope.launch { syncScheduler.cancelSync() }
+        viewModelScope.launch {
+            syncScheduler.cancelSync()
+            // Stopped stays stopped, like the notification's Pause: downloads don't start again
+            // on their own (the app coming back, a cold start) until Resume, Sync now or a tap.
+            try {
+                downloadQueueResumer.pause()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                android.util.Log.w("SyncViewModel", "pausing downloads after Stop failed", e)
+            }
+        }
     }
 
     /**
@@ -1029,11 +1099,49 @@ class SyncViewModel @Inject constructor(
                                 stackable = com.stash.core.data.sync.MixStacking.showsSwitch(e.source, e.type, e.name, e.stackSongs),
                                 stackSongs = e.stackSongs,
                                 album = com.stash.core.data.album.SavedAlbums.isSavedAlbum(e.type, e.source, e.sourceId),
+                                spotifyAccount = e.spotifyAccount,
                             )
                         }
                     )
                 }
             }
+        }
+    }
+
+    /**
+     * The other Spotify accounts, for their cards and pages. A table that can't be read leaves
+     * none (the main account's card and page are as they were), and says it has been read, so an
+     * other account's page shows empty rather than waiting for ever.
+     */
+    private fun observeSpotifyOtherAccounts() {
+        viewModelScope.launch {
+            spotifyAccountDao.observeAll()
+                .map { rows ->
+                    rows.map { SpotifyOtherAccount(it.id, it.userId, it.label, it.syncAlbums, it.syncMixes) }
+                }
+                .catch { e ->
+                    android.util.Log.w("SyncViewModel", "couldn't read the other Spotify accounts", e)
+                    emit(emptyList())
+                }
+                .collect { others ->
+                    _uiState.update { it.copy(spotifyOtherAccounts = others, spotifyOtherAccountsLoaded = true) }
+                }
+        }
+    }
+
+    /** An other account's own saved-albums switch, on its page's Albums tab. */
+    fun onSyncOtherAccountAlbumsChanged(accountId: Long, enabled: Boolean) {
+        viewModelScope.launch {
+            runCatching { spotifyAccountDao.setSyncAlbums(accountId, enabled) }
+                .onFailure { if (it is CancellationException) throw it }
+        }
+    }
+
+    /** An other account's own mixes switch, on its page's Mixes tab. */
+    fun onSyncOtherAccountMixesChanged(accountId: Long, enabled: Boolean) {
+        viewModelScope.launch {
+            runCatching { spotifyAccountDao.setSyncMixes(accountId, enabled) }
+                .onFailure { if (it is CancellationException) throw it }
         }
     }
 
@@ -1212,3 +1320,17 @@ class SyncViewModel @Inject constructor(
         displayStatus = toDisplayStatus(),
     )
 }
+
+/**
+ * What the Downloads row says after its counts: out of space and Paused always (they hold everything,
+ * and Resume is on the Downloads screen); waiting for Wi-Fi or a connection only when songs wait.
+ */
+internal fun downloadsHoldFor(state: com.stash.core.data.sync.QueueRunState, waiting: Int): SyncViewModel.DownloadsHold? =
+    when (state) {
+        com.stash.core.data.sync.QueueRunState.StorageFull -> SyncViewModel.DownloadsHold.STORAGE_FULL
+        com.stash.core.data.sync.QueueRunState.Paused -> SyncViewModel.DownloadsHold.PAUSED
+        com.stash.core.data.sync.QueueRunState.WaitingForWifi -> SyncViewModel.DownloadsHold.WAITING_FOR_WIFI.takeIf { waiting > 0 }
+        com.stash.core.data.sync.QueueRunState.WaitingForConnection ->
+            SyncViewModel.DownloadsHold.WAITING_FOR_CONNECTION.takeIf { waiting > 0 }
+        else -> null
+    }

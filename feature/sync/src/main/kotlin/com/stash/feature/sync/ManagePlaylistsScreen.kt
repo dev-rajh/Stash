@@ -102,6 +102,12 @@ internal fun manageLists(rows: List<SyncPlaylistRow>): ManageLists = ManageLists
  * there. Save is the playlist page's Download switch ([SyncViewModel.onSavePlaylist]),
  * so the two always agree. The Sync tab overhaul, 2026-10-29: this used to be
  * a list of on/off switches whose meaning changed with the mode.
+ *
+ * Each Spotify account has its own page (plan 2026-11-04 §3.7): [spotifyAccountId] null is the
+ * main account's, listing its rows only (it used to list every Spotify row); an other account's id
+ * lists that account's, under "Spotify · Sam", with that account's own albums and mixes switches.
+ * [everySpotifyAccount] lists every Spotify account's on one page, each account's under its name
+ * with its own switches: for picking what to save in Download mode, so no account is missed.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -109,6 +115,8 @@ fun ManagePlaylistsScreen(
     source: SyncSource,
     onBack: () -> Unit,
     onOpenPlaylist: (Long) -> Unit,
+    spotifyAccountId: Long? = null,
+    everySpotifyAccount: Boolean = false,
     viewModel: SyncViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -120,7 +128,7 @@ fun ManagePlaylistsScreen(
         Scaffold(
             topBar = {
                 TopAppBar(
-                    title = { Text("Last.fm") },
+                    title = { Text(stringResource(R.string.sync_source_lastfm)) },
                     navigationIcon = {
                         IconButton(onClick = onBack) {
                             Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.sync_back))
@@ -138,11 +146,22 @@ fun ManagePlaylistsScreen(
         return
     }
 
-    val rows = uiState.playlistRows().filter { it.source == source }
+    val every = everySpotifyAccount && source == SyncSource.SPOTIFY
+    val otherAccountId = spotifyAccountId.takeIf { source == SyncSource.SPOTIFY && !every }
+    // Null on the main account's page, and on an other account's until the accounts are read (or once it's gone).
+    val otherAccount = otherAccountId?.let { id -> uiState.spotifyOtherAccounts.firstOrNull { it.id == id } }
+    // Every account's page, account by account; with only the main account it is just its page.
+    val groups = if (every && uiState.spotifyOtherAccounts.isNotEmpty()) uiState.spotifyAccountGroups() else null
+    val rows = uiState.accountPageRows(source, otherAccountId, everySpotifyAccount = every)
     val (playlists, albums, mixes, liked) = manageLists(rows)
     // Spotify's tab is always there: its switch decides whether saved albums sync at all.
     val showAlbumsTab = source == SyncSource.SPOTIFY || albums.isNotEmpty()
-    val name = when (source) { SyncSource.SPOTIFY -> "Spotify"; SyncSource.SOUNDCLOUD -> "SoundCloud"; else -> "YouTube Music" }
+    val name = when {
+        otherAccount != null -> stringResource(R.string.sync_account_spotify_named, otherAccount.name)
+        source == SyncSource.SPOTIFY -> stringResource(R.string.sync_source_spotify)
+        source == SyncSource.SOUNDCLOUD -> stringResource(R.string.sync_source_soundcloud)
+        else -> stringResource(R.string.sync_source_youtube_music)
+    }
     val brand = if (source == SyncSource.SOUNDCLOUD) androidx.compose.ui.graphics.Color(0xFFFF5500) else if (source == SyncSource.SPOTIFY) StashTheme.extendedColors.spotifyGreen else StashTheme.extendedColors.youtubeRed
 
     var tab by rememberSaveable { mutableStateOf(if (source == SyncSource.SOUNDCLOUD) ManageTab.LIKED else ManageTab.PLAYLISTS) }
@@ -305,11 +324,12 @@ fun ManagePlaylistsScreen(
             // The discovery switch shows even with no mixes yet, so they can be
             // stopped before the first sync pulls any in (#335, #344).
             if (tab == ManageTab.MIXES) {
-                item(key = "mixes-discovery") {
-                    DiscoverMixesRow(
-                        enabled = uiState.discoverAutoMixes,
-                        onChange = viewModel::onDiscoverAutoMixesChanged,
-                    )
+                // Every account's page: each account's switch heads its own group below.
+                if (groups == null) {
+                    item(key = "mixes-discovery") {
+                        // An other account's page before the accounts are read: no switch rather than the wrong one.
+                        if (otherAccount != null || otherAccountId == null) MixesSwitchFor(otherAccount, uiState, viewModel)
+                    }
                 }
                 // What Stack means, once, above the mixes that have it.
                 if (shown.any { it.stackable && !it.userHidden }) {
@@ -324,12 +344,9 @@ fun ManagePlaylistsScreen(
                 }
             }
             // Shown before the first album arrives, so saved albums can be kept out from the start.
-            if (tab == ManageTab.ALBUMS && source == SyncSource.SPOTIFY) {
+            if (tab == ManageTab.ALBUMS && source == SyncSource.SPOTIFY && groups == null) {
                 item(key = "albums-sync") {
-                    SyncSavedAlbumsRow(
-                        enabled = uiState.syncSpotifySavedAlbums,
-                        onChange = viewModel::onSyncSpotifySavedAlbumsChanged,
-                    )
+                    if (otherAccount != null || otherAccountId == null) SpotifyAlbumsSwitchFor(otherAccount, uiState, viewModel)
                 }
             }
             if (tab == ManageTab.LIKED && source == SyncSource.YOUTUBE) {
@@ -339,6 +356,41 @@ fun ManagePlaylistsScreen(
                         onChange = viewModel::onYoutubeLikedStudioOnlyChanged,
                     )
                 }
+            }
+
+            val rowContent: @Composable (SyncPlaylistRow) -> Unit = { row ->
+                PlaylistSaveRow(
+                    row = row,
+                    saved = row.saved(streamOnly),
+                    onToggle = { viewModel.onSavePlaylist(row.id, it) },
+                    onSetInLibrary = { viewModel.onSetInLibrary(row.id, it) },
+                    onSetStack = { viewModel.onSetStack(row.id, it) },
+                    onOpen = { onOpenPlaylist(row.id) },
+                )
+            }
+            val (out, inLibrary) = shown.partition { it.userHidden }
+
+            // Every account's page: each account under its name, its own switch first on Mixes and
+            // Albums (shown with nothing under it yet, as on its own page), then its rows.
+            groups?.forEach { group ->
+                val other = group.otherAccount
+                val groupKey = other?.id ?: 0L
+                val groupIds = group.rows.mapTo(HashSet()) { it.id }
+                val inThisTab = inLibrary.filter { it.id in groupIds }
+                val switchFirst = tab == ManageTab.MIXES || tab == ManageTab.ALBUMS
+                if (inThisTab.isEmpty() && !switchFirst) return@forEach
+                item(key = "group-$groupKey") {
+                    AccountGroupHeader(
+                        name = other?.let { stringResource(R.string.sync_account_spotify_named, it.name) } ?: stringResource(R.string.sync_source_spotify),
+                    )
+                }
+                if (tab == ManageTab.MIXES) {
+                    item(key = "group-$groupKey-mixes") { MixesSwitchFor(other, uiState, viewModel) }
+                }
+                if (tab == ManageTab.ALBUMS) {
+                    item(key = "group-$groupKey-albums") { SpotifyAlbumsSwitchFor(other, uiState, viewModel) }
+                }
+                items(inThisTab, key = { it.id }) { rowContent(it) }
             }
 
             if (shown.isEmpty()) {
@@ -355,18 +407,7 @@ fun ManagePlaylistsScreen(
                     )
                 }
             } else {
-                val rowContent: @Composable (SyncPlaylistRow) -> Unit = { row ->
-                    PlaylistSaveRow(
-                        row = row,
-                        saved = row.saved(streamOnly),
-                        onToggle = { viewModel.onSavePlaylist(row.id, it) },
-                        onSetInLibrary = { viewModel.onSetInLibrary(row.id, it) },
-                        onSetStack = { viewModel.onSetStack(row.id, it) },
-                        onOpen = { onOpenPlaylist(row.id) },
-                    )
-                }
-                val (out, inLibrary) = shown.partition { it.userHidden }
-                items(inLibrary, key = { it.id }) { rowContent(it) }
+                if (groups == null) items(inLibrary, key = { it.id }) { rowContent(it) }
                 // What was taken out folds away; a search opens it, so a match is never hidden.
                 if (out.isNotEmpty()) {
                     val open = showOut || q.isNotBlank()
@@ -503,13 +544,14 @@ private fun StackPill(stacking: Boolean, playlistName: String, onToggle: (Boolea
 /** The fold over the playlists taken out of the library: "Not in your library · 12". */
 @Composable
 private fun OutOfLibraryHeader(count: Int, expanded: Boolean, onToggle: () -> Unit) {
+    val expandedDesc = stringResource(if (expanded) R.string.sync_state_expanded else R.string.sync_state_collapsed)
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .padding(top = 10.dp)
             .clip(RoundedCornerShape(10.dp))
             .clickable(role = Role.Button, onClick = onToggle)
-            .semantics { stateDescription = if (expanded) "Expanded" else "Collapsed" }
+            .semantics { stateDescription = expandedDesc }
             .padding(vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -605,16 +647,91 @@ private fun DiscoverMixesRow(
     ) {
         Column(modifier = Modifier.weight(1f)) {
             Text(
-                text = "Discover mixes automatically",
+                text = stringResource(R.string.sync_discover_mixes_title),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurface,
             )
             Text(
-                text = if (enabled) {
-                    "Daily Mixes and similar are added as they appear"
-                } else {
-                    "Off — no new mixes are added, and syncs run shorter"
-                },
+                text = stringResource(if (enabled) R.string.sync_discover_mixes_on else R.string.sync_discover_mixes_off),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        com.stash.core.ui.components.StashSwitch(
+            checked = enabled,
+            onCheckedChange = onChange,
+        )
+    }
+}
+
+/**
+ * The Mixes tab's switch for an account: [other]'s own (off by default), or with null the main
+ * account's (and other services'), "Discover mixes automatically".
+ */
+@Composable
+private fun MixesSwitchFor(other: SpotifyOtherAccount?, uiState: SyncUiState, viewModel: SyncViewModel) {
+    if (other != null) {
+        OtherAccountMixesRow(enabled = other.syncMixes, onChange = { viewModel.onSyncOtherAccountMixesChanged(other.id, it) })
+    } else {
+        DiscoverMixesRow(enabled = uiState.discoverAutoMixes, onChange = viewModel::onDiscoverAutoMixesChanged)
+    }
+}
+
+/** The Albums tab's saved-albums switch for a Spotify account: [other]'s own, or with null the main account's. */
+@Composable
+private fun SpotifyAlbumsSwitchFor(other: SpotifyOtherAccount?, uiState: SyncUiState, viewModel: SyncViewModel) {
+    if (other != null) {
+        SyncSavedAlbumsRow(enabled = other.syncAlbums, onChange = { viewModel.onSyncOtherAccountAlbumsChanged(other.id, it) })
+    } else {
+        SyncSavedAlbumsRow(enabled = uiState.syncSpotifySavedAlbums, onChange = viewModel::onSyncSpotifySavedAlbumsChanged)
+    }
+}
+
+/** An account's name over its rows on the page that lists every Spotify account's: its dot as the page header's. */
+@Composable
+private fun AccountGroupHeader(name: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(top = 18.dp, bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Box(Modifier.size(8.dp).clip(CircleShape).background(StashTheme.extendedColors.spotifyGreen))
+        Text(
+            text = name,
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onBackground,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+/**
+ * An other Spotify account's mixes on or off for sync; off by default (its `spotify_accounts.sync_mixes`):
+ * two accounts' "Daily Mix 1" would otherwise sit side by side on Home. Drawn as [DiscoverMixesRow],
+ * which it stands in for on that account's page.
+ */
+@Composable
+private fun OtherAccountMixesRow(
+    enabled: Boolean,
+    onChange: (Boolean) -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onChange(!enabled) }
+            .padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = stringResource(R.string.sync_other_account_mixes_title),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            Text(
+                text = stringResource(if (enabled) R.string.sync_other_account_mixes_on else R.string.sync_other_account_mixes_off),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -663,11 +780,18 @@ private fun SyncSavedAlbumsRow(
  * freshest mixes; an untouched mix surfaces when a sync adds to it, a pinned one
  * always leads, a hidden one never appears.
  */
-internal fun homeVisibilityLabel(hidden: Boolean, pinned: Boolean): String = when {
-    hidden -> "Hidden from Home"
-    pinned -> "Pinned on Home"
-    else -> "On Home when it updates"
+@androidx.annotation.StringRes
+internal fun homeVisibilityLabelRes(hidden: Boolean, pinned: Boolean): Int = when {
+    hidden -> R.string.sync_home_visibility_hidden
+    pinned -> R.string.sync_home_visibility_pinned
+    else -> R.string.sync_home_visibility_default
 }
+
+internal fun homeVisibilityLabel(
+    hidden: Boolean,
+    pinned: Boolean,
+    res: android.content.res.Resources,
+): String = res.getString(homeVisibilityLabelRes(hidden, pinned))
 
 // ── Last.fm (issue #255) ─────────────────────────────────────────────────────
 
@@ -688,7 +812,7 @@ private fun LastFmManageContent(
         modifier = modifier.padding(horizontal = 16.dp),
     ) {
         Text(
-            text = "Recommendations",
+            text = stringResource(R.string.sync_lastfm_recommendations_header),
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             fontWeight = FontWeight.SemiBold,
@@ -707,18 +831,22 @@ private fun LastFmManageContent(
         ) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = "Recommended by Last.fm",
+                    text = stringResource(R.string.sync_lastfm_recommended_title),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurface,
                 )
                 Text(
                     text = when {
                         !state.connected ->
-                            "Connect Last.fm in Settings → Accounts to enable"
+                            stringResource(R.string.sync_lastfm_connect_to_enable)
                         !state.enabled ->
-                            "Off — no recommendations are generated"
+                            stringResource(R.string.sync_lastfm_recommended_disabled_desc)
                         else ->
-                            "On · ${state.trackCount ?: 0} tracks synced"
+                            pluralStringResource(
+                                R.plurals.sync_lastfm_synced_tracks,
+                                state.trackCount ?: 0,
+                                state.trackCount ?: 0,
+                            )
                     },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -732,17 +860,13 @@ private fun LastFmManageContent(
         }
 
         Text(
-            text = "Builds a rotating playlist of tracks Last.fm recommends, " +
-                "seeded from what you play and scrobble most. Each refresh " +
-                "swaps in fresh picks; tracks are matched against YouTube " +
-                "Music / Spotify and downloaded like any other sync, " +
-                "respecting your network settings.",
+            text = stringResource(R.string.sync_lastfm_explainer),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(top = 4.dp),
         )
         Text(
-            text = "Find it as “Recommended by Last.fm” under Library → Mixes.",
+            text = stringResource(R.string.sync_lastfm_find_it_hint),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             fontWeight = FontWeight.SemiBold,
