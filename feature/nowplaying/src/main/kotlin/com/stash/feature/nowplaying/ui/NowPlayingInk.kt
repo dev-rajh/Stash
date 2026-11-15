@@ -14,8 +14,8 @@ import com.stash.core.ui.ambient.LocalAlbumChrome
  * LocalAlbumChrome (see [WithAlbumChrome]).
  */
 
-/** Light-ground ink for the pastel-wash Now Playing (the app's plum-black). */
-internal val NpInkLight = Color(0xFF241C36)
+/** Light-ground ink for the warm-cream Now Playing (the mockup's stone-900). */
+internal val NpInkLight = Color(0xFF1C1917)
 
 /** True when the resolved theme is light (the pastel wash rather than the dark ambient). */
 @Composable

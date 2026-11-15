@@ -13,8 +13,11 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -64,11 +67,8 @@ internal fun liveBarModeFor(state: LyricsViewState, liveEnabled: Boolean): LiveB
 /** Near-black scrim base — matches `AmbientBackground.BaseDark`. */
 private val BarBase = Color(0xFF06060C)
 
-/** Light-theme scrim base — matches `AmbientBackground.BaseLight`. */
-private val BarBaseLight = Color(0xFFF4F1FA)
-
-/** Light-theme ink for the Static "View lyrics ♪" line. */
-private val BarInkLight = Color(0xFF241C36)
+/** Light-theme scrim base — matches `AmbientBackground.BaseLight` (the warm cream wash). */
+private val BarBaseLight = Color(0xFFF4ECE6)
 
 /** Space between the bar's ♪ notes during an instrumental break. */
 internal val BarNoteSpacing = 10.dp
@@ -195,14 +195,30 @@ fun LiveLyricsBar(
                         }
                     }
                 }
-                LiveBarMode.Static -> Text(
-                    text = "View lyrics ♪",
-                    style = MaterialTheme.typography.titleSmall,
-                    color = (if (darkTheme) Color.White else BarInkLight).copy(alpha = 0.45f),
-                    maxLines = 1,
-                    textAlign = TextAlign.Center,
+                LiveBarMode.Static -> Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
                     modifier = Modifier.fillMaxWidth(),
-                )
+                ) {
+                    // The mockup's drawer handle: a quiet pill over the label, the invitation to
+                    // tap through to the lyrics. Visual only — the whole bar is the tap target.
+                    Box(
+                        modifier = Modifier
+                            .padding(bottom = 8.dp)
+                            .size(width = 36.dp, height = 4.dp)
+                            .background(
+                                (if (darkTheme) Color.White else NpInkLight).copy(alpha = 0.35f),
+                                RoundedCornerShape(50),
+                            ),
+                    )
+                    Text(
+                        text = "View lyrics ♪",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = (if (darkTheme) Color.White else NpInkLight).copy(alpha = 0.45f),
+                        maxLines = 1,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
                 LiveBarMode.Hidden -> Unit
             }
         }

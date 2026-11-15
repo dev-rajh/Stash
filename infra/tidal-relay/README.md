@@ -12,9 +12,9 @@ from this folder now (`npm ci`, then `npx wrangler deploy`). Same Worker name, s
 - `GET /stream/td:<id>?client=media3` with `X-Access-Token` → progressive FLAC URL or a signed DASH MPD URL, with the BitChord response fields. Progressive answers (FLAC and AAC) add `expiresAt` (epoch seconds, from Tidal's signed URL) when it is readable; DASH answers carry their expiry as `exp` in the signed URL. `?aac` is one of `1`, `only` or absent; any other value is treated as absent.
 - `GET /quota` with `X-Access-Token` and the signed install headers (below) → today's daily lossless count.
 - Signed `GET /dash/td/<id>.mpd` and `GET /dash/td/<id>/init.mp4` URLs need no header; their HMAC signatures (keyed by the `DASH_SIGNING_KEY` secret, see Deployment) expire after one hour.
-- Admin-only `POST /admin/device/start`, then `POST /admin/device/poll` with `{ "user_code": "..." }` starts and completes the Tidal OAuth device flow; `POST /admin/seats/pkce` adds a web seat (see `?web=mse` below). These require `X-Access-Token: <ADMIN_TOKEN>`.
+- Admin-only `POST /admin/device/start`, then `POST /admin/device/poll` with `{ "user_code": "..." }` starts and completes the Tidal OAuth device flow; `POST /admin/seats/pkce` adds a web seat (see `?web=mse` below); `GET /admin/seats` and `POST /admin/seats/import` list and copy seats (see "Moving to another account"). These require `X-Access-Token: <ADMIN_TOKEN>`.
 
-Tidal accounts are linked through the device flow; passwords and OAuth tokens are never printed. The pool rotates least-recently-used live accounts, with per-account caps of 200 upstream calls/hour and 3,200/day (`TIDAL_ACCOUNT_HOURLY_CAP` / `TIDAL_ACCOUNT_DAILY_CAP` in `wrangler.toml`; the code falls back to 250 and 1,600 when they are unset). It applies cooldowns for transient failures and retires an account only when Tidal rejects its refresh token (see the 401 rule below). A lower-than-lossless answer is final (no cross-check on another account), and Tidal's `subStatus=4005` is a track/rights refusal (`not_available`) that never kills an account. When no account is available, search and stream return `503 busy`: `Retry-After: 300` when seats are capped or cooling, `Retry-After: 15` when seats are only waiting out their pacing gap.
+Tidal accounts are linked through the device flow; passwords and OAuth tokens are never printed. The pool rotates least-recently-used live accounts, with per-account caps of 200 upstream calls/hour and 3,200/day (`TIDAL_ACCOUNT_HOURLY_CAP` / `TIDAL_ACCOUNT_DAILY_CAP` in `wrangler.toml`; the code falls back to 250 and 1,600 when they are unset). It applies cooldowns for transient failures and retires an account only when Tidal rejects its refresh token (see the 401 rule below). A lower-than-lossless answer is final (no cross-check on another account), and Tidal's `subStatus=4005` is a track/rights refusal (`not_available`) that never kills an account. When no account is available, search and stream return `503 busy`: `Retry-After: 300` when seats are capped or cooling, `Retry-After: 15` when seats are only waiting out their pacing gap. A preview (Tidal's 30 s PREVIEW instead of the track: `assetPresentation` other than `FULL`, or a `previewReason`) is never served or cached: that seat rests 300 s and one more seat is asked, paid from the network's `UPSTREAM_RL` share (over it: `Retry-After: 30`). When that seat has only the preview too, it is the track's preview (Tidal plays 30 s of it to anyone), not a second lapsed seat: that seat does not rest, and the answer is `404 not_available`, cached 6 h (the app keeps that miss 6 h too and plays the song from elsewhere), logged as `tidal_preview_track` with both seats' last 4. When that seat cannot answer for another reason, the stream gets the same `503 busy` as no account at all: 15 while another seat is free or only pacing, 300 only when every seat is resting or capped. The log line `tidal_preview` names the seat (last 4) and track. Both seats failing at seat level (Tidal 5xx, a failed refresh): `503 upstream_unavailable`, `Retry-After: 15`.
 
 Protective limits mirror the Qobuz relay: 34,667 upstream-answered `/stream` requests/day shared across the pool, 2,000 answered streams/day per network, 2,000 uncached searches/day per network, 40 requests/60 seconds per network for provider/admin routes, and a 6/60 seconds per-network fair share of the seats. The network key is the IPv4 address or IPv6 `/56`, hashed with the private `IP_SALT`; raw IP addresses are not written to D1. `IP_SALT` is required for the daily network cap; without it only the shared global cap and request limiter apply. `/health` is exempt from the request limiter. Apart from the shared daily lossless counter below (which needs the signed install headers), there is no per-install cap: older Tidal app clients send only `X-Access-Token`. Daily quotas (table `tidal_daily_quotas`, key per day):
 
@@ -109,7 +109,7 @@ was removed in 2026-11, so these are the only ones).
 
 One `/stream` cache miss makes **one** upstream `playbackinfopostpaywall` call: `countryCode=TIDAL_COUNTRY_CODE` (default `US`) and `audioquality=HI_RES_LOSSLESS` (`HIGH` for `?aac=only`). Tidal answers with the best quality available up to that level; with this client ID CD-only tracks come back `HIGH` (AAC), which is final (`lossless_unavailable`, or AAC under `?aac=1`). There is no quality/country walk and no second-account retry for a track-level answer; a second seat is tried only after a seat-level failure (failed refresh, Tidal 5xx). Any other upstream 4xx on `/stream` (e.g. 400/403) answers `502 {"error":"upstream_error"}` on the one seat. `?aac=only` adds one `/tracks/<id>` metadata call on a hires-cache miss.
 
-**`TIDAL_V2_MANIFESTS="1"`** (default `"0"`): every lossless mode (all but `?aac=only`) first asks openapi v2 `GET /v2/trackManifests/<id>?formats=FLAC&formats=FLAC_HIRES&manifestType=MPEG_DASH&uriScheme=DATA&adaptive=false&usage=PLAYBACK` on the same seat (same pacing, counting, 401 refresh and 429 strike as playbackinfo). v2 gives this client's seat tokens CD FLAC, which v1 caps at AAC. A clear FLAC/FLAC_HIRES MPD (inline `data:` URI, or an https link on `*.tidal.com`) is served exactly like a v1 hi-res DASH answer (`/dash/td/<id>.mpd`, or edge URLs under `?web=1`), with bits/rate from the Representation id (`FLAC,44100,16`), and writes `tidal_hires_cache`. A v2 answer with no FLAC, `drmData`, a preview, a 404 or anything unparseable falls back to the v1 call above on the same seat (2 calls at most; a v2 429 is busy with no v1 call). Stream cache keys gain `:v2` while it is on, so old 5-day `lossless_unavailable` entries do not hide v2 FLAC; a v1 `lossless_unavailable` after a *transient* v2 failure (5xx, 403, timeout, bad MPD) is cached 6 h, not 5 days. Each stream on this path logs one `tidal_stream {"track","path":"v2"|"v1","reason","formats","bits","rate","status","codec"|"error"}` line.
+**`TIDAL_V2_MANIFESTS="1"`** (default `"0"`): every lossless mode (all but `?aac=only`) first asks openapi v2 `GET /v2/trackManifests/<id>?formats=FLAC&formats=FLAC_HIRES&manifestType=MPEG_DASH&uriScheme=DATA&adaptive=false&usage=PLAYBACK` on the same seat (same pacing, counting, 401 refresh and 429 strike as playbackinfo). v2 gives this client's seat tokens CD FLAC, which v1 caps at AAC. A clear FLAC/FLAC_HIRES MPD (inline `data:` URI, or an https link on `*.tidal.com`) is served exactly like a v1 hi-res DASH answer (`/dash/td/<id>.mpd`, or edge URLs under `?web=1`), with bits/rate from the Representation id (`FLAC,44100,16`), and writes `tidal_hires_cache`. A v2 answer with no FLAC, `drmData`, a preview, a 404 or anything unparseable falls back to the v1 call above on the same seat (2 calls at most; a v2 429 is busy with no v1 call; when that seat's answer is a preview, the next seat gets 2 calls of its own, so a stream is 2 seats x 2 calls at most). Stream cache keys gain `:v2` while it is on, so old 5-day `lossless_unavailable` entries do not hide v2 FLAC; a v1 `lossless_unavailable` after a *transient* v2 failure (5xx, 403, timeout, bad MPD) is cached 6 h, not 5 days. Each stream on this path logs one `tidal_stream {"track","path":"v2"|"v1","reason","formats","bits","rate","status","codec"|"error"}` line.
 
 Every upstream call counts in the seat's `hour_n`/`day_n`: `takeAccount` counts the first, `bumpSeat` counts the metadata call and a post-refresh retry, so the caps reflect real Tidal load.
 
@@ -211,3 +211,41 @@ SELECT substr(account_id, -4) AS account, endpoint, hour_n, day_n,
        datetime(occurred_at, 'unixepoch') AS occurred_at
 FROM tidal_upstream_429_events ORDER BY occurred_at DESC;
 ```
+
+## Moving to another account (`REDIRECT_ORIGIN`, seat copy)
+
+The relay is moving to its own Cloudflare account as the add-on `stash-addon-tidal` (plan: `addons-phase2.md` §2–§3).
+The same relay code runs on both sides for the overlap; whichever side does not hold the seats redirects to the other.
+
+- **`REDIRECT_ORIGIN`** (var, empty by default = serve here). Set to a bare https origin, `/search`, `/stream/*` and
+  `/quota` answer `307` with `Location: <REDIRECT_ORIGIN><same path>?<same query>&via=old`, before the request limiter
+  and without touching D1. A 307 keeps the method; the app's OkHttp keeps `X-Access-Token` and the `X-Stash-*`
+  headers across hosts (it drops only `Authorization`), and the install signature covers `<install>:td:<n>:<ts>`, not
+  the host, so it verifies on the other side. `/health`, `/dash/*` (links signed here, at most an hour old) and
+  `/admin/*` are still served here. A request that already carries `via`, or a target that is this very origin, is
+  served here instead, so two shims pointed at each other cannot loop. A value that is not a bare https origin is
+  ignored (served here) and logged once. So is a loopback origin (`localhost`, `127.0.0.1`), unless
+  `REDIRECT_ALLOW_LOCAL = "1"` (tests and `wrangler dev` only). The web shim `stash-src-tidal` refuses redirects:
+  repoint it first.
+- **`GET /admin/seats`** (`ADMIN_TOKEN`): every seat with every column except the tokens, plus `has_access_token` /
+  `has_refresh_token` and counts by state. It never outputs a token.
+- **`POST /admin/seats/import`** (`ADMIN_TOKEN`): `{"seats":[{...}, ...]}`, at most 500 seats, each naming every column
+  of `tidal_accounts` and nothing else (tokens, state, counters, `last_call_at`, `generation`, `client`), so caps and
+  pacing carry over and no account is re-linked. One atomic batch: all seats or none. It upserts by `id`, but never
+  older over newer: a seat already here is overwritten only by a copy whose `generation` (bumped by every refresh and
+  re-link) is at least its own, so a re-run or a copy in the wrong direction cannot put stale tokens or a stale state
+  over fresh ones. A `live` or `reserve` seat must carry both tokens. It answers counts only (`imported`, `inserted`,
+  `updated`, `skipped_older`); errors name the field (`invalid seats[2].state`), never a value. The body is capped at
+  2 MiB as it arrives.
+
+The move itself is scripted in the add-on repo (`move-seats.mjs`, its README "Cutover" and "Rollback"): it reads the
+seats with `wrangler d1 execute --json` run with `WRANGLER_WRITE_LOGS=false` (otherwise wrangler copies every row it
+prints, tokens included, into its log folder for 30 days) and sends them to the other side's import route. Never run
+`wrangler d1 export` on this database while it serves traffic.
+
+**Deploying while the shim is on.** From cutover step 3 until this Worker is deleted, deploy it only with
+`npm run deploy` (`scripts/deploy.mjs`), never `wrangler deploy`. It first asks the live Worker whether it redirects
+(`GET /search`, redirects not followed) and refuses a deploy that would turn the redirect off or point it elsewhere:
+its own seats are parked then, so every phone still on this URL would get `503 busy`. Right after step 3, commit
+`REDIRECT_ORIGIN = "<new origin>"` to `wrangler.toml` on master, so a routine deploy keeps it. Only the rollback turns
+it off, with `npm run deploy -- --shim-off-on-purpose`.

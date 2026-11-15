@@ -25,6 +25,7 @@ import com.stash.feature.nowplaying.ui.LyricsMenuButton
 import com.stash.feature.nowplaying.ui.LyricsModeHeader
 import com.stash.feature.nowplaying.ui.LyricsPane
 import com.stash.feature.nowplaying.ui.lyricsMenuItemsFor
+import com.stash.feature.nowplaying.ui.npGlass
 import com.stash.feature.nowplaying.ui.npIsLight
 import androidx.compose.foundation.background
 import androidx.compose.foundation.basicMarquee
@@ -49,6 +50,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.border
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
@@ -62,6 +64,7 @@ import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.filled.Bedtime
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Close
@@ -99,6 +102,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -1190,7 +1194,12 @@ fun NowPlayingScreen(
                             },
                             fullArt = if (hasArt) fullArtOn else null,
                             onToggleFullArt = viewModel::onToggleFullArt,
-                            headerTitle = track?.album?.takeIf { it.isNotBlank() },
+                            // The mockup's context header: the queue's "Playing from" label
+                            // (album, playlist, Liked Songs…), falling back to the track's album
+                            // when the source has nothing to say.
+                            headerTitle = uiState.source.displayLabel.ifBlank {
+                                track?.album?.takeIf { it.isNotBlank() }
+                            },
                         )
                     }
                     if (room != null) {
@@ -1383,7 +1392,8 @@ fun NowPlayingScreen(
                                             // says when Android resampled the song.
                                             val badge = signalVerdict?.let { with(com.stash.feature.nowplaying.ui.SignalPathBadge) { it.badge() } }
                                             QualityLine(
-                                                qualityText = if (badge != null) "$qualityText \u00B7 $badge" else qualityText,
+                                                qualityText = qualityText,
+                                                verdictBadge = badge,
                                                 isStreaming = uiState.isStreaming,
                                                 onClick = { showSignalPath = true },
                                                 alignStart = alignStart,
@@ -1587,6 +1597,9 @@ fun NowPlayingScreen(
 
 /** The art's design ceiling. */
 private val ArtMax = 375.dp
+
+/** The art's corners — the mockup's 24 (the glow and the full-art handoff share it). */
+private val ArtShape = RoundedCornerShape(24.dp)
 
 /*
  * The floors of the three flexible gaps around the art: top bar -> art, art -> title,
@@ -1956,7 +1969,7 @@ private fun AlbumArtSection(
             fallback = missingArt,
             modifier = Modifier
                 .fillMaxSize()
-                .clip(RoundedCornerShape(20.dp)),
+                .clip(ArtShape),
         )
     }
 }
@@ -1978,7 +1991,7 @@ private fun ArtGlow() {
                 shadowElevation = 40.dp.toPx()
                 shape = ArtGlowShape
                 clip = false
-                val glow = chrome.accent.copy(alpha = 0.25f)
+                val glow = chrome.accent.copy(alpha = 0.35f)
                 ambientShadowColor = glow
                 spotShadowColor = glow
             },
@@ -2014,7 +2027,7 @@ private fun AlbumBackSection(
                 contentScale = ContentScale.Crop,
                 modifier = Modifier
                     .fillMaxSize()
-                    .clip(RoundedCornerShape(20.dp)),
+                    .clip(ArtShape),
             )
         }
     }
@@ -2069,7 +2082,7 @@ private fun InsidePageSection(
                     onError = { failedAttempt = attempt },
                     modifier = Modifier
                         .fillMaxSize()
-                        .clip(RoundedCornerShape(20.dp)),
+                        .clip(ArtShape),
                 )
             }
         }
@@ -2081,7 +2094,7 @@ private const val BACK_MIN_ASPECT = 0.6f
 private const val BACK_MAX_ASPECT = 1.7f
 
 /** The album art glow's shape (the art's own corners). */
-private val ArtGlowShape = RoundedCornerShape(20.dp)
+private val ArtGlowShape = ArtShape
 
 /**
  * Playback controls row: shuffle, previous, play/pause, next, repeat. Wears the album colours
@@ -2118,8 +2131,8 @@ private fun PlaybackControls(
             Icon(
                 imageVector = Icons.Default.Shuffle,
                 contentDescription = "Shuffle",
-                tint = if (shuffleEnabled) accentColor else npInk().copy(alpha = 0.6f),
-                modifier = Modifier.size(24.dp),
+                tint = if (shuffleEnabled) accentColor else npInk().copy(alpha = 0.55f),
+                modifier = Modifier.size(20.dp),
             )
         }
 
@@ -2129,7 +2142,7 @@ private fun PlaybackControls(
                 imageVector = Icons.Default.SkipPrevious,
                 contentDescription = "Previous",
                 tint = npInk(),
-                modifier = Modifier.size(36.dp),
+                modifier = Modifier.size(32.dp),
             )
         }
 
@@ -2171,7 +2184,7 @@ private fun PlaybackControls(
                 imageVector = Icons.Default.SkipNext,
                 contentDescription = "Next",
                 tint = npInk(),
-                modifier = Modifier.size(36.dp),
+                modifier = Modifier.size(32.dp),
             )
         }
 
@@ -2186,30 +2199,28 @@ private fun PlaybackControls(
                 },
                 contentDescription = "Repeat",
                 tint = when (repeatMode) {
-                    RepeatMode.OFF -> npInk().copy(alpha = 0.6f)
+                    RepeatMode.OFF -> npInk().copy(alpha = 0.55f)
                     else -> accentColor
                 },
-                modifier = Modifier.size(24.dp),
+                modifier = Modifier.size(20.dp),
             )
         }
     }
 }
 
 /**
- * Renders the codec/bitrate quality line beneath the artist · album row.
- * When [isStreaming] is `true` a small wifi glyph is prefixed so the
- * user can tell at a glance that playback is coming from the network
- * rather than a local file. The icon picks up
- * [MaterialTheme.colorScheme.primary] so it stands out against the
- * white-on-ambient quality text without clashing with the album-art
- * palette.
+ * The mockup's quality pill beneath the artist line: the codec — or the live verdict, "HI-RES" /
+ * "BIT-PERFECT", when the signal path knows one — in a small accent chip, the rest of
+ * [trackQualityText]'s line beside it, both on a rounded-full glass. Tapping opens the signal
+ * path, the only place that says when Android resampled the song. When [isStreaming] a small
+ * wifi glyph rides after the chip, so playback from the network reads at a glance.
  *
- * Aligned as the title is ([alignStart]): a start-aligned title with a centred line under it
- * left the two edges apart. A Row, so the prefix-icon variant lines up with the icon-less one.
+ * Aligned as the title is ([alignStart]); a Row, so the pill sits at that edge or centred.
  */
 @Composable
 private fun QualityLine(
     qualityText: String,
+    verdictBadge: String?,
     isStreaming: Boolean,
     onClick: (() -> Unit)? = null,
     alignStart: Boolean = false,
@@ -2219,37 +2230,65 @@ private fun QualityLine(
     } else {
         Modifier
     }
-    if (isStreaming) {
+    // The chip's text: the verdict when there is one, else qualityText's first segment —
+    // "FLAC · 24-bit/44.1 kHz · 1516 kbps · 48.1 MB" opens with the codec.
+    val chip = (verdictBadge
+        ?: qualityText.substringBefore('\u00B7').trim().takeIf { it.isNotEmpty() })
+        ?.uppercase()
+    val body = if (verdictBadge != null) qualityText else qualityText.substringAfter('\u00B7', "").trim()
+    WithAlbumChrome { pillChrome ->
         Row(
             modifier = Modifier.fillMaxWidth().then(tap),
             horizontalArrangement = if (alignStart) Arrangement.Start else Arrangement.Center,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Icon(
-                imageVector = Icons.Default.Wifi,
-                contentDescription = "Streaming",
-                tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(12.dp),
-            )
-            Spacer(modifier = Modifier.width(6.dp))
-            Text(
-                text = qualityText,
-                style = MaterialTheme.typography.bodyMedium,
-                color = npInk().copy(alpha = 0.5f),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+            Row(
+                modifier = Modifier
+                    .weight(1f, fill = false)
+                    .npGlass(RoundedCornerShape(50)),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Spacer(modifier = Modifier.width(10.dp))
+                if (chip != null) {
+                    Text(
+                        text = chip,
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 0.8.sp,
+                        ),
+                        color = pillChrome.accent,
+                        maxLines = 1,
+                        modifier = Modifier
+                            .background(pillChrome.accent.copy(alpha = 0.10f), RoundedCornerShape(4.dp))
+                            .padding(horizontal = 5.dp, vertical = 2.dp),
+                    )
+                }
+                if (isStreaming) {
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Icon(
+                        imageVector = Icons.Default.Wifi,
+                        contentDescription = "Streaming",
+                        tint = pillChrome.accent,
+                        modifier = Modifier.size(12.dp),
+                    )
+                }
+                if (body.isNotEmpty()) {
+                    Spacer(modifier = Modifier.width(7.dp))
+                    Text(
+                        text = body,
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium,
+                        ),
+                        color = npInk().copy(alpha = 0.6f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                Spacer(modifier = Modifier.width(10.dp))
+            }
         }
-    } else {
-        Text(
-            text = qualityText,
-            style = MaterialTheme.typography.bodySmall,
-            color = npInk().copy(alpha = 0.5f),
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            textAlign = if (alignStart) TextAlign.Start else TextAlign.Center,
-            modifier = Modifier.fillMaxWidth().then(tap),
-        )
     }
 }
 
@@ -2640,6 +2679,7 @@ private fun PreviewQualityLineStreaming() {
     com.stash.core.ui.theme.StashTheme {
         QualityLine(
             qualityText = "OPUS \u00B7 160 kbps",
+            verdictBadge = null,
             isStreaming = true,
         )
     }
@@ -2654,7 +2694,8 @@ private fun PreviewQualityLineStreaming() {
 private fun PreviewQualityLineLocal() {
     com.stash.core.ui.theme.StashTheme {
         QualityLine(
-            qualityText = "FLAC \u00B7 24-bit/96.0 kHz \u00B7 4233 kbps",
+            qualityText = "FLAC \u00B7 24-bit/96.0 kHz \u00B7 4233 kbps \u00B7 28.4 MB",
+            verdictBadge = "Hi-Res",
             isStreaming = false,
         )
     }
@@ -2719,43 +2760,73 @@ private fun TrackInfoFooter(
 ) {
     Column(modifier = Modifier.fillMaxWidth()) {
         if (path != null) {
-            Text(
-                text = path,
-                style = MaterialTheme.typography.labelSmall,
-                color = npInk().copy(alpha = 0.55f),
-                // The whole path, however long it is — it wraps.
-                softWrap = true,
+            // The mockup's file-location strip: a folder glyph and the path in mono on a quiet
+            // band of the ground (the glass's inverse), two lines at most.
+            Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 24.dp),
-            )
+                    .padding(horizontal = 2.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(npInk().copy(alpha = 0.05f))
+                    .border(1.dp, npInk().copy(alpha = 0.06f), RoundedCornerShape(8.dp))
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.Top,
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Folder,
+                    contentDescription = null,
+                    tint = npInk().copy(alpha = 0.40f),
+                    modifier = Modifier
+                        .padding(top = 1.dp)
+                        .size(14.dp),
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = path,
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 10.sp,
+                        lineHeight = 13.sp,
+                    ),
+                    color = npInk().copy(alpha = 0.55f),
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+            }
         }
         if (playlists.isNotEmpty()) {
             Spacer(modifier = Modifier.height(6.dp))
-            androidx.compose.foundation.lazy.LazyRow(
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 24.dp),
+            LazyRow(
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 2.dp),
                 horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp),
             ) {
                 items(playlists.size, key = { playlists[it].id }) { i ->
                     val playlist = playlists[i]
-                    androidx.compose.material3.SuggestionChip(
-                        onClick = { onPlaylistClick(playlist.id) },
-                        label = {
-                            Text(
-                                text = playlist.name,
-                                style = MaterialTheme.typography.labelMedium,
-                                maxLines = 1,
-                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                            )
-                        },
-                        icon = {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Filled.QueueMusic,
-                                contentDescription = null,
-                                modifier = Modifier.size(16.dp),
-                            )
-                        },
-                    )
+                    // The mockup's quick pills: a glass chip, the accent queue glyph, the name.
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(50))
+                            .npGlass(RoundedCornerShape(50))
+                            .clickable(onClick = { onPlaylistClick(playlist.id) })
+                            .padding(horizontal = 12.dp, vertical = 7.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(6.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.QueueMusic,
+                            contentDescription = null,
+                            tint = LocalAlbumChrome.current.accent,
+                            modifier = Modifier.size(14.dp),
+                        )
+                        Text(
+                            text = playlist.name,
+                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                            color = npInk().copy(alpha = 0.8f),
+                            maxLines = 1,
+                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                        )
+                    }
                 }
             }
         }

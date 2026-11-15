@@ -219,7 +219,9 @@ object PlayerSheetMath {
 
     const val MINI_CORNER_DP = 12f
     const val MINI_ART_CORNER_DP = 6f
-    const val HERO_ART_CORNER_DP = 20f
+
+    /** The hero art's corners — the square art's own (NowPlayingScreen's mockup 24). */
+    const val HERO_ART_CORNER_DP = 24f
     private const val MINI_DIP_FACTOR = 0.35f
     private const val MINI_DIP_MAX_DP = 14f
     private const val OVER_FULL_FACTOR = 0.5f

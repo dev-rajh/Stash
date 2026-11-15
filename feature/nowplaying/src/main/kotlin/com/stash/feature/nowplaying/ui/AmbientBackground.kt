@@ -59,8 +59,19 @@ import kotlin.math.sqrt
 /** --fs-base: AmbientBackground BaseDark. */
 private val BaseDark = Color(0xFF06060C)
 
-/** --fs-base on light: lavender paper. */
-private val BaseLight = Color(0xFFF4F1FA)
+/**
+ * The light ground: the mockup's warm cream, top to bottom (a vertical gradient replaces the
+ * web's flat lavender `--fs-base` paper). [BaseLight] stays for anything that wants the wash's
+ * top colour.
+ */
+private val LightWash = listOf(
+    Color(0xFFF4ECE6),
+    Color(0xFFEBDCD6),
+    Color(0xFFE8D3CB),
+    Color(0xFFDFCDCE),
+)
+
+private val BaseLight = LightWash.first()
 
 private const val ENTRANCE_MS = 300 // .fs-amb { animation: fs-fade 300ms var(--ease-standard) }
 
@@ -128,9 +139,36 @@ fun AmbientBackground(
         modifier = modifier
             .clipToBounds()
             .graphicsLayer { alpha = entrance.value }
-            .drawBehind { drawRect(base) },
+            .drawBehind {
+                when {
+                    amoledMode -> drawRect(base)
+                    // The mockup's warm cream wash, top to bottom.
+                    lightMode -> drawRect(Brush.verticalGradient(LightWash))
+                    else -> drawRect(base)
+                }
+            },
     ) {
         Box(modifier = Modifier.matchParentSize()) {
+            // The mockup's .ambient-glow: a top-centred radial of the album's dominant colour,
+            // light mode only (on dark the orbs already carry the colour). Read at draw time,
+            // like the orbs, so the crossfade redraws it without recomposing.
+            if (lightMode) {
+                Box(
+                    modifier = Modifier
+                        .matchParentSize()
+                        .drawBehind {
+                            drawRect(
+                                Brush.radialGradient(
+                                    0f to colors.dom.copy(alpha = 0.22f),
+                                    0.42f to colors.dom.copy(alpha = 0.12f),
+                                    1f to colors.dom.copy(alpha = 0f),
+                                    center = Offset(size.width / 2f, size.height * 0.28f),
+                                    radius = maxOf(size.width, size.height) * 0.75f,
+                                ),
+                            )
+                        },
+                )
+            }
             Orbs.forEachIndexed { i, orb ->
                 val angle = angles[i]
                 Box(

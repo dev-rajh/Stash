@@ -44,6 +44,9 @@ export default {
     if (request.method !== "GET" && request.method !== "POST") return json({ error: "method_not_allowed" }, 405);
     try {
       if (url.pathname === "/health" && request.method === "GET") return json({ ok: true, provider: "tidal" });
+      // REDIRECT_ORIGIN (the cutover shim): before the limiter and without touching D1.
+      const moved = redirectFor(url, env);
+      if (moved) return moved;
       if (env.REQUEST_RL) {
         const { success } = await env.REQUEST_RL.limit({ key: networkOf(request.headers.get("CF-Connecting-IP")) });
         if (!success) return json({ error: "rate_limited" }, 429, { "Retry-After": "60" });
@@ -51,6 +54,8 @@ export default {
       if (url.pathname === "/admin/device/start" && request.method === "POST") return startDeviceAuth(request, env);
       if (url.pathname === "/admin/device/poll" && request.method === "POST") return pollDeviceAuth(request, env);
       if (url.pathname === "/admin/seats/pkce" && request.method === "POST") return addPkceSeat(request, env);
+      if (url.pathname === "/admin/seats/import" && request.method === "POST") return importSeats(request, env);
+      if (url.pathname === "/admin/seats" && request.method === "GET") return listSeats(request, env);
       if (url.pathname === "/search" && request.method === "GET") {
         if (!authorized(request, env.ACCESS_TOKEN)) return unauthorized();
         if (env.TIDAL_RELAY_PAUSED === "1") return paused();
@@ -98,6 +103,159 @@ export default {
 
 function paused() {
   return json({ error: "tidal_relay_paused" }, 503, { "Retry-After": "600" });
+}
+
+// ---- The cutover shim (REDIRECT_ORIGIN) and the seat copy (/admin/seats, /admin/seats/import) ----
+//
+// The same build runs on the old and the new account. Whichever side does not hold the seats sets REDIRECT_ORIGIN to the
+// other's origin: its /search, /quota and /stream/* then answer 307 to the same path and query there, plus `via=old`.
+// 307 keeps the method (and body); the client keeps its headers. OkHttp drops only Authorization across hosts, so
+// X-Access-Token and the X-Stash-* install signature (over "<install>:td:<n>:<ts>", not the host) verify on the other
+// side. /health, /dash/* (links this side signed, up to an hour old) and /admin/* are still served here.
+
+/**
+ * REDIRECT_ORIGIN as a bare https origin, or null = unset or unusable. A loopback host (localhost, 127.0.0.1, [::1]),
+ * http or https, only with REDIRECT_ALLOW_LOCAL="1" (tests, wrangler dev): in production a typo must never send
+ * every phone to localhost.
+ */
+function redirectOrigin(env) {
+  const raw = typeof env.REDIRECT_ORIGIN === "string" ? env.REDIRECT_ORIGIN.trim() : "";
+  if (!raw) return null;
+  try {
+    const u = new URL(raw);
+    const loopback = u.hostname === "127.0.0.1" || u.hostname === "localhost" || u.hostname === "[::1]";
+    const bare = !u.username && !u.password && u.pathname === "/" && !u.search && !u.hash && !raw.includes("?") && !raw.includes("#");
+    const allowed = loopback ? env.REDIRECT_ALLOW_LOCAL === "1" && (u.protocol === "http:" || u.protocol === "https:") : u.protocol === "https:";
+    if (bare && allowed) return u.origin;
+  } catch { /* reported below */ }
+  // Serving locally beats redirecting every phone to a typo; the old seats are parked as 'reserve' anyway (cutover step 4).
+  if (!warnedBadRedirect) { warnedBadRedirect = true; console.error("REDIRECT_ORIGIN is not a bare https origin: ignored, serving locally"); }
+  return null;
+}
+let warnedBadRedirect = false;
+
+/**
+ * The 307 for a redirected route, or null to serve it here. The path and the query are kept byte for byte and
+ * `via=old` is appended (the other side counts that lane). A request that already carries `via` is never sent on again,
+ * and neither is one whose target is this very origin: two shims pointed at each other must not loop phones.
+ */
+function redirectFor(url, env) {
+  if (url.pathname !== "/search" && url.pathname !== "/quota" && !url.pathname.startsWith("/stream/")) return null;
+  const origin = redirectOrigin(env);
+  if (!origin || origin === url.origin || url.searchParams.has("via")) return null;
+  const location = `${origin}${url.pathname}${url.search ? `${url.search}&` : "?"}via=old`;
+  return json({ error: "moved" }, 307, { Location: location });
+}
+
+/** Every column of tidal_accounts (migrations 0001-0009), in schema order. The import copies all of them. */
+export const SEAT_COLUMNS = ["id", "access_token", "refresh_token", "token_expires_at", "state", "hour_key", "hour_n", "day_key", "day_n",
+  "last_used_at", "generation", "refresh_lock_until", "updated_at", "cooling_until", "dead_reason", "last_playback_at", "last_call_at", "strikes", "client"];
+const SEAT_TOKEN_COLUMNS = new Set(["access_token", "refresh_token"]);
+const SEAT_INT_COLUMNS = new Set(["token_expires_at", "hour_n", "day_n", "last_used_at", "generation", "refresh_lock_until", "updated_at",
+  "cooling_until", "last_playback_at", "last_call_at", "strikes"]);
+const MAX_IMPORT_BYTES = 2 * 1024 * 1024;
+const MAX_IMPORT_SEATS = 500;
+
+/** Why one imported seat is unusable ("seats[2].state"), or null. Names the field only, never its value. */
+function badSeat(seat, i) {
+  const at = (column) => `seats[${i}].${column}`;
+  if (!seat || typeof seat !== "object" || Array.isArray(seat)) return `seats[${i}]`;
+  for (const key of Object.keys(seat)) if (!SEAT_COLUMNS.includes(key)) return at(key);
+  for (const column of SEAT_COLUMNS) {
+    const v = seat[column];
+    if (column === "id") { if (typeof v !== "string" || !/^[A-Za-z0-9-]{1,64}$/.test(v)) return at(column); continue; }
+    if (SEAT_TOKEN_COLUMNS.has(column)) { if (typeof v !== "string" || v.length > 4096 || /\s/.test(v)) return at(column); continue; }
+    if (SEAT_INT_COLUMNS.has(column)) { if (!Number.isSafeInteger(v) || v < 0) return at(column); continue; }
+    if (column === "state") { if (!["live", "reserve", "dead"].includes(v)) return at(column); continue; }
+    if (column === "client") { if (!["device", "pkce"].includes(v)) return at(column); continue; }
+    if (column === "hour_key") { if (typeof v !== "string" || !/^(?:\d{4}-\d{2}-\d{2}T\d{2})?$/.test(v)) return at(column); continue; }
+    if (column === "day_key") { if (typeof v !== "string" || !/^(?:\d{4}-\d{2}-\d{2})?$/.test(v)) return at(column); continue; }
+    if (column === "dead_reason") { if (typeof v !== "string" || !/^[A-Za-z0-9_ .:-]{0,200}$/.test(v)) return at(column); continue; }
+  }
+  // A live seat (or a reserve one, which is promoted by hand) without its tokens fails at its first call: refused here,
+  // before a cutover leans on it. Only dead seats may have had their tokens wiped.
+  if (seat.state !== "dead") for (const column of SEAT_TOKEN_COLUMNS) if (!seat[column]) return at(column);
+  return null;
+}
+export { badSeat };
+
+/** The body as text, or null past `max` bytes: counted as it arrives, so a body without Content-Length is capped too. */
+async function cappedText(request, max) {
+  if (!request.body) return "";
+  const reader = request.body.getReader();
+  const chunks = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > max) { await reader.cancel().catch(() => {}); return null; }
+    chunks.push(value);
+  }
+  const all = new Uint8Array(size);
+  let at = 0;
+  for (const c of chunks) { all.set(c, at); at += c.byteLength; }
+  return new TextDecoder().decode(all);
+}
+
+/**
+ * POST /admin/seats/import (ADMIN_TOKEN): copies seats from the other account, every column as given (tokens, state,
+ * counters, last_call_at, generation), so caps and pacing carry on and nobody re-links an account. Body:
+ * {"seats":[{<every SEAT_COLUMNS key>}, ...]}. Every seat must name every column and nothing else, so a copy between
+ * two schemas fails loudly instead of resetting a counter. One atomic batch: all seats or none.
+ * Never older over newer: a seat already here is overwritten only by a copy whose `generation` (bumped by every
+ * refresh and re-link) is at least its own, so a re-run, or a copy in the wrong direction, cannot put stale tokens
+ * (or a stale state) over fresh ones; those seats are counted as skipped_older.
+ * Answers counts only. Token values are never logged or echoed, and an error names the field, never its value.
+ */
+async function importSeats(request, env) {
+  if (!authorized(request, env.ADMIN_TOKEN)) return unauthorized();
+  if (Number(request.headers.get("content-length") || 0) > MAX_IMPORT_BYTES) return json({ error: "bad_request", message: "body too large" }, 400);
+  const text = await cappedText(request, MAX_IMPORT_BYTES).catch(() => "");
+  if (text === null) return json({ error: "bad_request", message: "body too large" }, 400);
+  let body = null;
+  try { body = JSON.parse(text); } catch { /* reported below */ }
+  const seats = body && typeof body === "object" ? body.seats : null;
+  if (!Array.isArray(seats) || seats.length > MAX_IMPORT_SEATS || Object.keys(body).some((k) => k !== "seats")) {
+    return json({ error: "bad_request", message: `need {"seats":[...]} with at most ${MAX_IMPORT_SEATS} seats` }, 400);
+  }
+  for (let i = 0; i < seats.length; i++) {
+    const bad = badSeat(seats[i], i);
+    if (bad) return json({ error: "bad_request", message: `invalid ${bad}` }, 400);
+  }
+  const ids = seats.map((s) => s.id);
+  if (new Set(ids).size !== ids.length) return json({ error: "bad_request", message: "duplicate seat id" }, 400);
+  if (!seats.length) return json({ status: "ok", imported: 0, inserted: 0, updated: 0, skipped_older: 0 });
+  const { results: existing = [] } = await env.DB.prepare("SELECT id FROM tidal_accounts WHERE id IN (SELECT value FROM json_each(?1))")
+    .bind(JSON.stringify(ids)).all();
+  const updates = SEAT_COLUMNS.filter((c) => c !== "id").map((c) => `${c}=excluded.${c}`).join(",");
+  const sql = `INSERT INTO tidal_accounts(${SEAT_COLUMNS.join(",")}) VALUES(${SEAT_COLUMNS.map(() => "?").join(",")})
+    ON CONFLICT(id) DO UPDATE SET ${updates} WHERE excluded.generation>=tidal_accounts.generation RETURNING id`;
+  const results = await env.DB.batch(seats.map((s) => env.DB.prepare(sql).bind(...SEAT_COLUMNS.map((c) => s[c]))));
+  const written = results.reduce((n, r) => n + (Array.isArray(r?.results) ? r.results.length : 0), 0);
+  const inserted = seats.length - existing.length;
+  const counts = { imported: written, inserted, updated: written - inserted, skipped_older: seats.length - written };
+  console.log(`tidal_seats_import ${JSON.stringify(counts)}`);
+  return json({ status: "ok", ...counts });
+}
+
+/**
+ * GET /admin/seats (ADMIN_TOKEN): the pool without its tokens: every other column, plus has_access_token /
+ * has_refresh_token, and counts by state. The columns are named one by one (never SELECT *), so a token cannot leak
+ * through a new column either.
+ */
+async function listSeats(request, env) {
+  if (!authorized(request, env.ADMIN_TOKEN)) return unauthorized();
+  const columns = SEAT_COLUMNS.filter((c) => !SEAT_TOKEN_COLUMNS.has(c));
+  const { results = [] } = await env.DB.prepare(`SELECT ${columns.join(",")},access_token<>'' AS has_access_token,refresh_token<>'' AS has_refresh_token
+    FROM tidal_accounts ORDER BY id`).all();
+  const seats = results.map((row) => {
+    const seat = Object.fromEntries(columns.map((c) => [c, row[c]]));
+    return { ...seat, has_access_token: Boolean(row.has_access_token), has_refresh_token: Boolean(row.has_refresh_token) };
+  });
+  const counts = { live: 0, reserve: 0, dead: 0 };
+  for (const s of seats) counts[s.state] = (counts[s.state] || 0) + 1;
+  return json({ now: now(), counts, seats });
 }
 /**
  * 503 busy. Same body for every cause so clients need no change; only Retry-After differs:
@@ -401,15 +559,19 @@ async function streamUncached(trackId, request, env, aac = aacMode(new URL(reque
   const mse = mseMode(new URL(request.url));
   const seatKind = mse ? { client: "pkce" } : {};
   // Upstream budget: one playbackinfo call per seat taken. A second seat is only tried
-  // after a seat-level failure (failed refresh, Tidal 5xx), never for a
+  // after a seat-level failure (failed refresh, Tidal 5xx, a preview), never for a
   // track-level answer: with this client ID CD-only tracks always come back HIGH (AAC),
   // and a 4005 is a track/rights refusal, so asking another seat just burns budget.
   // TIDAL_V2_MANIFESTS=1 (lossless modes only): v2 trackManifests first, v1 HI_RES_LOSSLESS (then the AAC handling
   // below) as the fallback on the same seat. `budget` counts real upstream calls (tidalFetch's refresh retry
-  // included) and holds a stream to 2 on this path; with the flag off it is never consulted.
+  // included) and holds a stream to 2 on this path, except that a seat answering with a preview hands the next
+  // seat 2 of its own (the isPreviewAnswer branch); with the flag off it is never consulted.
   const useV2 = (v2Manifests(env) || mse) && !aacOnly;
-  const budget = { calls: 0 };
-  for (let attempt = 0; attempt < 2; attempt++) {
+  let budget = { calls: 0 };
+  // The seat that answered with a preview (isPreviewAnswer), once one has: with no seat left to ask, busy, never the
+  // preview; a second, different seat's preview is the track's (see the isPreviewAnswer branch).
+  let previewedBy = null;
+  for (let attempt = 0; attempt < STREAM_SEATS; attempt++) {
     if (useV2 && budget.calls >= 2) break;
     const account = await takeAccount(env, seatKind);
     if (!account) return noSeat(env, seatKind.client);
@@ -450,6 +612,41 @@ async function streamUncached(trackId, request, env, aac = aacMode(new URL(reque
       continue;
     }
     const info = await data.json();
+    // v1 asks for assetpresentation=FULL, but a seat Tidal lets play only a preview still answers, with the 30 s
+    // PREVIEW's manifest, and it used to be served as the track (td:575545 "Linger", 2026-11-13: it played and was
+    // saved as 0:30 under the song's 4:35 header). This seat's answer, not the track's: another seat played the same
+    // album whole minutes later. So it is cooled like a 5xx and the next seat asked; with none left, busy (never
+    // cached) and the app asks again later. v2 refuses its own previews (v2Stream).
+    if (isPreviewAnswer(info)) {
+      if (previewedBy !== null && String(previewedBy) !== String(account.id)) {
+        // A second, different seat with only the preview of this track: the track's preview (Tidal plays 30 s of it to
+        // anyone), not a second lapsed seat. Resting seats for it would let one phone re-asking the song rest the whole
+        // pool, 2 seats a time, so this seat does not rest, and the answer is the track's short miss: not_available,
+        // cached 6 h here (NOT_AVAILABLE_TTL) and kept 6 h by the app (its non-definitive miss), which falls back once.
+        // Not lossless_unavailable: the app keeps that one 14 days, as a definitive answer about the song.
+        console.warn(`tidal_preview_track ${JSON.stringify({ track: String(trackId), accounts: [String(previewedBy).slice(-4), String(account.id).slice(-4)] })}`);
+        trace.reason = "preview_track";
+        return json({ error: "not_available" }, 404);
+      }
+      console.warn(`tidal_preview ${JSON.stringify({ account: String(account.id).slice(-4), track: String(trackId) })}`);
+      await coolAccount(env, account.id, 300); // the seat's own rest; takeAccount skips it for the rest of this request
+      previewedBy = account.id;
+      if (attempt + 1 < STREAM_SEATS) {
+        // The next seat is a second ask for a seat, so it is paid from this network's fair share like one (the app
+        // re-asks within seconds now, so an unpaid second seat would double what a network can take): over it, the
+        // limiter's own short busy.
+        if (!await upstreamAllowed(request, env)) return busy(UPSTREAM_RL_RETRY_AFTER);
+        if (useV2) {
+          // The preview spent this request's two calls (v2, then v1) on a seat that cannot play the track, and the
+          // listener used to get busy Retry-After 300: five minutes of Opus (the app's busy pause is device-wide).
+          // The next seat gets its own two, as the first had (v2 first: v1 alone caps CD tracks at AAC), so a stream
+          // is still at most 2 seats x 2 calls, the ceiling the v1 path always had.
+          budget = { calls: 0 };
+          trace.reason = "preview"; // the log line's reason until the next seat's v2 lane writes its own
+        }
+      }
+      continue;
+    }
     if (aacOnly) return aacInfo(info, skipsHires(new URL(request.url), aac) ? undefined : await trackHires(trackId, env, request));
     if (!["LOSSLESS", "HI_RES_LOSSLESS"].includes(info.audioQuality)) {
       // The normal answer for a CD-only track with this client, not a seat problem.
@@ -460,7 +657,24 @@ async function streamUncached(trackId, request, env, aac = aacMode(new URL(reque
     if (web) return await edgeInfo(trackId, info, env, web);
     return await streamInfo(trackId, request, env, info, allowAac);
   }
-  return json({ error: "upstream_unavailable" }, 503);
+  // A preview is one seat's answer, not the pool's: the short pacing wait while any other seat is free or only
+  // waiting out its gap, so the app asks again in 15 s. Every seat resting or capped is the pool's own five minutes,
+  // as when no seat could be taken at all.
+  if (previewedBy !== null) return noSeat(env, seatKind.client);
+  // Both seats failed at seat level (Tidal 5xx, failed refresh) and rest; another seat may answer shortly. Without a
+  // Retry-After the app paused Tidal for the whole phone for its five-minute default.
+  return json({ error: "upstream_unavailable" }, 503, { "Retry-After": String(PACING_RETRY_AFTER) });
+}
+
+/** Seats one /stream may take: a second only after a seat-level failure (failed refresh, Tidal 5xx, a preview). */
+const STREAM_SEATS = 2;
+
+/**
+ * True when a v1 playbackinfo answer is a preview, not the track: its assetPresentation is anything but FULL, or it
+ * gives a previewReason (the same test v2Stream makes of trackPresentation). An answer that says neither is FULL.
+ */
+function isPreviewAnswer(info) {
+  return Boolean((info?.assetPresentation && String(info.assetPresentation).toUpperCase() !== "FULL") || info?.previewReason);
 }
 
 /** TIDAL_V2_MANIFESTS: "1" = on; unset, "0" or anything else = off (v1 only, as before). */
@@ -481,6 +695,8 @@ const V2_DEFINITIVE = new Set(["no_flac", "drm", "preview", "not_found", "not_fl
  * fallback = why v1 should answer instead. Never throws.
  */
 async function v2Stream(trackId, request, env, seat, account, allowAac, budget, trace) {
+  // The trace is this seat's: after a preview on an earlier seat, none of that seat's fields may describe this one.
+  for (const field of ["reason", "formats", "bits", "rate", "transient"]) delete trace[field];
   trace.path = "v2";
   const fallback = (reason) => {
     trace.path = "v1";
@@ -502,7 +718,9 @@ async function v2Stream(trackId, request, env, seat, account, allowAac, budget, 
       return { response: busy() };
     }
     if (r.status === 503 && (await r.clone().json().catch(() => ({}))).error === "refresh_failed") {
-      trace.path = "v1"; trace.reason = "refresh_failed";
+      // Transient like any seat failure: the next seat answers on v1 alone, and its lossless_unavailable (v1 caps CD
+      // tracks at AAC) must be cached 6 h, not the 5 days that hid a track v2 could play.
+      trace.path = "v1"; trace.reason = "refresh_failed"; trace.transient = true;
       return { seatFailed: true };
     }
     if (r.status === 401) { // survived tidalFetch's refresh + retry: the same strike v1 gives

@@ -24,8 +24,8 @@ import kotlin.math.sin
 /** Base dark fill used as the canvas background. */
 private val ClassicBaseDark = Color(0xFF06060C)
 
-/** Light-theme base: lavender paper matching the app's light ground. */
-private val ClassicBaseLight = Color(0xFFF4F1FA)
+/** Light-theme base: the warm cream wash's top colour, matching [AmbientBackground]'s light ground. */
+private val ClassicBaseLight = Color(0xFFF4ECE6)
 
 /**
  * The "Classic" ambient style (Settings > Appearance > Ambient style): the app's
@@ -38,10 +38,10 @@ private val ClassicBaseLight = Color(0xFFF4F1FA)
  * gradients on the theme's canvas. The gradients orbit in circles at
  * different periods (12 s, 16 s, 20 s) creating a subtle, living backdrop
  * that reacts to album-art colors. In [lightMode] the same orbs render as a
- * pastel wash over lavender paper — each palette color is blended a step
+ * pastel wash over the warm cream ground — each palette color is blended a step
  * toward white and drawn at lower alpha so the ground stays airy.
  *
- * @param lightMode     Pastel wash on lavender paper instead of the dark canvas.
+ * @param lightMode     Pastel wash on the warm cream ground instead of the dark canvas.
  * @param amoledMode    Pure #000000 canvas, no orbs — and no animation
  *   infrastructure at all: the point of AMOLED is pixels (and the GPU)
  *   doing nothing. Wins over [lightMode].

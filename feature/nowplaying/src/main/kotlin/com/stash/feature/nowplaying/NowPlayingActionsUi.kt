@@ -35,6 +35,7 @@ import androidx.compose.material.icons.filled.DownloadDone
 import androidx.compose.material.icons.filled.Flag
 import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.HighQuality
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Lyrics
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Bedtime
@@ -78,6 +79,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.stash.core.data.prefs.NowPlayingAction
 import com.stash.core.media.listen.ListenTogetherState
 import com.stash.core.ui.components.SheetOptionRow
@@ -239,7 +241,8 @@ internal fun NowPlayingTopBar(
     dismissModifier: Modifier = Modifier,
     fullArt: Boolean? = null,
     onToggleFullArt: () -> Unit = {},
-    /** Fork: the playing album's name, centred in the bar's free middle. Null hides it. */
+    /** The playing context's name ("Band Baaja Baaraat", "Liked Songs"), centred under the
+     *  "Playing from" eyebrow in the bar's free middle. Null hides the block. */
     headerTitle: String? = null,
 ) {
     val slot = fit.slotDp.dp
@@ -248,20 +251,43 @@ internal fun NowPlayingTopBar(
         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        // Fork: no dismiss arrow — the sheet closes by swipe, Back, or the mini
-        // player's tap. (onDismiss stays wired for the TalkBack path.)
-        // The album's name rides the bar's free middle (the pins and ⋮ keep their
-        // slots); it shrinks with the row and scrolls when a long name can't fit.
+        // The collapse chevron leads the row again (the mockup's). The sheet still closes by
+        // swipe, Back, or the mini player's tap; the chevron is the visible tap target (and in
+        // lyrics mode it points back to the art, like the cover does).
+        TopBarIcon(
+            Icons.Default.KeyboardArrowDown,
+            dismissDescription,
+            ink.copy(alpha = 0.7f),
+            slot,
+            iconSize = 26.dp,
+            modifier = dismissModifier,
+            onClick = onDismiss,
+        )
+
+        // The playing context rides the bar's free middle (the pins and ⋮ keep their slots):
+        // the mockup's "Playing from" eyebrow over the source's name, scrolling when a long
+        // name can't fit.
         if (headerTitle != null) {
-            Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+            Column(
+                modifier = Modifier.weight(1f).padding(horizontal = 4.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Text(
+                    text = stringResource(R.string.np_playing_from).uppercase(),
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        letterSpacing = 1.2.sp,
+                    ),
+                    color = ink.copy(alpha = 0.5f),
+                    maxLines = 1,
+                )
                 Text(
                     text = headerTitle,
-                    style = MaterialTheme.typography.labelMedium,
-                    color = ink.copy(alpha = 0.7f),
+                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                    color = ink.copy(alpha = 0.9f),
                     maxLines = 1,
-                    modifier = Modifier
-                        .padding(horizontal = 4.dp)
-                        .marqueeWhileShown(),
+                    modifier = Modifier.marqueeWhileShown(),
                 )
             }
         } else {

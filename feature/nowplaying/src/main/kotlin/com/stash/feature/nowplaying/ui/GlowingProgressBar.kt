@@ -55,17 +55,17 @@ import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Locale
 import kotlin.math.roundToInt
 
-/** Height of the track bar in dp. */
-private val TrackHeight = 4.dp
+/** Height of the track bar in dp (the mockup's 5px scrubber). */
+private val TrackHeight = 5.dp
 
 /** Additional touch target padding above/below the bar. */
 private val TouchPadding = 12.dp
 
-/** Radius of the outer thumb circle (visible during drag). */
-private const val THUMB_OUTER_RADIUS = 8f
-
-/** Radius of the inner thumb circle (accent fill). */
-private const val THUMB_INNER_RADIUS = 5f
+/** Thumb radii: the accent ring, and the white dot inside it — idle, then while dragging. */
+private const val THUMB_RING_RADIUS = 6.5f
+private const val THUMB_DOT_RADIUS = 4.5f
+private const val THUMB_RING_RADIUS_DRAG = 8f
+private const val THUMB_DOT_RADIUS_DRAG = 5.5f
 
 /** Radius of the glow circle at the playhead. */
 private const val GLOW_RADIUS = 14f
@@ -132,12 +132,12 @@ fun GlowingProgressBar(
         pendingSeek = null
     }
 
-    // Ink follows the resolved theme (white on the dark ambient, plum-black
-    // on the light pastel wash) — captured here for use inside the Canvas.
+    // Ink follows the resolved theme (white on the dark ambient, stone on the
+    // light cream wash) — captured here for use inside the Canvas.
     val ink = if (MaterialTheme.colorScheme.background.luminance() < 0.5f) {
         Color.White
     } else {
-        Color(0xFF241C36)
+        NpInkLight
     }
 
     // Smoothly animate progress when not dragging to avoid jitter. A just-released seek holds
@@ -250,21 +250,18 @@ fun GlowingProgressBar(
                 center = Offset(playheadX, barY),
             )
 
-            // --- Thumb (only visible while dragging) ---
-            if (isDragging) {
-                // Outer ink ring (white on dark, plum-black on light).
-                drawCircle(
-                    color = ink,
-                    radius = THUMB_OUTER_RADIUS,
-                    center = Offset(playheadX, barY),
-                )
-                // Inner accent fill.
-                drawCircle(
-                    color = accent,
-                    radius = THUMB_INNER_RADIUS,
-                    center = Offset(playheadX, barY),
-                )
-            }
+            // --- Thumb: always visible (the mockup's white dot in an accent ring), swelling a
+            // step while the user drags. ---
+            drawCircle(
+                color = accent,
+                radius = if (isDragging) THUMB_RING_RADIUS_DRAG else THUMB_RING_RADIUS,
+                center = Offset(playheadX, barY),
+            )
+            drawCircle(
+                color = Color.White,
+                radius = if (isDragging) THUMB_DOT_RADIUS_DRAG else THUMB_DOT_RADIUS,
+                center = Offset(playheadX, barY),
+            )
         }
 
         // --- Scrub bubble (only while dragging): the target time above the thumb, clear of the
